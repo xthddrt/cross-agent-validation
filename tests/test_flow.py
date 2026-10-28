@@ -119,6 +119,33 @@ class LoopTest(unittest.TestCase):
         self.assertIsNone(sha)
         self.assertIn("conflict markers", problem)
 
+    def test_snapshot_excludes_and_leaves_repo_alone(self):
+        secondary = self.tmp / "secondary"
+        secondary.mkdir()
+        git("init", "-q", cwd=secondary)
+        git("config", "user.email", "t@example.com", cwd=secondary)
+        git("config", "user.name", "t", cwd=secondary)
+        (secondary / "base.txt").write_text("base\n", encoding="utf-8")
+        git("add", "-A", cwd=secondary)
+        git("commit", "-q", "-m", "base", cwd=secondary)
+        before = git("rev-parse", "HEAD", cwd=secondary)
+        (secondary / "changed.txt").write_text("work\n", encoding="utf-8")
+        (secondary / "reconciliation").mkdir()
+        (secondary / "reconciliation" / "note.md").write_text("meta\n", encoding="utf-8")
+
+        spec = config.AgentSpec("kimi", "kimi", bootstrap_exclude=["reconciliation"])
+        orchestrator = Orchestrator(self.case(), self.tmp / "snap")
+        sha, problem = orchestrator.snapshot(Repo(secondary), spec)
+
+        self.assertIsNone(problem)
+        files = git("ls-tree", "-r", "--name-only", sha, cwd=secondary).splitlines()
+        self.assertIn("changed.txt", files)
+        self.assertNotIn("reconciliation/note.md", files)
+        self.assertEqual(git("rev-parse", "HEAD", cwd=secondary), before)
+        status = git("status", "--porcelain", cwd=secondary)
+        self.assertIn("changed.txt", status)
+        self.assertIn("reconciliation/", status)
+
 
 class ConfigTest(unittest.TestCase):
     def test_shipped_case_loads(self):
