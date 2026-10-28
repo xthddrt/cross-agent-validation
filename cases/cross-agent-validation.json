@@ -1,0 +1,29 @@
+{
+  "name": "cav-self",
+  "description": "Reconcile two independent implementations of the cross-agent validation tool itself.",
+  "repo": {
+    "host": "C:\\Users\\CrestEndo\\OneDrive\\Documents\\cross-agent-validation",
+    "secondary": "C:\\Users\\CrestEndo\\OneDrive\\Desktop\\Kimi\\cross-agent-validation",
+    "branch": "main"
+  },
+  "agents": {
+    "deepseek": {
+      "kind": "opencode",
+      "model": "deepseek/deepseek-flash#high",
+      "bootstrap_ref": "HEAD"
+    },
+    "kimi": {
+      "kind": "kimi",
+      "model": "kimi-code/k3.1-pro",
+      "thinking": "high"
+    }
+  },
+  "checks": [
+    "{python} -m unittest discover -s tests -t ."
+  ],
+  "max_rounds": 3,
+  "round_seconds": 5400,
+  "stall_seconds": 1200,
+  "poll_seconds": 15,
+  "retries": 1
+}

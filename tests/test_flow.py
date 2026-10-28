@@ -10,7 +10,7 @@ from unittest import mock
 from cav import agents as agent_mod
 from cav import config
 from cav.agents import RunState
-from cav.gitops import Repo, git
+from cav.gitops import Repo, git, git_ok
 from cav.orchestrator import Orchestrator, parse_must_fix
 
 REVIEW_RE = re.compile(r"review to this exact path: (.+)")
@@ -106,6 +106,44 @@ class LoopTest(unittest.TestCase):
         self.assertTrue((orchestrator.run_dir / "REPORT.md").exists())
         self.assertTrue((orchestrator.run_dir / "state.json").exists())
 
+    def test_snapshot_works_without_commits(self):
+        fresh = self.tmp / "no-commits"
+        fresh.mkdir()
+        git("init", "-q", cwd=fresh)
+        git("config", "user.email", "t@example.com", cwd=fresh)
+        git("config", "user.name", "t", cwd=fresh)
+        (fresh / "a.txt").write_text("first\n", encoding="utf-8")
+
+        spec = config.AgentSpec("kimi", "kimi")
+        orchestrator = Orchestrator(self.case(), self.tmp / "snap2")
+        sha, problem = orchestrator.snapshot(Repo(fresh), spec)
+
+        self.assertIsNone(problem)
+        self.assertIn("a.txt", git("ls-tree", "-r", "--name-only", sha, cwd=fresh).splitlines())
+        self.assertFalse(git_ok("rev-parse", "--verify", "--quiet", "HEAD", cwd=fresh),
+                         "snapshot must not create a HEAD in the source repo")
+
+    def test_merge_unrelated_histories(self):
+        other = self.tmp / "other"
+        other.mkdir()
+        git("init", "-q", cwd=other)
+        git("config", "user.email", "t@example.com", cwd=other)
+        git("config", "user.name", "t", cwd=other)
+        (other / "b.txt").write_text("other\n", encoding="utf-8")
+        git("add", "-A", cwd=other)
+        git("commit", "-q", "-m", "other", cwd=other)
+
+        git("remote", "add", "other", str(other), cwd=self.repo)
+        git("fetch", "other", cwd=self.repo)
+        branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=other)
+        worktree = self.tmp / "unrelated-wt"
+        git("worktree", "add", "--detach", str(worktree), "HEAD", cwd=self.repo)
+
+        ok, conflicts, message = Repo(self.repo).merge(worktree, f"other/{branch}")
+        self.assertTrue(ok, message)
+        self.assertTrue((worktree / "base.txt").exists())
+        self.assertTrue((worktree / "b.txt").exists())
+
     def test_review_parsing(self):
         path = self.tmp / "review.md"
         path.write_text("MUST_FIX: 3\nMUST_FIX: 0\n", encoding="utf-8")
@@ -161,6 +199,14 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(case.agents["deepseek"].model, "deepseek/deepseek-flash#high")
         self.assertEqual(case.agents["kimi"].model, "kimi-code/k3.1-pro")
         self.assertEqual(case.agents["kimi"].thinking, "high")
+
+
+    def test_tool_case_has_no_shared_base(self):
+        case = config.load(pathlib.Path(__file__).resolve().parents[1]
+                           / "cases" / "cross-agent-validation.json")
+        self.assertIsNone(case.base)
+        self.assertEqual(case.agents["deepseek"].bootstrap_ref, "HEAD")
+        self.assertEqual(case.secondary_repo.name, "cross-agent-validation")
 
 
 class ModelPinningTest(unittest.TestCase):

@@ -39,6 +39,13 @@ python -m cav status  --run runs\msmon-five-phase-20261028-165500
 python -m cav run     --case cases\msmon-five-phase.json --run-dir runs\retry --push
 ```
 
+Two cases ship:
+
+| Case | What it reconciles |
+|---|---|
+| `msmon-five-phase` | the two five-phase logging/coverage implementations of `msc-outside-monitor` |
+| `cross-agent-validation` | two independent implementations of this tool itself (unrelated histories, no shared base) |
+
 `smoke` asks each agent for `CAV_OK`; run it first — it proves the adapters and authentication work before spending real time.
 
 `--push` publishes the agreed commit to `origin/<branch>` after convergence, and refuses unless it is a fast-forward.
@@ -92,6 +99,7 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 ```
 
 - `bootstrap_ref` — an existing commit to publish as that agent's r0.
+- `base` — omit it when the two implementations have unrelated histories (the self case). Merges then run with `--allow-unrelated-histories` and the prompt says there is no shared base.
 - `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model (observed: `opencode/flint-40b-free`). The suffix `#high` is the reasoning variant.
 - `thinking` — Kimi's thinking level (`low`, `high`, `max`). Kimi's status is checked after each run and a mismatch fails the round.
 - No `bootstrap_ref` — snapshot that agent's dirty working tree from `secondary` into r0 (the working tree, branch and index are left untouched).

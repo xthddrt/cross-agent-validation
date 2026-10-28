@@ -8,6 +8,11 @@ def round_prompt(agent, other, round_no, case, worktree, review_path, other_revi
     else:
         merge_status = "merged cleanly, no conflicts"
     check_list = "\n".join(f"  - {c}" for c in checks) or "  (none configured)"
+    if case.base:
+        basis = f"Review BOTH implementations against the base commit {case.base}."
+    else:
+        basis = ("Review BOTH implementations as independent attempts at the same requirement. "
+                 "There is no shared base commit.")
     return f"""You are {agent}, one of two independent agents reconciling two implementations of the same work.
 
 Repository: {case.host_repo}
@@ -16,7 +21,7 @@ Round {round_no} of at most {case.max_rounds}.
 Your working tree: {worktree}
 It is checked out at your previous candidate and already merged with the other candidate.
 Merge status: {merge_status}
-Base commit: {case.base}
+Base commit: {case.base or 'none - the two implementations are independent'}
 
 Candidates under review:
 - yours:  {own_ref} = {own_sha}
@@ -24,8 +29,7 @@ Candidates under review:
 
 Do this, in order:
 
-1. Review BOTH implementations against the base. Read the code, not only the diff. Compare behaviour,
-   not style. Findings need a file and line.
+1. {basis} Read the code, not only the diff. Compare behaviour, not style. Findings need a file and line.
 2. Keep the stronger parts of each side. Edit the files in your working tree so the result is the best
    of both. If one side is simply better for an area, say so and keep it.
 3. Explain, area by area, what you kept from each side and why.

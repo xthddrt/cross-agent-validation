@@ -19,7 +19,7 @@ class AgentSpec:
 class Case:
     name: str
     host_repo: pathlib.Path
-    base: str
+    base: str | None
     agents: dict[str, AgentSpec]
     checks: list[str] = field(default_factory=list)
     secondary_repo: pathlib.Path | None = None
@@ -66,7 +66,7 @@ def load(path):
         name=raw["name"],
         host_repo=resolve(raw["repo"]["host"]),
         secondary_repo=resolve(raw["repo"].get("secondary")),
-        base=raw["repo"]["base"],
+        base=raw["repo"].get("base"),
         branch=raw["repo"].get("branch", "main"),
         description=raw.get("description", ""),
         agents=agents,

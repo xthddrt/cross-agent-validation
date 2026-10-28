@@ -71,7 +71,8 @@ class Orchestrator:
     def bootstrap(self):
         self.state["phase"] = "bootstrap"
         self.save()
-        if not git_ok("rev-parse", "--verify", "--quiet", self.case.base, cwd=self.repo.path):
+        if self.case.base and not git_ok("rev-parse", "--verify", "--quiet", self.case.base,
+                                         cwd=self.repo.path):
             raise RuntimeError(f"base commit {self.case.base} not found in {self.repo.path}")
 
         for name, spec in self.case.agents.items():
@@ -95,19 +96,30 @@ class Orchestrator:
         self.repo.fetch()
 
     def snapshot(self, repo, spec):
-        """Commit a dirty working tree without touching its index, branch or checkout."""
+        """Commit a dirty working tree without touching its index, branch or checkout.
+
+        Works on a repo with no commits yet: the snapshot becomes a root commit.
+        """
         excludes = [f":(exclude){pattern}" for pattern in spec.bootstrap_exclude]
         index = self.run_dir / f"snapshot-{spec.name}.index"
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(index)
+        has_head = git_ok("rev-parse", "--verify", "--quiet", "HEAD", cwd=repo.path)
         try:
-            git("read-tree", "HEAD", cwd=repo.path, env=env)
+            if has_head:
+                git("read-tree", "HEAD", cwd=repo.path, env=env)
+            else:
+                git("read-tree", "--empty", cwd=repo.path, env=env)
             git("add", "-A", "--", ".", *excludes, cwd=repo.path, env=env)
-            staged = git("diff", "--cached", "--name-only", "HEAD", cwd=repo.path, env=env)
+            if has_head:
+                staged = git("diff", "--cached", "--name-only", "HEAD", cwd=repo.path, env=env)
+            else:
+                staged = git("ls-files", "--cached", cwd=repo.path, env=env)
             if not staged:
                 return None, "the working tree has no changes to snapshot"
             tree = git("write-tree", cwd=repo.path, env=env)
-            sha = git("commit-tree", tree, "-p", "HEAD", "-m",
+            parents = ["-p", "HEAD"] if has_head else []
+            sha = git("commit-tree", tree, *parents, "-m",
                       f"Snapshot {spec.name} candidate r0", cwd=repo.path)
             self.log(f"{spec.name}: snapshotted {len(staged.splitlines())} files: "
                      f"{', '.join(staged.splitlines()[:6])}{' ...' if len(staged.splitlines()) > 6 else ''}")
@@ -133,6 +145,7 @@ class Orchestrator:
     def round(self, round_no):
         case = self.case
         previous = round_no - 1
+        primary = next(iter(case.agents))
         own_refs = {name: f"candidate/{name}/r{previous}" for name in case.agents}
         for name, branch in own_refs.items():
             if not self.exchange.sha(branch):
@@ -148,9 +161,11 @@ class Orchestrator:
             other = case.other(name)
             path = self.run_dir / "wt" / f"r{round_no}" / name
             self.repo.worktree_add(path, self.repo.ref(own_refs[name]))
-            merged, conflicts = self.repo.merge(path, self.repo.ref(own_refs[other]))
+            merged, conflicts, message = self.repo.merge(path, self.repo.ref(own_refs[other]))
             worktrees[name] = {"path": path, "merged": merged, "conflicts": conflicts}
             note = "clean" if merged else f"{len(conflicts)} conflicts"
+            if not merged and not conflicts:
+                note = f"merge failed: {message}"
             self.log(f"r{round_no} {name}: worktree {self.rel(path)} merged {other} ({note})")
 
         reviews = {name: self.run_dir / "reviews" / f"r{round_no}" / f"{name}-review.md"
@@ -196,7 +211,7 @@ class Orchestrator:
             sha, problem = self.repo.commit_all(
                 path,
                 f"Reconcile round {round_no}: {name} recommendation\n\n"
-                f"Inputs: {own_refs['deepseek']} + {own_refs['kimi']}\n"
+                f"Inputs: {own_refs[primary]} + {own_refs[case.other(primary)]}\n"
                 f"Base: {case.base}")
             if problem:
                 failed.append(f"{name}: {problem}")
@@ -221,7 +236,7 @@ class Orchestrator:
 
         checks = self.run_checks(round_no, results, worktrees)
 
-        trees_equal = results["deepseek"]["tree"] == results["kimi"]["tree"]
+        trees_equal = results[primary]["tree"] == results[case.other(primary)]["tree"]
         reviews_clean = all(results[name]["must_fix"] == 0 for name in case.agents)
         checks_ok = all(item["ok"] for item in checks.values())
         converged = trees_equal and reviews_clean and checks_ok
@@ -422,8 +437,9 @@ class Orchestrator:
         case = self.case
         history = next(item for item in self.state["history"] if item["round"] == round_no)
         results = history["results"]
-        commit = results["deepseek"]["commit"]
-        tree = results["deepseek"]["tree"]
+        primary = next(iter(case.agents))
+        commit = results[primary]["commit"]
+        tree = results[primary]["tree"]
 
         for name in case.agents:
             signoff = {
@@ -468,14 +484,15 @@ class Orchestrator:
         case = self.case
         history = next(item for item in self.state["history"] if item["round"] == round_no)
         results = history["results"]
+        primary = next(iter(case.agents))
         lines = [
             f"# Reconciliation report: {case.name}",
             "",
             f"- Run: `{self.run_dir.name}`",
-            f"- Base: `{case.base}`",
+            f"- Base: `{case.base or 'none (independent implementations)'}`",
             f"- Converged in round {round_no} of at most {case.max_rounds}",
-            f"- Final commit: `{results['deepseek']['commit']}`",
-            f"- Final tree: `{results['deepseek']['tree']}`",
+            f"- Final commit: `{results[primary]['commit']}`",
+            f"- Final tree: `{results[primary]['tree']}`",
             f"- Pushed to origin: {'yes' if self.push else 'no'}",
             "",
             "## Rounds",
@@ -503,7 +520,7 @@ class Orchestrator:
                 lines.append(f"- `{command['command']}` exit {command['exit']} in {command['seconds']}s")
             lines.append("")
 
-        conflicts = results["deepseek"].get("conflicts") or []
+        conflicts = results[primary].get("conflicts") or []
         lines += ["## Merge conflicts", "",
                   "- none" if not conflicts else "\n".join(f"- `{c}`" for c in conflicts), ""]
         lines += ["## Signoff", "",

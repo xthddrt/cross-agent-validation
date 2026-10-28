@@ -100,10 +100,11 @@ class Repo:
         git("worktree", "prune", cwd=self.path, check=False)
 
     def merge(self, worktree, rev):
-        result = subprocess.run([GIT, "merge", "--no-ff", "--no-edit", rev],
+        result = subprocess.run([GIT, "merge", "--no-ff", "--no-edit", "--allow-unrelated-histories", rev],
                                 cwd=str(worktree), capture_output=True, text=True)
         conflicts = git("diff", "--name-only", "--diff-filter=U", cwd=worktree, check=False)
-        return result.returncode == 0, [c for c in conflicts.splitlines() if c]
+        message = (result.stdout + result.stderr).strip().splitlines()
+        return result.returncode == 0, [c for c in conflicts.splitlines() if c], (message[-1] if message else "")
 
     def unmerged(self, worktree):
         out = git("diff", "--name-only", "--diff-filter=U", cwd=worktree, check=False)
