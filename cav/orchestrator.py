@@ -162,10 +162,11 @@ class Orchestrator:
             path = self.run_dir / "wt" / f"r{round_no}" / name
             self.repo.worktree_add(path, self.repo.ref(own_refs[name]))
             merged, conflicts, message = self.repo.merge(path, self.repo.ref(own_refs[other]))
+            if not merged and not conflicts:
+                raise RuntimeError(f"r{round_no} {name}: cannot merge {own_refs[other]} "
+                                   f"into {own_refs[name]}: {message}")
             worktrees[name] = {"path": path, "merged": merged, "conflicts": conflicts}
             note = "clean" if merged else f"{len(conflicts)} conflicts"
-            if not merged and not conflicts:
-                note = f"merge failed: {message}"
             self.log(f"r{round_no} {name}: worktree {self.rel(path)} merged {other} ({note})")
 
         reviews = {name: self.run_dir / "reviews" / f"r{round_no}" / f"{name}-review.md"

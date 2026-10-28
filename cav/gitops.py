@@ -102,7 +102,8 @@ class Repo:
         git("worktree", "prune", cwd=self.path, check=False)
 
     def merge(self, worktree, rev):
-        result = subprocess.run([GIT, "merge", "--no-ff", "--no-edit", "--allow-unrelated-histories", rev],
+        result = subprocess.run([GIT, *IDENTITY, "merge", "--no-ff", "--no-edit",
+                                 "--allow-unrelated-histories", rev],
                                 cwd=str(worktree), capture_output=True, text=True)
         conflicts = git("diff", "--name-only", "--diff-filter=U", cwd=worktree, check=False)
         message = (result.stdout + result.stderr).strip().splitlines()

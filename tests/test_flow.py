@@ -163,6 +163,33 @@ class LoopTest(unittest.TestCase):
         self.assertTrue((worktree / "base.txt").exists())
         self.assertTrue((worktree / "b.txt").exists())
 
+    def test_merge_works_without_git_identity(self):
+        git("switch", "-c", "feature", cwd=self.repo)
+        (self.repo / "feature.txt").write_text("f\n", encoding="utf-8")
+        git("add", "-A", cwd=self.repo)
+        git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-q", "-m", "feature",
+            cwd=self.repo)
+        git("switch", "-", cwd=self.repo)
+        for key in ("user.name", "user.email"):
+            git("config", "--local", "--unset", key, cwd=self.repo, check=False)
+
+        worktree = self.tmp / "identity-wt"
+        git("worktree", "add", "--detach", str(worktree), "HEAD", cwd=self.repo)
+        blocked = {"GIT_CONFIG_GLOBAL": str(self.tmp / "no-global.cfg"),
+                   "GIT_CONFIG_SYSTEM": str(self.tmp / "no-system.cfg")}
+        with mock.patch.dict(os.environ, blocked):
+            ok, conflicts, message = Repo(self.repo).merge(worktree, "feature")
+        self.assertTrue(ok, message)
+        self.assertTrue((worktree / "feature.txt").exists())
+
+    def test_merge_reports_failure_without_conflicts(self):
+        worktree = self.tmp / "bad-merge-wt"
+        git("worktree", "add", "--detach", str(worktree), "HEAD", cwd=self.repo)
+        ok, conflicts, message = Repo(self.repo).merge(worktree, "no-such-ref")
+        self.assertFalse(ok)
+        self.assertEqual(conflicts, [])
+        self.assertIn("not something we can merge", message)
+
     def test_review_parsing(self):
         path = self.tmp / "review.md"
         path.write_text("MUST_FIX: 3\nMUST_FIX: 0\n", encoding="utf-8")
