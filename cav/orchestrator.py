@@ -50,9 +50,10 @@ class Orchestrator:
 
     # ---------------------------------------------------------------- plumbing
 
-    def log(self, message, level="INFO"):
+    def log(self, message, level="INFO", echo=True):
         line = f"{time.strftime('%H:%M:%S')} {level:<5} {message}"
-        print(line, flush=True)
+        if echo:
+            print(line, flush=True)
         with open(self.log_path, "a", encoding="utf-8") as handle:
             handle.write(line + "\n")
 
@@ -373,8 +374,10 @@ class Orchestrator:
             state = runs[name].state
             status = "DONE" if state.finished else "WORK"
             error = f" ERROR: {state.error}" if state.error else ""
-            print(f"  r{round_no} {name:<9} {status} {clock(state.elapsed):>6}  "
-                  f"idle {clock(state.idle):>5}  msgs {state.messages:<3} {state.detail}{error}", flush=True)
+            line = (f"r{round_no} {name:<9} {status} {clock(state.elapsed):>6}  "
+                    f"idle {clock(state.idle):>5}  msgs {state.messages:<3} {state.detail}{error}")
+            print(f"  {line}", flush=True)
+            self.log(line, "PROG", echo=False)
 
     # ------------------------------------------------------------------- checks
 

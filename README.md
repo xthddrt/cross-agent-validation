@@ -50,13 +50,19 @@ Two cases ship:
 
 `--push` publishes the agreed commit to `origin/<branch>` after convergence, and refuses unless it is a fast-forward.
 
-While a run is going, watch it from another terminal:
+While a run is going, use either:
 
 ```bat
-python -m cav status --run runs\<id>
+python -m cav status --run runs\<id> --watch
 ```
 
-or tail `runs\<id>\run.log`.
+or read the transcript, which now includes a progress line per agent on every poll:
+
+```bat
+powershell -Command "Get-Content runs\<id>\run.log -Wait -Tail 20"
+```
+
+Each `PROG` line shows the round, agent, state (`WORK`/`DONE`), elapsed time, idle time, message count, and what the agent is currently doing (`tool:shell`, `writing`, `step`). Things worth watching for: `idle` climbing while `detail` stays put (a stall), and one agent `DONE` while the other keeps working (the lag line names it).
 
 ## A round, concretely
 

@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import time
@@ -38,29 +39,38 @@ def cmd_run(args):
 
 def cmd_status(args):
     run_dir = pathlib.Path(args.run)
-    state_path = run_dir / "state.json"
-    if not state_path.exists():
-        print(f"no state.json in {run_dir}", file=sys.stderr)
-        return 1
-    state = json.loads(state_path.read_text(encoding="utf-8"))
-    print(f"case   {state.get('case')}")
-    print(f"phase  {state.get('phase')}  round {state.get('round')}  updated {state.get('updated')}")
-    for name, info in (state.get("agents") or {}).items():
-        elapsed = clock(info.get("elapsed", 0))
-        idle = clock(info.get("idle", 0))
-        print(f"  {name:<9} {info.get('state', '?'):<8} {elapsed:>6}  idle {idle:>5}  "
-              f"msgs {info.get('messages', 0):<3} {info.get('detail', '')}")
-    for item in state.get("history", []):
-        if "results" in item:
-            print(f"  round {item['round']}: converged={item['converged']} "
-                  f"trees_equal={item['trees_equal']} must_fix="
-                  f"{ {k: v['must_fix'] for k, v in item['results'].items()} }")
-        elif "failed" in item:
-            print(f"  round {item['round']}: failed {item['failed']}")
-    final = state.get("final")
-    if final:
-        print(f"final  {final['commit']} tree {final['tree']} pushed={final['pushed']}")
-    return 0
+    while True:
+        state_path = run_dir / "state.json"
+        if not state_path.exists():
+            print(f"no state.json in {run_dir}", file=sys.stderr)
+            return 1
+        if args.watch:
+            os.system("cls" if os.name == "nt" else "clear")
+            print(f"watching {run_dir}  (Ctrl+C to stop)")
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        print(f"case   {state.get('case')}")
+        print(f"phase  {state.get('phase')}  round {state.get('round')}  updated {state.get('updated')}")
+        for name, info in (state.get("agents") or {}).items():
+            elapsed = clock(info.get("elapsed", 0))
+            idle = clock(info.get("idle", 0))
+            print(f"  {name:<9} {info.get('state', '?'):<8} {elapsed:>6}  idle {idle:>5}  "
+                  f"msgs {info.get('messages', 0):<3} {info.get('detail', '')}")
+        for item in state.get("history", []):
+            if "results" in item:
+                print(f"  round {item['round']}: converged={item['converged']} "
+                      f"trees_equal={item['trees_equal']} must_fix="
+                      f"{ {k: v['must_fix'] for k, v in item['results'].items()} }")
+            elif "failed" in item:
+                print(f"  round {item['round']}: failed {item['failed']}")
+        final = state.get("final")
+        if final:
+            print(f"final  {final['commit']} tree {final['tree']} pushed={final['pushed']}")
+        if not args.watch:
+            return 0
+        try:
+            time.sleep(args.interval)
+        except KeyboardInterrupt:
+            return 0
 
 
 def cmd_smoke(args):
@@ -96,6 +106,8 @@ def main(argv=None):
 
     status = sub.add_parser("status", help="show a run's progress")
     status.add_argument("--run", required=True)
+    status.add_argument("--watch", action="store_true", help="refresh until Ctrl+C")
+    status.add_argument("--interval", type=float, default=5.0)
     status.set_defaults(func=cmd_status)
 
     smoke = sub.add_parser("smoke", help="check both agents answer a trivial prompt")

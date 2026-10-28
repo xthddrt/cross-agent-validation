@@ -106,6 +106,8 @@ class LoopTest(unittest.TestCase):
             self.assertTrue(signoff.exists(), name)
         self.assertTrue((orchestrator.run_dir / "REPORT.md").exists())
         self.assertTrue((orchestrator.run_dir / "state.json").exists())
+        log = (orchestrator.run_dir / "run.log").read_text(encoding="utf-8")
+        self.assertIn("PROG", log, "progress lines must reach run.log, not only stdout")
 
     def test_snapshot_works_without_commits(self):
         fresh = self.tmp / "no-commits"
