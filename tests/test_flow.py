@@ -5,6 +5,7 @@ import re
 import shutil
 import tempfile
 import unittest
+import os
 from unittest import mock
 
 from cav import agents as agent_mod
@@ -122,6 +123,24 @@ class LoopTest(unittest.TestCase):
         self.assertIn("a.txt", git("ls-tree", "-r", "--name-only", sha, cwd=fresh).splitlines())
         self.assertFalse(git_ok("rev-parse", "--verify", "--quiet", "HEAD", cwd=fresh),
                          "snapshot must not create a HEAD in the source repo")
+
+    def test_snapshot_works_without_git_identity(self):
+        fresh = self.tmp / "no-identity"
+        fresh.mkdir()
+        git("init", "-q", cwd=fresh)
+        (fresh / "a.txt").write_text("first\n", encoding="utf-8")
+
+        blocked = {"GIT_CONFIG_GLOBAL": str(self.tmp / "no-global.cfg"),
+                   "GIT_CONFIG_SYSTEM": str(self.tmp / "no-system.cfg")}
+        with mock.patch.dict(os.environ, blocked):
+            orchestrator = Orchestrator(self.case(), self.tmp / "snap3")
+            sha, problem = orchestrator.snapshot(Repo(fresh), config.AgentSpec("kimi", "kimi"))
+            self.assertIsNone(problem)
+            self.assertTrue(sha)
+            (fresh / "b.txt").write_text("second\n", encoding="utf-8")
+            committed, problem = Repo(fresh).commit_all(fresh, "tool-made commit")
+            self.assertIsNone(problem)
+            self.assertTrue(committed)
 
     def test_merge_unrelated_histories(self):
         other = self.tmp / "other"

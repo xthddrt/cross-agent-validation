@@ -7,6 +7,8 @@ import subprocess
 
 GIT = os.environ.get("CAV_GIT") or shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
 EXCHANGE_REMOTE = "cav-exchange"
+# Commits the tool creates must not depend on the machine's git identity being configured.
+IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@localhost")
 
 
 def git(*args, cwd=None, check=True, env=None):
@@ -140,7 +142,7 @@ class Repo:
         dirty = git("status", "--porcelain", cwd=worktree)
         if not dirty and not merging:
             return git("rev-parse", "HEAD", cwd=worktree), None
-        git("commit", "-m", message, cwd=worktree)
+        git(*IDENTITY, "commit", "-m", message, cwd=worktree)
         return git("rev-parse", "HEAD", cwd=worktree), None
 
     def dirty(self, worktree):

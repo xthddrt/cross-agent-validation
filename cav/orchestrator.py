@@ -10,7 +10,7 @@ import threading
 import time
 
 from . import agents as agent_mod
-from .gitops import Exchange, Repo, git, git_ok
+from .gitops import IDENTITY, Exchange, Repo, git, git_ok
 from .prompts import retry_note, round_prompt
 
 MUST_FIX_RE = re.compile(r"(?m)^MUST_FIX\s*:\s*(\d+)")
@@ -119,7 +119,7 @@ class Orchestrator:
                 return None, "the working tree has no changes to snapshot"
             tree = git("write-tree", cwd=repo.path, env=env)
             parents = ["-p", "HEAD"] if has_head else []
-            sha = git("commit-tree", tree, *parents, "-m",
+            sha = git(*IDENTITY, "commit-tree", tree, *parents, "-m",
                       f"Snapshot {spec.name} candidate r0", cwd=repo.path)
             self.log(f"{spec.name}: snapshotted {len(staged.splitlines())} files: "
                      f"{', '.join(staged.splitlines()[:6])}{' ...' if len(staged.splitlines()) > 6 else ''}")
