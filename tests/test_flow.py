@@ -198,6 +198,14 @@ class LoopTest(unittest.TestCase):
         self.assertIsNone(parse_must_fix(path))
         self.assertIsNone(parse_must_fix(self.tmp / "missing.md"))
 
+    def test_checks_run_python_placeholder(self):
+        case = self.case()
+        case.checks = ['{python} -c "print(\'ok\')"']
+        orchestrator = Orchestrator(case, self.tmp / "checks")
+        result = orchestrator.execute_checks("deepseek", self.repo, self.tmp / "checks" / "out.json")
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["commands"][0]["exit"], 0)
+
     def test_conflict_markers_block_commit(self):
         (self.repo / "bad.txt").write_text("<<<<<<< HEAD\nours\n>>>>>>> theirs\n", encoding="utf-8")
         sha, problem = Repo(self.repo).commit_all(self.repo, "should not commit")

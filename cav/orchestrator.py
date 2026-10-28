@@ -404,15 +404,14 @@ class Orchestrator:
         case = self.case
         commands = []
         for command in case.checks:
+            # {python} is quoted for paths with spaces, and the whole line goes through the shell:
+            # passing a pre-quoted string as a list argument to cmd /c mangles the quotes.
             rendered = command.replace("{python}", f'"{sys.executable}"')
             started = time.time()
             self.log(f"checks {name}: {command}")
-            if os.name == "nt":
-                proc = subprocess.run(["cmd", "/c", rendered], cwd=str(worktree),
-                                      capture_output=True, text=True, encoding="utf-8", errors="replace")
-            else:
-                proc = subprocess.run(["sh", "-c", rendered], cwd=str(worktree),
-                                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+            proc = subprocess.run(rendered, shell=True, cwd=str(worktree),
+                                  capture_output=True, text=True,
+                                  encoding="utf-8", errors="replace")
             entry = {
                 "command": command,
                 "exit": proc.returncode,

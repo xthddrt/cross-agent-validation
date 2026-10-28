@@ -1,5 +1,7 @@
 """Prompt text for a reconciliation round."""
 
+import sys
+
 
 def round_prompt(agent, other, round_no, case, worktree, review_path, other_review_path,
                  template_path, own_ref, own_sha, other_ref, other_sha, conflicts, checks):
@@ -7,7 +9,7 @@ def round_prompt(agent, other, round_no, case, worktree, review_path, other_revi
         merge_status = "conflicts left for you to resolve: " + ", ".join(conflicts)
     else:
         merge_status = "merged cleanly, no conflicts"
-    check_list = "\n".join(f"  - {c}" for c in checks) or "  (none configured)"
+    check_list = "\n".join(f"  - {c.replace('{python}', sys.executable)}" for c in checks) or "  (none configured)"
     if case.base:
         basis = f"Review BOTH implementations against the base commit {case.base}."
     else:
@@ -48,6 +50,8 @@ Rules:
 {check_list}
 - Never claim a test you did not run.
 - If the merge left conflicts, resolve them in the files and leave no conflict markers.
+- If your version and the other side's version are behaviourally equivalent, keep theirs. Do not restore
+  your own version of a file just because it is yours; that is how rounds ping-pong forever.
 - Finish with the review file written. That file is how you are judged done.
 """
 

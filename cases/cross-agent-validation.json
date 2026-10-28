@@ -21,7 +21,7 @@
   "checks": [
     "{python} -m unittest discover -s tests -t ."
   ],
-  "max_rounds": 3,
+  "max_rounds": 4,
   "round_seconds": 5400,
   "stall_seconds": 1200,
   "poll_seconds": 15,
