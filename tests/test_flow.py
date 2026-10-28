@@ -7,6 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
+from cav import agents as agent_mod
 from cav import config
 from cav.agents import RunState
 from cav.gitops import Repo, git
@@ -154,6 +155,29 @@ class ConfigTest(unittest.TestCase):
         self.assertEqual(case.agents["kimi"].bootstrap_exclude, ["reconciliation"])
         self.assertEqual(len(case.checks), 4)
         self.assertEqual(case.other("kimi"), "deepseek")
+
+    def test_shipped_case_pins_models(self):
+        case = config.load(pathlib.Path(__file__).resolve().parents[1] / "cases" / "msmon-five-phase.json")
+        self.assertEqual(case.agents["deepseek"].model, "deepseek/deepseek-flash#high")
+        self.assertEqual(case.agents["kimi"].model, "kimi-code/k3.1-pro")
+        self.assertEqual(case.agents["kimi"].thinking, "high")
+
+
+class ModelPinningTest(unittest.TestCase):
+    def test_opencode_command_pins_model(self):
+        spec = config.AgentSpec("deepseek", "opencode", model="deepseek/deepseek-flash#high")
+        with mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"):
+            agent = agent_mod.OpenCodeAgent(spec, "log.txt")
+        command = agent._command("hello")
+        self.assertIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "deepseek/deepseek-flash#high")
+        self.assertEqual(command[-1], "hello")
+
+    def test_kimi_profile_pins_model_and_thinking(self):
+        spec = config.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro", thinking="high")
+        agent = agent_mod.KimiAgent(spec, "log.txt")
+        self.assertEqual(agent._agent_config(),
+                         {"model": "kimi-code/k3.1-pro", "permission_mode": "yolo", "thinking": "high"})
 
 
 if __name__ == "__main__":

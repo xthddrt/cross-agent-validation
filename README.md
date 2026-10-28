@@ -80,8 +80,10 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 ```json
 {
   "repo":   { "host": "...", "secondary": "...", "base": "816163d", "branch": "main" },
-  "agents": { "deepseek": { "kind": "opencode", "bootstrap_ref": "798405f" },
-              "kimi":     { "kind": "kimi", "model": "kimi-code/k3.1-pro",
+  "agents": { "deepseek": { "kind": "opencode",
+                            "model": "deepseek/deepseek-flash#high",
+                            "bootstrap_ref": "798405f" },
+              "kimi":     { "kind": "kimi", "model": "kimi-code/k3.1-pro", "thinking": "high",
                             "bootstrap_exclude": ["reconciliation"] } },
   "checks": ["build.cmd", "build.cmd --with-compat", "build.cmd --with-fixtures",
              "{python} tools\\check_sensor_map.py"],
@@ -90,6 +92,8 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 ```
 
 - `bootstrap_ref` — an existing commit to publish as that agent's r0.
+- `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model (observed: `opencode/flint-40b-free`). The suffix `#high` is the reasoning variant.
+- `thinking` — Kimi's thinking level (`low`, `high`, `max`). Kimi's status is checked after each run and a mismatch fails the round.
 - No `bootstrap_ref` — snapshot that agent's dirty working tree from `secondary` into r0 (the working tree, branch and index are left untouched).
 - `{python}` in a check command is replaced with the interpreter running the tool.
 - `checks` may be omitted; convergence then rests on identical trees and clean reviews only.

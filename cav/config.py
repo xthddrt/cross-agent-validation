@@ -12,6 +12,7 @@ class AgentSpec:
     bootstrap_ref: str | None = None
     bootstrap_exclude: list[str] = field(default_factory=list)
     model: str | None = None
+    thinking: str | None = None
 
 
 @dataclass
@@ -54,6 +55,7 @@ def load(path):
             bootstrap_ref=spec.get("bootstrap_ref"),
             bootstrap_exclude=spec.get("bootstrap_exclude", []),
             model=spec.get("model"),
+            thinking=spec.get("thinking"),
         )
     if len(agents) != 2:
         raise ValueError("a case needs exactly two agents")

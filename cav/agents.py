@@ -98,12 +98,17 @@ class OpenCodeAgent(Agent):
             env["PATH"] = path + os.pathsep + GIT_DIR
         return env
 
-    def run(self, prompt, cwd):
+    def _command(self, prompt):
         cmd = [self.cli, "run", "--format", "json", "--auto",
                "--title", f"{self.title_prefix} {self.name}"]
+        if self.spec.model:
+            cmd += ["--model", self.spec.model]
         if self.session_id:
             cmd += ["--session", self.session_id]
-        cmd.append(prompt)
+        return cmd + [prompt]
+
+    def run(self, prompt, cwd):
+        cmd = self._command(prompt)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.log_path, "w", encoding="utf-8", errors="replace") as log:
             self.state.touch("launched")
@@ -204,6 +209,12 @@ class KimiAgent(Agent):
         self._connect()
         return True
 
+    def _agent_config(self):
+        config = {"model": self._model(), "permission_mode": "yolo"}
+        if self.spec.thinking:
+            config["thinking"] = self.spec.thinking
+        return config
+
     def run(self, prompt, cwd):
         if not self.base:
             self._connect()
@@ -217,7 +228,7 @@ class KimiAgent(Agent):
         self.session_id = session["id"]
         self.state.session = self.session_id
         self._call("POST", f"/api/v1/sessions/{self.session_id}/profile", {
-            "agent_config": {"model": self._model(), "permission_mode": "yolo"},
+            "agent_config": self._agent_config(),
         })
         self._baseline = self._assistant_count()
         submitted = self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
@@ -254,6 +265,12 @@ class KimiAgent(Agent):
                 break
             time.sleep(self._interval())
 
+        if not self.state.error:
+            status = self._call("GET", f"/api/v1/sessions/{self.session_id}/status").get("data") or {}
+            if self.spec.model and status.get("model") and status["model"] != self.spec.model:
+                self.state.error = f"ran {status['model']} instead of {self.spec.model}"
+            elif self.spec.thinking and status.get("thinking_level") not in (None, self.spec.thinking):
+                self.state.error = f"thinking {status.get('thinking_level')} instead of {self.spec.thinking}"
         text = self._last_assistant_text()
         self.state.text = text
         if self._abort.is_set() and not self.state.error:

@@ -10,11 +10,13 @@
   "agents": {
     "deepseek": {
       "kind": "opencode",
+      "model": "deepseek/deepseek-flash#high",
       "bootstrap_ref": "798405f"
     },
     "kimi": {
       "kind": "kimi",
       "model": "kimi-code/k3.1-pro",
+      "thinking": "high",
       "bootstrap_exclude": ["reconciliation"]
     }
   },
