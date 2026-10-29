@@ -186,9 +186,11 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
     for entry in dispositions:
         if entry.get("status") not in ("retained", "reoffered", "intentionally_dropped"):
             errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
-        elif not str(entry.get("why") or "").strip():
+        else:
             # The schema asks for a why on every disposition; an unexplained drop is not one.
-            errors.append(f"{entry.get('item_id')}: disposition needs a why")
+            why = entry.get("why")
+            if not isinstance(why, str) or not why.strip():
+                errors.append(f"{entry.get('item_id')}: disposition needs a why")
     return errors
 
 

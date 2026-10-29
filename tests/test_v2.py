@@ -285,11 +285,15 @@ class ReviewValidationTest(Base):
         self.assertTrue(any("carry-forward" in error for error in errors))
 
     def test_disposition_needs_a_reason(self):
-        data = self.data(carry_forward_dispositions=[
-            {"item_id": "CF-01", "status": "intentionally_dropped"}])
-        errors = review.validate(data, "deepseek", 1, self.repo,
-                                 required_dispositions=["CF-01"])
-        self.assertTrue(any("needs a why" in error for error in errors), errors)
+        for why in (None, "  ", 3):
+            with self.subTest(why=why):
+                entry = {"item_id": "CF-01", "status": "intentionally_dropped"}
+                if why is not None:
+                    entry["why"] = why
+                data = self.data(carry_forward_dispositions=[entry])
+                errors = review.validate(data, "deepseek", 1, self.repo,
+                                         required_dispositions=["CF-01"])
+                self.assertTrue(any("needs a why" in error for error in errors), errors)
 
     def test_disposition_status_is_checked_without_a_ledger(self):
         data = self.data(carry_forward_dispositions=[
