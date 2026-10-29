@@ -177,16 +177,18 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         if (item or {}).get("kind") == "behavioral" and data.get("behavior_approved"):
             errors.append(f"open behavioural disagreement {item.get('area')!r} contradicts approval")
 
+    dispositions = data.get("carry_forward_dispositions") or []
     if required_dispositions:
-        disposed = {entry.get("item_id") for entry in (data.get("carry_forward_dispositions") or [])}
+        disposed = {entry.get("item_id") for entry in dispositions}
         missing = [item for item in required_dispositions if item not in disposed]
         if missing:
             errors.append(f"carry-forward items without a disposition: {', '.join(sorted(missing)[:8])}")
-        for entry in (data.get("carry_forward_dispositions") or []):
-            if entry.get("status") not in ("retained", "reoffered", "intentionally_dropped", "unaddressed"):
-                errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
-            if entry.get("status") == "unaddressed":
-                errors.append(f"{entry.get('item_id')}: still unaddressed")
+    for entry in dispositions:
+        if entry.get("status") not in ("retained", "reoffered", "intentionally_dropped"):
+            errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
+        elif not str(entry.get("why") or "").strip():
+            # The schema asks for a why on every disposition; an unexplained drop is not one.
+            errors.append(f"{entry.get('item_id')}: disposition needs a why")
     return errors
 
 

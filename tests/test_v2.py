@@ -284,6 +284,19 @@ class ReviewValidationTest(Base):
                                  required_dispositions=["CF-01"])
         self.assertTrue(any("carry-forward" in error for error in errors))
 
+    def test_disposition_needs_a_reason(self):
+        data = self.data(carry_forward_dispositions=[
+            {"item_id": "CF-01", "status": "intentionally_dropped"}])
+        errors = review.validate(data, "deepseek", 1, self.repo,
+                                 required_dispositions=["CF-01"])
+        self.assertTrue(any("needs a why" in error for error in errors), errors)
+
+    def test_disposition_status_is_checked_without_a_ledger(self):
+        data = self.data(carry_forward_dispositions=[
+            {"item_id": "CF-01", "status": "ignored", "why": "x"}])
+        errors = review.validate(data, "deepseek", 1, self.repo)
+        self.assertTrue(any("invalid disposition" in error for error in errors), errors)
+
     def test_finding_without_a_line_is_invalid(self):
         data = self.data(findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
                                     "path": "base.txt", "summary": "wrong"}],
