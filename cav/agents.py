@@ -1,5 +1,6 @@
 """Agent adapters: drive OpenCode and Kimi Code headlessly and report progress."""
 
+import hashlib
 import json
 import os
 import pathlib
@@ -228,7 +229,7 @@ class KimiAgent(Agent):
         self.session_id = None
         self._baseline = 0
         self._prompt_id = None
-        self._seen_parts = 0
+        self._part_fingerprints = {}
         self._transcript = None
 
     def _connect(self):
@@ -279,28 +280,35 @@ class KimiAgent(Agent):
         return data.get("items", [])
 
     def _capture(self, items):
-        """Emit only parts not seen before; also keeps the raw transcript the adapter never wrote."""
-        flat = [part for message in items for part in (message.get("content") or [])]
+        """Emit new and updated parts; also keep the raw transcript the adapter never wrote."""
         if self._transcript is None:
             self.log_path.parent.mkdir(parents=True, exist_ok=True)
             self._transcript = open(self.log_path, "a", encoding="utf-8", errors="replace")
-        for part in flat[self._seen_parts:]:
-            self._transcript.write(json.dumps(part, ensure_ascii=False) + "\n")
-            kind = part.get("type")
-            if kind == "text" and part.get("text"):
-                self._event("agent.text", {"text": part["text"]})
-            elif kind == "thinking" and self.thinking:
-                self._event("agent.thinking", {"text": part.get("text") or ""})
-            elif kind == "tool_use":
-                self._event("agent.tool.start", {"tool": part.get("tool_name"),
-                                                 "input": part.get("input")})
-            elif kind == "tool_result":
-                content = part.get("output") or part.get("content") or ""
-                if not isinstance(content, str):
-                    content = json.dumps(content)
-                self._event("agent.tool.end", {"tool": part.get("tool_name"),
-                                               "output_tail": content[-800:]})
-        self._seen_parts = len(flat)
+        for message_index, message in enumerate(items):
+            for index, part in enumerate(message.get("content") or []):
+                message_id = message.get("id") or f"#{message_index}"
+                part_id = part.get("id") or part.get("part_id") or index
+                key = f"{message_id}:{part_id}"
+                fingerprint = hashlib.sha256(
+                    json.dumps(part, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+                if self._part_fingerprints.get(key) == fingerprint:
+                    continue
+                self._part_fingerprints[key] = fingerprint
+                self._transcript.write(json.dumps(part, ensure_ascii=False) + "\n")
+                kind = part.get("type")
+                if kind == "text" and part.get("text"):
+                    self._event("agent.text", {"text": part["text"]})
+                elif kind == "thinking" and self.thinking:
+                    self._event("agent.thinking", {"text": part.get("text") or ""})
+                elif kind == "tool_use":
+                    self._event("agent.tool.start", {"tool": part.get("tool_name"),
+                                                     "input": part.get("input")})
+                elif kind == "tool_result":
+                    content = part.get("output") or part.get("content") or ""
+                    if not isinstance(content, str):
+                        content = json.dumps(content)
+                    self._event("agent.tool.end", {"tool": part.get("tool_name"),
+                                                   "output_tail": content[-800:]})
         self._transcript.flush()
 
     def _pending(self, detail):
@@ -340,7 +348,7 @@ class KimiAgent(Agent):
         })
         self._verify_permission(self._agent_config()["permission_mode"])
         self._baseline = self._assistant_count()
-        self._seen_parts = 0
+        self._part_fingerprints = {}
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
         submitted = self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
                                {"content": [{"type": "text", "text": prompt}]})

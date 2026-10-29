@@ -38,8 +38,6 @@ class Review:
 
     @property
     def blocking(self):
-        if self.fallback:
-            return int(self.counts.get("blocking_must_fix") or 0)
         return int(self.counts.get("blocking_must_fix") or 0)
 
     @property
@@ -74,6 +72,26 @@ def _line_count(path):
         return None
 
 
+def _shape_errors(data):
+    """Reviews are agent-written: every field the orchestrator reads must have the right shape."""
+    errors = []
+    for key in ("areas", "remaining_disagreements", "carry_forward_dispositions"):
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            errors.append(f"{key} must be a list of objects")
+    changes = data.get("changes")
+    if changes is not None and (not isinstance(changes, list)
+                                or any(not isinstance(item, dict) or not item.get("path")
+                                       for item in changes)):
+        errors.append("changes must be a list of objects with a path")
+    incorporated = data.get("incorporated_from_other")
+    if incorporated is not None and not isinstance(incorporated, list):
+        errors.append("incorporated_from_other must be a list")
+    return errors
+
+
 def validate(data, agent, round_no, worktree, required_dispositions=()):
     errors = []
     worktree = pathlib.Path(worktree)
@@ -88,10 +106,15 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         errors.append("round missing or not an integer")
 
     findings = data.get("findings") or []
-    if not isinstance(findings, list):
-        return errors + ["findings is not a list"]
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        return errors + ["findings must be a list of objects"]
+    shaped = _shape_errors(data)
+    if shaped:
+        return errors + shaped
     ids = [finding.get("id") for finding in findings]
-    if len(ids) != len(set(ids)):
+    if any(not isinstance(item, str) or not item for item in ids):
+        errors.append("finding ids must be non-empty strings")
+    elif len(ids) != len(set(ids)):
         errors.append("duplicate finding ids")
     for finding in findings:
         label = finding.get("id") or "?"
@@ -100,8 +123,8 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         if finding.get("kind") not in KINDS:
             errors.append(f"{label}: kind {finding.get('kind')!r} invalid")
         path = finding.get("path")
-        if not path:
-            errors.append(f"{label}: no path")
+        if not isinstance(path, str) or not path:
+            errors.append(f"{label}: no valid path")
             continue
         target = (worktree / path).resolve()
         try:
@@ -113,17 +136,25 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             errors.append(f"{label}: path does not exist: {path}")
             continue
         line = finding.get("line")
-        if line is not None:
-            count = _line_count(target)
-            try:
-                line = int(line)
-            except (TypeError, ValueError):
-                errors.append(f"{label}: line is not an integer")
-            else:
-                if count is not None and (line < 1 or line > count):
-                    errors.append(f"{label}: line {line} outside {path} (1..{count})")
+        if line is None:
+            # A finding, and especially a refusal to approve, needs a citation the reader can open.
+            errors.append(f"{label}: no line")
+            continue
+        count = _line_count(target)
+        try:
+            line = int(line)
+        except (TypeError, ValueError):
+            errors.append(f"{label}: line is not an integer")
+        else:
+            if count is not None and (line < 1 or line > count):
+                errors.append(f"{label}: line {line} outside {path} (1..{count})")
 
-    counts = data.get("counts") or {}
+    counts = data.get("counts")
+    if counts is None:
+        counts = {}
+    if not isinstance(counts, dict):
+        errors.append("counts must be an object")
+        counts = {}
     expected = {
         "must_fix_total": _count(data, "MUST_FIX"),
         "should_fix": _count(data, "SHOULD_FIX"),
@@ -136,25 +167,30 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         if counts.get(key) != value:
             errors.append(f"counts.{key} is {counts.get(key)!r}, findings say {value}")
 
-    if data.get("behavior_approved") is False and blocking == 0:
-        errors.append("behavior_approved is false without a blocking finding")
-    if data.get("other_behavior_approved") is False and blocking == 0:
-        errors.append("other_behavior_approved is false without a blocking finding")
+    for key in ("behavior_approved", "other_behavior_approved"):
+        if not isinstance(data.get(key), bool):
+            errors.append(f"{key} must be boolean")
+        elif data[key] is False and blocking == 0:
+            errors.append(f"{key} is false without a blocking finding")
 
     for item in (data.get("remaining_disagreements") or []):
         if (item or {}).get("kind") == "behavioral" and data.get("behavior_approved"):
             errors.append(f"open behavioural disagreement {item.get('area')!r} contradicts approval")
 
+    dispositions = data.get("carry_forward_dispositions") or []
     if required_dispositions:
-        disposed = {entry.get("item_id") for entry in (data.get("carry_forward_dispositions") or [])}
+        disposed = {entry.get("item_id") for entry in dispositions}
         missing = [item for item in required_dispositions if item not in disposed]
         if missing:
             errors.append(f"carry-forward items without a disposition: {', '.join(sorted(missing)[:8])}")
-        for entry in (data.get("carry_forward_dispositions") or []):
-            if entry.get("status") not in ("retained", "reoffered", "intentionally_dropped", "unaddressed"):
-                errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
-            if entry.get("status") == "unaddressed":
-                errors.append(f"{entry.get('item_id')}: still unaddressed")
+    for entry in dispositions:
+        if entry.get("status") not in ("retained", "reoffered", "intentionally_dropped"):
+            errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
+        else:
+            # The schema asks for a why on every disposition; an unexplained drop is not one.
+            why = entry.get("why")
+            if not isinstance(why, str) or not why.strip():
+                errors.append(f"{entry.get('item_id')}: disposition needs a why")
     return errors
 
 

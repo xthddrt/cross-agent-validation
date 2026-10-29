@@ -1,13 +1,15 @@
 """Mechanical comparison of candidate trees: textual classes, divergence, settlement."""
 
 import fnmatch
+import io
 import pathlib
 import subprocess
+import tokenize
 
 from .gitops import GIT, git
 
 C_FAMILY = {".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".js", ".ts", ".java", ".mjs", ".cjs"}
-HASH_FAMILY = {".py", ".ps1", ".sh", ".cmd", ".bat", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
+HASH_FAMILY = {".ps1", ".sh", ".cmd", ".bat", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".sys", ".exe",
                    ".dll", ".obj", ".lib", ".pdb", ".bin", ".woff", ".woff2", ".ttf"}
 
@@ -33,7 +35,19 @@ def normalize_ws(data):
     return b"\n".join(lines).strip(b"\n") + b"\n"
 
 
+def _strip_python_comments(text):
+    """The tokenizer knows strings and docstrings: a `#` inside them is content, not a comment."""
+    try:
+        tokens = [token for token in tokenize.generate_tokens(io.StringIO(text).readline)
+                  if token.type != tokenize.COMMENT]
+        return tokenize.untokenize(tokens)
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return text
+
+
 def strip_comments(text, suffix):
+    if suffix == ".py":
+        return _strip_python_comments(text)
     if suffix in C_FAMILY:
         line_marks, block = ("//",), ("/*", "*/")
     elif suffix in HASH_FAMILY:

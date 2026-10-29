@@ -13,6 +13,7 @@ _SECRET = re.compile(
     r"(?i)((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|"
     r"client[_-]?secret|password|secret)\s*[:=]\s*)([^\s\"',;}]+)"
 )
+_SECRET_KEY = re.compile(r"(?i)(?:authorization|token|secret|password|credential|cookie|api[_-]?key)")
 
 
 def redact(text):
@@ -27,7 +28,9 @@ def clip(value, limit=MAX_FIELD):
             return value
         return value[:limit] + f"...[truncated {len(value) - limit} chars]"
     if isinstance(value, dict):
-        return {str(k): clip(v, limit) for k, v in value.items()}
+        # Keys like "token" or "cookie" carry secrets whose value has no recognisable shape.
+        return {str(k): "[redacted]" if _SECRET_KEY.search(str(k)) else clip(v, limit)
+                for k, v in value.items()}
     if isinstance(value, (list, tuple)):
         return [clip(v, limit) for v in value]
     return value
