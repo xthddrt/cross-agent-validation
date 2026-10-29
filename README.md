@@ -1,50 +1,39 @@
 # cross-agent-validation
 
-Drives two AI agents — one in **OpenCode**, one in **Kimi Code** — through a review/recommendation loop until they agree on the same commit, then stops. Nothing is pushed until both agents' results are identical and every check passes.
-
-First case: reconciling the two independent five-phase logging/coverage implementations of `msc-outside-monitor`.
+Two AI agents — one in **OpenCode**, one in **Kimi Code** — each produce a candidate, review each other's with evidence, and iterate until both approve. Nothing is published until both agents approve both candidates and every check passes.
 
 ```
-candidate/deepseek/r0 ─┐
-                       ├─ round 1 ─ r1 ─ round 2 ─ r2 ─ converged
-candidate/kimi/r0 ─────┘
+candidate/deepseek/r0 ─┐                  ┌─ both approve ─ publish
+                       ├─ round 1 ─ r1 ─ … ┤
+candidate/kimi/r0 ─────┘                  └─ otherwise next round
 ```
 
-## What changed in this build (v2)
-
-The loop now converges on **reviewed behavioural agreement**, not only byte-identical trees.
-
-- **Observability** — every run writes `events.jsonl` (append-only, redacted, size-capped). `cav web --run <dir>` serves a read-only local dashboard: what each agent is doing right now, what changed this round, what is already agreed, what still differs, and the exact gates blocking finalization.
-- **Convergence** — `convergence: "strict"` keeps the old rule. `"functional"` accepts when both structured reviews are valid, there are zero *blocking* `MUST_FIX` findings, both agents approve **both** candidates, no behavioural disagreement is open, and every check passes. Refusing approval requires a `MUST_FIX` finding of kind `behavioral` with a real path and line — taste does not block.
-- **Equal standing** — neither candidate is a default. Each agent starts each round from its own previous candidate, receives the other candidate's full diff, and reviews both with the same scrutiny. Nothing depends on which agent is listed first.
-- **Structured reviews** — `reviews/rN/<agent>-review.json` is authoritative and the markdown is rendered from it; the schema is in the prompt. Legacy markdown-only reviews still work, under `strict` only.
-- **Carry-forward ledgers** — one per agent, uncapped: every change in the other candidate that the agent's tree lacks is listed, and the agent must take it or keep its own version with a reason, so work is not dropped silently.
-- **Finalization** — when both agents approve both candidates, the one that changed least from its own original branch (lines, then files) is published → safe normalisation (line endings and trailing whitespace only, never `strict_paths`) → full checks on a clean worktree of that exact commit → both agents confirm that exact diff → signoffs, `WAIVED.md`, `REPORT.md`. Publishing still requires `--push`.
-- **Before spending agent time** — `cav check --case <file>` validates the case; `cav diff --run <dir>` shows what the two candidates disagree about from a plain terminal.
-
 ```
-py -m cav check   --case cases\msmon-five-phase.local.json
-py -m cav run     --case cases\msmon-five-phase.local.json [--push] [--dashboard] [--resume] [--strict]
-py -m cav solve   --repo <path> --prompt task.md [--checks C]... [--convergence functional]
-py -m cav web     --run runs\<id> [--open]
-py -m cav status  --run runs\<id> [--watch]
-py -m cav diff    --run runs\<id> [--round N] [--path P]
+py -m cav check  --case cases\msmon-five-phase.local.json
+py -m cav smoke  --case cases\msmon-five-phase.local.json
+py -m cav run    --case cases\msmon-five-phase.local.json [--run-dir runs\<id>] [--resume] [--push] [--dashboard]
+py -m cav solve  --repo <path> --prompt task.md [--checks C]...
+py -m cav web    --run runs\<id> [--open]
 ```
 
 On Windows use `py` rather than `python`: the bare `python` on PATH is the Microsoft Store stub.
 
-## What it actually does
+## What a run does
 
-1. **Bootstrap** — snapshot both starting candidates into a local bare repo (`exchange.git`). Nothing touches GitHub.
-2. **Prepare** — for each agent, create a git worktree from *its own* previous candidate, write the other candidate's diff against it, and list every change the other has that it lacks.
-3. **Drive** — send the same round prompt to both agents in parallel. Each reviews both implementations, edits its worktree to keep the best of each, and writes a review file with a `MUST_FIX: <n>` line.
-4. **Monitor** — poll both agents every few seconds: elapsed time, idle time, message count, current tool. Warn on a stalled agent, report when one finishes and the other lags, abort on a human-blocking interaction or the round timeout.
-5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN` to the exchange. Agents never run `git commit` or `git push`.
-6. **Check** — run the case's check matrix against each candidate (identical trees are checked once).
-7. **Converge** — a round is agreed only when trees are identical, every review says `MUST_FIX: 0`, and all checks pass. Otherwise the next round uses both recommendations as inputs.
-8. **Report** — write `signoff/<agent>.json`, `REPORT.md`, `state.json`, per-agent logs and check output.
+1. **Bootstrap** — publish both starting candidates (r0) into a local bare repo (`exchange.git`), from a ref, the base commit (`solve`), or a snapshot of an uncommitted working tree. Nothing touches GitHub.
+2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* previous candidate, the other candidate's full diff against it, and a ledger of every path where the two differ.
+3. **Drive** — both agents run in parallel. Each reviews both candidates, takes the stronger version of each part into its tree, and writes a JSON review: approval of each candidate, findings with a real path and line, and a decision with a reason on every ledger item. An agent that writes no valid review is retried once.
+4. **Monitor** — live progress in `state.json` and `events.jsonl`; an agent blocked on a human prompt is aborted, a stall is reported, and the round has a timeout.
+5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN`. Agents never run git commands that change history.
+6. **Check** — the case's checks run on both candidates at once (an identical tree once).
+7. **Decide** — accepted when every check passes, no review has a `MUST_FIX` finding of kind `behavioral`, both agents approve both candidates, and no behavioural disagreement is left open. Otherwise the next round starts from the new candidates; a pair that repeats an earlier round stops the run.
+8. **Publish** — the approved candidate that changed least from its own original branch is published as it is: nothing is rewritten after agreement, so nothing is re-checked or re-approved. `REPORT.md` records the rounds, the accepted differences and every change an agent declined. `--push` fast-forwards `origin/<branch>`.
 
-Agents edit files; the orchestrator owns git. That is the main reliability decision: an agent cannot push the wrong branch, and a re-run cannot silently fork history.
+Refusing approval requires a behavioural `MUST_FIX` finding with a real path and line, so taste does not block. Counts are derived from the findings, never trusted from the agent.
+
+## Watching a run
+
+`--dashboard` (or `cav web --run <dir>`) serves a read-only local page: the round's steps, each agent's live feed, the acceptance gates, and the files the candidates still differ on with per-file diffs. The terminal and `run.log` show round, agent, check and verdict lines.
 
 ## Requirements
 
@@ -53,103 +42,47 @@ Agents edit files; the orchestrator owns git. That is the main reliability decis
 - Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`).
 - Python 3.10+ (standard library only).
 
-## Usage
+## Case file
 
-```bat
-python -m cav smoke   --case cases\msmon-five-phase.json
-python -m cav run     --case cases\msmon-five-phase.json
-python -m cav status  --run runs\msmon-five-phase-20261028-165500
-python -m cav run     --case cases\msmon-five-phase.json --run-dir runs\retry --push
+```json
+{
+  "name": "msmon-five-phase",
+  "repo":   { "host": "...", "base": "816163d", "branch": "main" },
+  "agents": { "deepseek": { "kind": "opencode", "model": "deepseek/deepseek-flash#high",
+                            "bootstrap_ref": "origin/candidate/deepseek-phase-1-5" },
+              "kimi":     { "kind": "kimi", "model": "kimi-code/k3.1-pro", "thinking": "high",
+                            "bootstrap_ref": "origin/candidate/kimi-phase-1-5" } },
+  "checks": [".\\build.cmd", "{python} tools\\check_sensor_map.py"],
+  "task":   { "prompt": "...", "acceptance": ["..."], "context_files": ["..."] },
+  "max_rounds": 3, "round_seconds": 5400, "stall_seconds": 1200, "retries": 1
+}
 ```
 
-Two cases ship:
-
-| Case | What it reconciles |
-|---|---|
-| `msmon-five-phase` | the two five-phase logging/coverage implementations of `msc-outside-monitor` |
-| `cross-agent-validation` | two independent implementations of this tool itself (unrelated histories, no shared base) |
-
-`smoke` asks each agent for `CAV_OK`; run it first — it proves the adapters and authentication work before spending real time.
-
-`--push` publishes the agreed commit to `origin/<branch>` after convergence, and refuses unless it is a fast-forward.
-
-While a run is going, use either:
-
-```bat
-python -m cav status --run runs\<id> --watch
-```
-
-or read the transcript, which now includes a progress line per agent on every poll:
-
-```bat
-powershell -Command "Get-Content runs\<id>\run.log -Wait -Tail 20"
-```
-
-Each `PROG` line shows the round, agent, state (`WORK`/`DONE`), elapsed time, idle time, message count, and what the agent is currently doing (`tool:shell`, `writing`, `step`). Things worth watching for: `idle` climbing while `detail` stays put (a stall), and one agent `DONE` while the other keeps working (the lag line names it).
-
-## Tests
-
-```bat
-python -m unittest discover -s tests -t .
-```
-
-The suite drives a full two-round loop with fake agents and covers the commit guards: unrelated-history merges, conflict markers, snapshotting a repo with no commits or no git identity, the check runner, and the agent lifecycle (retry after abort, process kill).
-
-## A round, concretely
-
-| Agent | Worktree | Starts from | Prompt outcome |
-|---|---|---|---|
-| deepseek | `runs/<id>/wt/r1/deepseek` | `candidate/deepseek/r0` + merge of `candidate/kimi/r0` | edits + `reviews/r1/deepseek-review.md` |
-| kimi | `runs/<id>/wt/r1/kimi` | `candidate/kimi/r0` + merge of `candidate/deepseek/r0` | edits + `reviews/r1/kimi-review.md` |
-
-Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidate/kimi/r1`, diffs the trees, and decides.
+- `bootstrap_ref` — the commit to use as that agent's r0. Without one, the agent's uncommitted working tree in `repo.secondary` is snapshotted (`bootstrap_exclude` skips paths); the source repo is left untouched.
+- `base` — omit it when the two implementations have unrelated histories.
+- `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model.
+- `thinking` — Kimi's thinking level; the model and level are verified after each run.
+- `checks` — shell commands run in each candidate's worktree; `{python}` is the interpreter running the tool. Use `.\build.cmd`, not `build.cmd`: Windows may refuse to run scripts from the current directory by bare name.
+- `task` — the objective, acceptance criteria, base-behaviour invariants and context files, all given to both agents.
+- `canonical_agent`, `carry_forward_limit`, `convergence`, `strict_paths` and `formatter` no longer exist; a case that sets one is rejected.
 
 ## Failure handling
 
 | Situation | Behaviour |
 |---|---|
-| Agent fails or exits non-zero | one retry, then the round fails with the reason |
-| Review file missing, invalid, or without exactly one valid `MUST_FIX` line (including a missing carry-forward disposition) | treated as no result; retried once |
-| Configured `formatter` exits non-zero | finalization refused, formatter output in `run.log` |
-| Unresolved merge conflicts or leftover `<<<<<<<` markers | commit refused, round fails with the file list |
+| Agent fails, exits non-zero, or leaves no valid review | one retry with the reason, then the round fails |
 | Agent waits for a permission prompt | aborted immediately with `blocked: ...` |
 | No activity for `stall_seconds` | warning logged, run continues |
-| Round exceeds `round_seconds` | unfinished agents aborted, round fails |
-| Trees differ | another round, up to `max_rounds` |
-| Rounds exhausted | `phase: disagreement`, nothing pushed |
-
-## Case file
-
-`cases/msmon-five-phase.json` is the whole configuration:
-
-```json
-{
-  "repo":   { "host": "...", "secondary": "...", "base": "816163d", "branch": "main" },
-  "agents": { "deepseek": { "kind": "opencode",
-                            "model": "deepseek/deepseek-flash#high",
-                            "bootstrap_ref": "798405f" },
-              "kimi":     { "kind": "kimi", "model": "kimi-code/k3.1-pro", "thinking": "high",
-                            "bootstrap_exclude": ["reconciliation"] } },
-  "checks": ["build.cmd", "build.cmd --with-compat", "build.cmd --with-fixtures",
-             "{python} tools\\check_sensor_map.py"],
-  "max_rounds": 3, "round_seconds": 5400, "stall_seconds": 1200
-}
-```
-
-- `bootstrap_ref` — an existing commit to publish as that agent's r0.
-- `base` — omit it when the two implementations have unrelated histories (the self case). Merges then run with `--allow-unrelated-histories` and the prompt says there is no shared base.
-- `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model (observed: `opencode/flint-40b-free`). The suffix `#high` is the reasoning variant.
-- `thinking` — Kimi's thinking level (`low`, `high`, `max`). Kimi's model and thinking level are checked after each run and a mismatch fails the round.
-- No `bootstrap_ref` — snapshot that agent's dirty working tree from `secondary` into r0 (the working tree, branch and index are left untouched).
-- `{python}` in a check command is replaced with the interpreter running the tool.
-- `checks` may be omitted; convergence then rests on identical trees and clean reviews only.
+| Round exceeds `round_seconds` | unfinished agents aborted |
+| A check fails | that round is not accepted; the next round sees the result |
+| Candidate pair repeats an earlier round | stopped as oscillation |
+| Rounds exhausted | `phase: disagreement`, nothing published |
+| Interrupted run | `--resume` continues after the last finished round, or publishes an accepted one |
 
 ## Limits
 
-- Kimi Code must be running; the adapter uses its local HTTP API and fails with "server not running" when there is no instance file.
-- A timed-out Kimi turn is abandoned, not cancelled: the server keeps working and the run stops waiting for it.
-- Signoffs are derived mechanically from each agent's own review, the shared tree hash, and the check results. They are not independent human approvals.
-- Checks are whatever the case lists. This tool does not verify driver runtime behaviour — a green check matrix means it builds, not that it works on hardware.
+- Kimi Code must be running; a timed-out Kimi turn is abandoned, not cancelled.
+- Agreement and checks are mechanical evidence, not human approval. A green check matrix means it builds, not that it works on hardware.
 - Worktrees stay under `runs/<id>/wt` for inspection. Deleting a run directory needs `git worktree prune` in the host repo afterwards.
 
 ## Layout
@@ -157,12 +90,21 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 ```
 cav/
   config.py        case loading and validation
-  gitops.py        exchange, worktrees, commits, conflict guards
+  gitops.py        exchange repo, worktrees, commits
   agents.py        OpenCode CLI and Kimi HTTP adapters + progress state
-  prompts.py       the round prompt
-  orchestrator.py  bootstrap, rounds, monitoring, checks, convergence, report
-  cli.py           run / status / smoke
+  prompts.py       the round prompt and review contract
+  review.py        review validation
+  compare.py       which paths the two candidates share or differ on
+  orchestrator.py  bootstrap, rounds, checks, acceptance, publication, report
+  events.py        append-only, redacted event log
+  web.py, web/     read-only dashboard
+  cli.py           run / solve / check / web / smoke
 cases/             one JSON per reconciliation
-docs/              review template the agents must follow
-tests/             loop test with fake agents, plus commit guards
+tests/             loop tests with fake agents, plus unit tests
+```
+
+## Tests
+
+```bat
+py -m unittest discover -s tests -t .
 ```

@@ -1,6 +1,5 @@
 {
   "name": "cav-self",
-  "version": 2,
   "description": "Reconcile two independent implementations of CAV v2 (this tool), one per agent.",
   "repo": {
     "host": "C:\\Users\\richa\\Documents\\Default Project\\cross-agent-validation",
@@ -23,12 +22,8 @@
   "checks": [
     "{python} -m unittest discover -s tests -t ."
   ],
-  "convergence": "functional",
-  "strict_paths": [],
-  "formatter": null,
   "max_rounds": 4,
   "round_seconds": 5400,
   "stall_seconds": 1200,
-  "poll_seconds": 15,
   "retries": 1
 }

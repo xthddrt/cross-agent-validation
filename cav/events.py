@@ -9,7 +9,6 @@ import time
 MAX_FIELD = 4096
 MAX_TEXT_FIELD = 200_000  # agent messages are read whole by a human; do not truncate them
 TEXT_TYPES = ("agent.text", "agent.thinking")
-ROTATE_BYTES = 64 * 1024 * 1024
 _BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _SECRET = re.compile(
     r"(?i)((?:authorization|api[_-]?key|access[_-]?token|refresh[_-]?token|"
@@ -38,32 +37,12 @@ def clip(value, limit=MAX_FIELD):
     return value
 
 
-def read(path, after=0):
-    """Events with seq > after. Tolerates a partially written last line."""
-    path = pathlib.Path(path)
-    if not path.exists():
-        return []
-    out = []
-    with open(path, encoding="utf-8", errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get("seq", 0) > after:
-                out.append(event)
-    return out
-
-
 def tail(path, offset=0):
     """Events appended after byte `offset`, and the offset to continue from.
 
     A follower reads only what is new instead of re-parsing the whole log on every poll. A
     partially written last line is left for the next call; a file smaller than `offset` was
-    rotated, so reading starts over.
+    replaced, so reading starts over.
     """
     path = pathlib.Path(path)
     try:
@@ -91,22 +70,13 @@ class EventWriter:
         self.path = pathlib.Path(path)
         self.run_id = run_id
         self._lock = threading.Lock()
-        self.seq = 0
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        for event in read(self.path):
-            self.seq = max(self.seq, event.get("seq", 0))
-
-    def _rotate(self):
-        if self.path.exists() and self.path.stat().st_size > ROTATE_BYTES:
-            try:
-                self.path.replace(self.path.with_suffix(".jsonl.1"))
-            except OSError:
-                pass  # Windows refuses while a reader has the file open; try again next event
+        # A resumed run continues the sequence instead of restarting it.
+        self.seq = max((event.get("seq", 0) for event in tail(self.path)[0]), default=0)
 
     def emit(self, type_, round=None, agent=None, data=None):
         with self._lock:
             self.seq += 1
-            self._rotate()
             now = time.time()
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now))
             event = {

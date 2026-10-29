@@ -1,90 +1,78 @@
 # Handoff — current state of CAV
 
-Written at commit `0f9de54` for whoever debugs this next. Everything below is what the code
-does today, not what it was designed to do.
+For whoever debugs this next. Everything below is what the code does today, not what it was
+designed to do.
 
 ## What is actually proven
 
-- **65 unit tests pass** (`py -m unittest discover -s tests -t .`), including a two-round loop
-  with fake agents, commit guards, review validation, functional acceptance, settlement,
-  carry-forward, oscillation and the dashboard endpoints.
-- **Two live runs completed with real agents:**
-  - `runs/cav-selftest2-20261028-204240` — `cav solve` on a scratch repo, 1 round, converged
-    `functional`, confirmation round ran, signoffs written.
-  - `runs/cav-self-2` — the tool reconciling two implementations of itself, 4 rounds,
-    accepted (`e1b1d55`), merged into `main` as `93ab30b`.
+- **57 unit tests pass** (`py -m unittest discover -s tests -t .`), including a two-round loop
+  with fake agents (round 1 blocked by a real finding, round 2 agreed), review validation, the
+  acceptance rule, publication choice, resume, retries, oscillation, parallel checks and the
+  dashboard endpoints.
+- **Live runs completed with real agents** (under the earlier canonical-baseline rules):
+  - `cav-self-2` — the tool reconciling two implementations of itself, 4 rounds, accepted.
+  - `msmon-3` — the monitor case, 3 rounds, accepted (blocking findings 6 → 3 → 0), merged
+    into msc-outside-monitor `main` as PR #1.
 
 ## What is NOT proven — start here
 
-1. **No reconciliation of the monitor repo has ever completed a round.** Two attempts
-   (`runs/msmon-1`, `runs/msmon-2`) both died in round 1 on review-schema validation. The
-   schema bugs are fixed (see below), but nothing tells us whether two agents can actually
-   converge on that codebase. This is the biggest unknown.
-2. **`--resume` is untested end-to-end.** It reads `state.json`, resumes at `max(round)+1`,
-   rebuilds worktrees. Only inspected by reading, never exercised by a real interrupted run.
-3. **`functional` acceptance on a large, genuinely divergent tree is untested.** The self-run
-   ended with 2 substantive files; the monitor case starts with ~63.
-4. **Carry-forward dispositions.** Each agent must decide on every item in its own ledger (the
-   other candidate's changes its tree lacks; uncapped). If an agent skips any, the review
-   is invalid and the round retries. This has never been through a real round successfully.
-5. **Kimi adapter polling assumptions.** It reads `pending_interaction`, `busy`,
+1. **The current round design has not run with real agents.** Each agent now starts from its
+   own candidate with the other's full diff and an uncapped ledger; the approved candidate is
+   published without a confirmation round. Fake-agent tests cover it; a real run does not yet.
+2. **Ledger size on large divergences.** Every differing path is a decision item, including
+   comment- and whitespace-only ones. The monitor case started with 63; reviews get long.
+3. **`--resume` with real agents.** Covered by tests (failed round, accepted-but-unpublished
+   round); never exercised by a real interrupted run.
+4. **Kimi adapter polling assumptions.** It reads `pending_interaction`, `busy`,
    `main_turn_active`, `last_turn_reason` from `/api/v1/sessions/{id}` every 3 s. Only `approval`
-   was ever observed. States like `question` or `plan_approval` are guesses.
-6. **`compare.strip_comments`** uses `tokenize` for `.py` and a hand-written scanner for the C
-   family. The C scanner has no tests for macro continuations, raw strings or unterminated
-   comments, and `strict_paths` is the only thing protecting driver headers.
+   was ever observed. States like `question` or `plan_approval` are guesses, and a turn that
+   ends `failed` after producing output is treated as finished (the review check catches it).
+5. **Known gaps, not fixed:** OpenCode receives the prompt on the command line (Windows limit
+   ~32,000 characters); check commands have no timeout; a retry gets a fresh `round_seconds`.
 
 ## Bugs already fixed — do not reintroduce
 
 | Symptom | Cause | Fix |
 |---|---|---|
 | Commits landed in another run's exchange | `git remote cav-exchange` is repo-global and shared between runs | push/fetch by path; the named remote is removed on attach (`cav/gitops.py`) |
-| An agent was told both candidates were identical | the patch handed over was `diff(baseline, other)`, empty when the other candidate *is* the baseline | both agents get the attempt **not used as the baseline** (`other-<agent>.patch`) |
+| An agent was told both candidates were identical | the patch handed over was empty when the other candidate was the shared baseline | each agent gets the other candidate's diff against its own tree (`rounds/rN/<agent>-other.patch`) |
 | Kimi hung for an hour "waiting for approval" | `pending_interaction: approval` arrives while `busy: true`; the busy branch was checked first | pending is checked first; permission mode is verified after the profile is set (`cav/agents.py`) |
-| Review rejected over arithmetic | counts were trusted input | counts are recomputed from `findings` (`cav/review.py`) |
-| Review rejected for approving while listing a difference | no way to say "differs but equivalent" | `kind: "equivalent"` added; only `behavioral` blocks (`cav/review.py`) |
-| Every duplicate check run + confirmation after agreement | tail was unconditional | skipped when the final commit is the approved candidate (`cav/orchestrator.py`) |
+| Review rejected over arithmetic | counts were trusted input | counts are derived from `findings` and no longer asked of agents (`cav/review.py`) |
+| Review rejected for approving while listing a difference | no way to say "differs but equivalent" | `kind: "equivalent"`; only `behavioral` blocks (`cav/review.py`) |
+| A resumed round accepted the previous attempt's review | old review files stayed on disk | a round deletes its review files before the agents start (`cav/orchestrator.py`) |
+| One candidate was favoured in every round | a canonical agent supplied the baseline, the tie-break and the published tree | both candidates have equal standing; publication picks the least-changed approved one |
+| Build checks failed only when run from Claude Code | `NoDefaultCurrentDirectoryInExePath` stops cmd finding `build.cmd` by bare name | checks use `.\build.cmd` |
 | Dashboard logged a traceback per browser disconnect | `ConnectionAbortedError` not caught | caught (`cav/web.py`) |
 
 ## Layout
 
 ```
-cav/config.py        case loading and validation; schema v1 and v2
+cav/config.py        case loading and validation
+cav/gitops.py        exchange repo, worktrees, commits
 cav/agents.py        OpenCode CLI + Kimi HTTP adapters, progress state, event emission
-cav/events.py        append-only events.jsonl, monotonic seq, redaction, per-type caps
-cav/compare.py       tree comparison, cosmetic classes, settlement normalisation, carry-forward
-cav/review.py        structured review schema, validation, markdown rendering
-cav/prompts.py       reconcile / implement / confirm prompts and the review schema text
-cav/orchestrator.py  bootstrap, symmetric rounds, checks, verdict, publication choice, finalization
+cav/prompts.py       round prompt and review contract
+cav/review.py        review validation
+cav/compare.py       identical vs differing paths, decision ledger
+cav/orchestrator.py  bootstrap, symmetric rounds, parallel checks, acceptance, publication, report
+cav/events.py        append-only events.jsonl, monotonic seq, redaction
 cav/web.py           read-only dashboard server (cav/web/index.html)
-cav/cli.py           run / solve / check / web / status / diff / smoke
+cav/cli.py           run / solve / check / web / smoke
 ```
 
 ## Running it
 
 ```
 py -m cav check   --case cases\msmon-five-phase.local.json
-py -m cav run     --case cases\msmon-five-phase.local.json --run-dir runs\msmon-3
-py -m cav web     --run runs\msmon-3 --open
-py -m cav diff    --run runs\msmon-3
+py -m cav run     --case cases\msmon-five-phase.local.json --run-dir runs\msmon-4 --dashboard
+py -m cav web     --run runs\msmon-4 --open
 py -m unittest discover -s tests -t .
 ```
 
 `py`, not `python` — the bare `python` on PATH is the Microsoft Store stub.
 
-## Evidence on disk (not committed; `runs/` is gitignored)
-
-- `runs/cav-self-2` — the accepted 4-round run. `REPORT.md`, `WAIVED.md`, per-round reviews,
-  divergence artifacts, confirmation reviews, `events.jsonl`.
-- `runs/msmon-1` — round 1 rejected. Contains the most useful real-world output so far:
-  kimi's 4 blocking findings and deepseek's 6 should-fix findings against the merged monitor
-  code, in `reviews/r1/`.
-- `runs/msmon-2` — killed after ~2 minutes.
-
 ## Environment gotchas
 
-- `core.autocrlf=true` on this machine: blobs are LF, working trees CRLF. Settlement therefore
-  rewrites checked-out files without changing blobs — expected, not a bug.
+- `core.autocrlf=true` on this machine: blobs are LF, working trees CRLF.
 - Kimi Code must be running; the adapter talks to `~/.kimi-code/server/instances/*.json`.
 - The OpenCode CLI must be the desktop bundle (`@opencodedesktop\resources\opencode-cli.exe`);
   the winget CLI on PATH is v1 and shares a database it cannot read.

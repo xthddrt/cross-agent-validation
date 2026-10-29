@@ -1,9 +1,7 @@
 """Read-only local dashboard: one stdlib HTTP server over a run directory."""
 
-import collections
 import json
 import pathlib
-import re
 import secrets
 import threading
 import time
@@ -14,9 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from . import events as events_mod
 from .gitops import git
 
-HERE = pathlib.Path(__file__).resolve().parent
-INDEX = HERE / "web" / "index.html"
-REV_RE = re.compile(r"[0-9a-fA-F]{4,64}")
+INDEX = pathlib.Path(__file__).resolve().parent / "web" / "index.html"
 
 
 class Dashboard:
@@ -27,88 +23,25 @@ class Dashboard:
         self.open_browser = open_browser
         self.token = secrets.token_urlsafe(9)
 
-    # ---------------------------------------------------------------- helpers
+    def artifact(self, *parts):
+        path = self.run_dir.joinpath(*parts)
+        return path.read_text(encoding="utf-8", errors="replace") if path.is_file() else None
 
     def state(self):
-        path = self.run_dir / "state.json"
-        if not path.exists():
-            return {"phase": "no state.json yet"}
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(self.artifact("state.json") or '{"phase": "no state.json yet"}')
         except json.JSONDecodeError:
             return {"phase": "state.json is being written"}
 
-    def candidate_commits(self, round_no):
-        state = self.state()
-        for item in reversed(state.get("history") or []):
-            if item.get("round") == round_no and item.get("results"):
-                names = list(item["results"])
-                return [(name, item["results"][name]["commit"]) for name in names]
-        return []
-
-    def artifact(self, *parts):
-        path = self.run_dir.joinpath(*parts)
-        if not path.exists() or path.is_dir():
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
-
     def diff(self, round_no, file_path):
-        exchange = self.run_dir / "exchange.git"
-        commits = self.candidate_commits(round_no)
-        if len(commits) < 2 or not exchange.exists():
+        """One file's diff between the two candidates of a round."""
+        item = next((entry for entry in self.state().get("history") or []
+                     if entry.get("round") == round_no and entry.get("results")), None)
+        if not item:
             return "(no two candidates for that round)"
-        _, left = commits[0]
-        _, right = commits[1]
-        return git("--git-dir", str(exchange), "diff", "--no-color", left, right, "--", file_path,
-                   check=False)[:400000]
-
-    def file_at(self, rev, file_path):
-        exchange = self.run_dir / "exchange.git"
-        return git("--git-dir", str(exchange), "show", f"{rev}:{file_path}", check=False)[:400000]
-
-    def messages(self, round_no, agent, limit=400):
-        """One agent's round as a transcript: what it said, plus one line per tool call.
-
-        Scanned from the event log rather than held in memory, so a dashboard can attach to a
-        finished run without the orchestrator still being alive.
-        """
-        path = self.run_dir / "events.jsonl"
-        out = collections.deque(maxlen=max(1, limit))
-        if not path.exists():
-            return []
-        with open(path, encoding="utf-8", errors="replace") as handle:
-            for line in handle:
-                if '"agent.text"' not in line and '"agent.tool.start"' not in line:
-                    continue
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if event.get("round") != round_no or event.get("agent") != agent:
-                    continue
-                kind = event.get("type")
-                data = event.get("data") or {}
-                if kind == "agent.text":
-                    text = data.get("text") or ""
-                    if text.strip():
-                        out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""),
-                                    "kind": "text", "text": text})
-                elif kind == "agent.tool.start":
-                    tool = data.get("tool") or "tool"
-                    given = data.get("input") or {}
-                    target = ""
-                    if isinstance(given, dict):
-                        for key in ("command", "filePath", "path", "pattern", "description", "query"):
-                            if given.get(key):
-                                target = str(given[key])
-                                break
-                    line_text = f"{tool} {target}".strip()
-                    out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""),
-                                "kind": "tool", "text": line_text[:160]})
-        return list(out)
-
-    def prompt(self, round_no, agent):
-        return self.artifact("rounds", f"r{round_no}", f"{agent}-context.md") or ""
+        left, right = (result["commit"] for result in item["results"].values())
+        return git("--git-dir", str(self.run_dir / "exchange.git"), "diff", "--no-color", left, right,
+                   "--", file_path, check=False)[:400000]
 
     # ----------------------------------------------------------------- server
 
@@ -139,18 +72,17 @@ class Dashboard:
             def do_GET(self):
                 parsed = urllib.parse.urlparse(self.path)
                 parts = [part for part in parsed.path.split("/") if part]
-                query = urllib.parse.parse_qs(parsed.query)
                 if not parts or parts[0] != dashboard.token:
-                    self._send(404, "not found", "text/plain")
-                    return
+                    return self._send(404, "not found", "text/plain")
+                query = {key: values[0] for key, values in urllib.parse.parse_qs(parsed.query).items()}
                 route = parts[1] if len(parts) > 1 else ""
                 try:
                     if route == "":
                         self._send(200, INDEX.read_text(encoding="utf-8"), "text/html; charset=utf-8")
-                    elif route == "api" and len(parts) > 2:
-                        self._api(parts[2], query)
                     elif route == "events":
-                        self._stream(query)
+                        self._stream(int(query.get("after", 0)))
+                    elif route == "api" and len(parts) > 2:
+                        self._send(*self._api(parts[2], query))
                     else:
                         self._send(404, "not found", "text/plain")
                 except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
@@ -162,63 +94,41 @@ class Dashboard:
                         return
 
             def _api(self, name, query):
-                round_no = int((query.get("round") or ["0"])[0])
-                agent = (query.get("agent") or [""])[0]
-                path = (query.get("path") or [""])[0]
+                round_no = int(query.get("round", 0))
+                agent, path = query.get("agent", ""), query.get("path", "")
                 if name == "state":
-                    return self._send(200, json.dumps(dashboard.state()))
-                if name == "events":
-                    after = int((query.get("after") or ["0"])[0])
-                    return self._send(200, json.dumps(events_mod.read(dashboard.run_dir / "events.jsonl", after)))
+                    return 200, json.dumps(dashboard.state())
                 if name == "divergence":
-                    body = dashboard.artifact("reviews", f"r{round_no}", "divergence.json")
-                    return self._send(200, body or "{}")
-                if name == "carry-forward":
-                    body = dashboard.artifact("reviews", f"r{round_no}", f"{agent}-carry-forward.json")
-                    return self._send(200, body or '{"items": []}')
+                    return 200, dashboard.artifact("reviews", f"r{round_no}", "divergence.json") or "{}"
                 if name == "review":
-                    for suffix in ("-review.json", "-review.md"):
-                        body = dashboard.artifact("reviews", f"r{round_no}", f"{agent}{suffix}")
-                        if body:
-                            return self._send(200, body)
-                    return self._send(404, "{}")
+                    body = dashboard.artifact("reviews", f"r{round_no}", f"{agent}-review.json")
+                    return (200, body) if body else (404, "{}")
                 if name == "checks":
-                    body = dashboard.artifact("checks", f"r{round_no}", f"{agent}.json")
-                    return self._send(200, body or "{}")
-                if name == "messages":
-                    limit = int((query.get("limit") or ["400"])[0])
-                    return self._send(200, json.dumps(dashboard.messages(round_no, agent, limit)))
+                    return 200, dashboard.artifact("checks", f"r{round_no}", f"{agent}.json") or "{}"
                 if name == "prompt":
-                    return self._send(200, json.dumps({"prompt": dashboard.prompt(round_no, agent)}))
+                    prompt = dashboard.artifact("rounds", f"r{round_no}", f"{agent}-context.md") or ""
+                    return 200, json.dumps({"prompt": prompt})
                 if name == "diff":
                     if ".." in path or path.startswith("-"):
-                        return self._send(400, '{"error": "bad path"}')
-                    return self._send(200, json.dumps({"diff": dashboard.diff(round_no, path)}))
-                if name == "file":
-                    rev = (query.get("rev") or [""])[0]
-                    # `rev` leads the `git show` argument: a value like `--output=...` would be an option
-                    if ".." in path or path.startswith("-") or not REV_RE.fullmatch(rev):
-                        return self._send(400, '{"error": "bad request"}')
-                    return self._send(200, json.dumps({"content": dashboard.file_at(rev, path)}))
-                self._send(404, "{}")
+                        return 400, '{"error": "bad path"}'
+                    return 200, json.dumps({"diff": dashboard.diff(round_no, path)})
+                return 404, "{}"
 
-            def _stream(self, query):
-                after = int((query.get("after") or ["0"])[0])
+            def _stream(self, after):
+                """Server-sent events: everything after `after`, then new events as they land."""
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Cache-Control", "no-cache")
                 self.send_header("Connection", "close")
                 self.end_headers()
                 deadline = time.time() + 1800
-                last = after
                 offset = 0
                 while time.time() < deadline:
                     found, offset = events_mod.tail(dashboard.run_dir / "events.jsonl", offset)
                     for event in found:
-                        if event.get("seq", 0) <= last:
-                            continue
-                        last = event["seq"]
-                        self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                        if event.get("seq", 0) > after:
+                            after = event["seq"]
+                            self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
                     self.wfile.flush()
                     time.sleep(0.7)
 

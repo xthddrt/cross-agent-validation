@@ -1,6 +1,5 @@
 {
   "name": "msmon-five-phase",
-  "version": 2,
   "description": "Reconcile the two independent five-phase logging/coverage implementations for msc-outside-monitor (paths for this PC).",
   "repo": {
     "host": "C:\\Users\\richa\\Documents\\Default Project\\msc-outside-monitor",
@@ -26,12 +25,8 @@
     ".\\build.cmd --with-fixtures",
     "{python} tools\\check_sensor_map.py"
   ],
-  "convergence": "functional",
-  "strict_paths": ["driver/**", "compat/**", "**/*.h"],
-  "formatter": null,
   "max_rounds": 3,
   "round_seconds": 5400,
   "stall_seconds": 1200,
-  "poll_seconds": 15,
   "retries": 1
 }
