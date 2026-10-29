@@ -38,17 +38,12 @@ class Case:
     version: int = 1
     task: dict = field(default_factory=dict)
     convergence: str = "strict"
-    canonical_agent: str | None = None
     strict_paths: list[str] = field(default_factory=list)
     formatter: str | None = None
-    carry_forward_limit: int = 50
     bootstrap: str = "refs"
 
     def other(self, name):
         return next(n for n in self.agents if n != name)
-
-    def canonical(self):
-        return self.canonical_agent or next(iter(self.agents))
 
     @property
     def task_prompt(self):
@@ -120,9 +115,12 @@ def load(path):
     convergence = raw.get("convergence") or raw.get("accept") or "strict"
     if convergence not in CONVERGENCE:
         raise ValueError(f"convergence must be one of {CONVERGENCE}")
-    canonical = raw.get("canonical_agent")
-    if canonical and canonical not in agents:
-        raise ValueError(f"canonical_agent {canonical!r} is not one of the agents")
+    for key in ("canonical_agent", "carry_forward_limit"):
+        if key in raw:
+            # Both candidates are weighed equally and every difference gets a decision: these
+            # settings no longer exist, and silently ignoring them would mislead the reader.
+            raise ValueError(f"{key} was removed (both candidates have equal standing); "
+                             f"delete it from the case file")
     bootstrap = raw.get("bootstrap", "refs")
     if bootstrap not in BOOTSTRAP:
         raise ValueError(f"bootstrap must be one of {BOOTSTRAP}")
@@ -148,10 +146,8 @@ def load(path):
         version=int(raw.get("version", 1)),
         task=_task(raw, root),
         convergence=convergence,
-        canonical_agent=canonical or next(iter(agents)),
         strict_paths=list(raw.get("strict_paths") or []),
         formatter=raw.get("formatter"),
-        carry_forward_limit=int(raw.get("carry_forward_limit", 50)),
         bootstrap=bootstrap,
     )
 
@@ -164,11 +160,10 @@ def describe(case):
         f"base        {case.base or 'none'}   branch {case.branch}",
         f"bootstrap   {case.bootstrap}",
         f"agents      {', '.join(f'{n} ({s.kind}, {s.model or 'default'})' for n, s in case.agents.items())}",
-        f"convergence {case.convergence}   canonical {case.canonical()}",
+        f"convergence {case.convergence}   (both candidates weighed equally)",
         f"checks      {len(case.checks)}   strict_paths {len(case.strict_paths)}",
         f"task        {'prompt present' if case.task_prompt.strip() else 'blank'}   "
         f"acceptance {len(case.task_acceptance)}   invariants {len(case.base_invariants)}",
-        f"carry_fwd   limit {case.carry_forward_limit}",
     ]
     if not case.host_repo.exists():
         lines.append(f"WARNING: host repo does not exist: {case.host_repo}")

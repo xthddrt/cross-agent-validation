@@ -24,8 +24,8 @@ does today, not what it was designed to do.
    rebuilds worktrees. Only inspected by reading, never exercised by a real interrupted run.
 3. **`functional` acceptance on a large, genuinely divergent tree is untested.** The self-run
    ended with 2 substantive files; the monitor case starts with ~63.
-4. **Carry-forward dispositions.** The baseline owner must dispose of every ledger item
-   (capped by `carry_forward_limit`, 20 in the monitor case). If an agent skips any, the review
+4. **Carry-forward dispositions.** Each agent must decide on every item in its own ledger (the
+   other candidate's changes its tree lacks; uncapped). If an agent skips any, the review
    is invalid and the round retries. This has never been through a real round successfully.
 5. **Kimi adapter polling assumptions.** It reads `pending_interaction`, `busy`,
    `main_turn_active`, `last_turn_reason` from `/api/v1/sessions/{id}` every 3 s. Only `approval`
@@ -55,7 +55,7 @@ cav/events.py        append-only events.jsonl, monotonic seq, redaction, per-typ
 cav/compare.py       tree comparison, cosmetic classes, settlement normalisation, carry-forward
 cav/review.py        structured review schema, validation, markdown rendering
 cav/prompts.py       reconcile / implement / confirm prompts and the review schema text
-cav/orchestrator.py  bootstrap, baseline choice, rounds, checks, verdict, finalization
+cav/orchestrator.py  bootstrap, symmetric rounds, checks, verdict, publication choice, finalization
 cav/web.py           read-only dashboard server (cav/web/index.html)
 cav/cli.py           run / solve / check / web / status / diff / smoke
 ```

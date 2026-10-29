@@ -16,7 +16,7 @@ REVIEW_SCHEMA = """{
   "areas": [{"area": "<name>", "status": "agreed|open", "kept": "<agent>", "why": "<reason>"}],
   "changes": [{"path": "<file you changed>", "why": "<why>"}],
   "incorporated_from_other": ["<file>"],
-  "carry_forward_dispositions": [{"item_id": "CF-01", "status": "retained|reoffered|intentionally_dropped", "why": "<why>"}],
+  "carry_forward_dispositions": [{"item_id": "CF-01", "status": "retained|intentionally_dropped", "why": "<why>"}],
   "remaining_disagreements": [{"area": "<name>", "kind": "behavioral|cosmetic|editorial|equivalent", "note": "<why>"}]
 }"""
 
@@ -43,9 +43,10 @@ def _ledger_block(ledger):
     items = (ledger or {}).get("items") or []
     if not items:
         return ""
-    lines = ["UNRETAINED CHANGES FROM THE OTHER CANDIDATE",
-             "These paths exist in the other candidate but not in your baseline. They are not",
-             "automatically improvements. Dispose of each one in carry_forward_dispositions.", ""]
+    lines = ["THE OTHER CANDIDATE'S CHANGES YOUR TREE LACKS",
+             "Each path below differs in the other candidate. Neither version is the default: judge",
+             "each on its merits, take it (\"retained\") or keep yours (\"intentionally_dropped\"),",
+             "and give the reason in carry_forward_dispositions. Every item needs a decision.", ""]
     for item in items:
         lines.append(f"- {item['id']}  {item['path']}  (+{item['added']}/-{item['removed']})")
     if (ledger or {}).get("omitted"):
@@ -92,7 +93,6 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
     else:
         objective = "CONFIRM the final result."
 
-    canonical = case.canonical()
     lines = [
         f"You are {agent}, one of two independent agents working on the same task.",
         "",
@@ -106,20 +106,18 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         objective,
         "",
     ]
-    if context.get("baseline"):
-        lines += [f"SHARED BASELINE: {context['baseline']} ({context.get('baseline_reason', '')})", ""]
     if context.get("phase") == "reconcile":
         lines += [
-            "BASELINE AND THE ATTEMPT NOT USED AS THE BASELINE",
-            f"- your previous candidate: {context.get('own_sha', '?')}",
-            f"- the other agent's previous candidate: {context.get('other_sha', '?')}",
-            f"- not chosen as the baseline: {context.get('delta_agent', '(none)')}",
-            f"- that attempt's patch against your baseline: {context.get('delta_patch', '(none)')}",
-            f"- that attempt's review: {context.get('delta_review', '(none)')}",
+            "THE TWO CANDIDATES (equal standing: neither is the default)",
+            f"- yours, which your working tree starts from: {context.get('own_sha', '?')}",
+            f"- {other}'s: {context.get('other_sha', '?')}",
+            f"- {other}'s candidate as a diff against your tree: {context.get('other_patch', '(none)')}",
+            f"- {other}'s previous review: {context.get('other_review', '(none)')}",
             f"- your previous review: {context.get('own_review', '(none)')}",
             "",
-            "If the unused attempt is your own work, re-offer what still applies onto the baseline.",
-            "If it is the other agent's, incorporate the stronger parts and say which you took.",
+            f"{other} receives the same material about your candidate. Review both candidates with",
+            "the same scrutiny, take the stronger version of each part into your tree, and say",
+            "which you took and why.",
             "",
         ]
     ledger = _ledger_block(context.get("ledger"))
@@ -142,8 +140,9 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         "WORK",
         "1. Read the code, not only the diff. Findings need a file and a line.",
         "2. Edit files in your working tree so the result is the strongest version of the task.",
-        "3. Where two alternatives are behaviourally equivalent and differ only cosmetically,",
-        f"   keep the {canonical} candidate's form. Never trade equivalent implementations.",
+        "3. Where two alternatives are behaviourally equivalent and differ only cosmetically, keep",
+        "   the form already in your tree and record it as kind \"equivalent\". Never rewrite",
+        "   equivalent code just to match the other candidate.",
         "4. Build or test if you change code.",
         "",
         "RULES",

@@ -24,10 +24,8 @@
     "{python} -m unittest discover -s tests -t ."
   ],
   "convergence": "functional",
-  "canonical_agent": "deepseek",
   "strict_paths": [],
   "formatter": null,
-  "carry_forward_limit": 20,
   "max_rounds": 4,
   "round_seconds": 5400,
   "stall_seconds": 1200,

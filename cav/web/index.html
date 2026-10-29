@@ -228,7 +228,7 @@ let state = {}, runInfo = {}, names = [], selected = null, follow = true;
 const rounds = {};
 
 function R(n) {
-  return rounds[n] ||= {n, base:null, cf:null, start:null, agents:{}, reviews:{}, checks:{}, div:null,
+  return rounds[n] ||= {n, starts:null, cf:{}, start:null, agents:{}, reviews:{}, checks:{}, div:null,
                         verdict:null, blockers:null, notes:[], fin:{confirm:{}}};
 }
 function A(r, name) {
@@ -252,8 +252,9 @@ function apply(e) {
   const a = who && who !== 'final' ? A(r, who) : null;
   if (a) a.last = ts;
   switch (t) {
-    case 'baseline.selected': r.base = d; break;
-    case 'carry_forward.computed': r.cf = d; break;
+    case 'round.prepared': r.starts = d.starts || {}; break;
+    case 'carry_forward.computed': r.cf[who] = d; break;
+    case 'publication.selected': r.fin.published = {agent:who, reason:d.reason}; break;
     case 'round.start': r.start = ts; break;
     case 'agent.launch':
       if (r.verdict && !a.confirm) { a.confirm = true; a.feed.push({k:'div', text:'final confirmation of the settled commit'}); }
@@ -356,9 +357,11 @@ function steps(n) {
   const res = (h && h.results) || {};
   const out = [];
 
-  out.push({label:'Baseline', done:!!r.base,
-            sub: r.base ? `${r.base.owner} @ ${sha(r.base.commit)}` + (r.cf && r.cf.items ? ` · ${plural(r.cf.items, 'carry-forward item')}` : '') : '',
-            title: r.base && r.base.reason});
+  // each agent starts from its own candidate and must decide on every change the other has
+  const decide = names.filter(x => r.cf[x] && r.cf[x].items).map(x => `${x} ${r.cf[x].items}`);
+  out.push({label:'Starting points', done:!!r.starts,
+            sub: r.starts ? 'each from its own' + (decide.length ? ` · to decide: ${decide.join(', ')}` : '') : '',
+            title: r.starts ? names.map(x => `${x} @ ${sha(r.starts[x])}`).join('\n') : ''});
 
   const working = agents.filter(a => a.launch && !a.done && !a.confirm);
   const agentsDone = names.length === 2 && names.every(x => r.reviews[x] || (r.agents[x] && r.agents[x].done));
@@ -399,8 +402,8 @@ function steps(n) {
   let fin;
   if (v && !accepted) fin = {label:'Finalize', state:'skip', done:true, sub:'not reached'};
   else if (f.result && f.result.ok === false) fin = {label:'Finalize', done:true, state:'bad', sub:f.result.reason};
-  else if (f.complete) fin = {label:'Finalize', done:true, state:'good',
-                              sub:`${sha(f.complete.commit)}${f.push ? ' · pushed' : ' · not pushed'}`};
+  else if (f.complete) fin = {label:'Finalize', done:true, state:'good', title:f.published ? f.published.reason : '',
+                              sub:`${f.published ? `${f.published.agent}'s · ` : ''}${sha(f.complete.commit)}${f.push ? ' · pushed' : ' · not pushed'}`};
   else fin = {label:'Finalize', done:false,
               sub: Object.keys(f.confirm).length ? 'agents confirming' : f.checks ? 'final checks done' : f.settle ? 'settling commit' : ''};
   out.push(fin);
@@ -429,7 +432,6 @@ function renderHeader() {
 
   const parts = [];
   if (runInfo.convergence) parts.push(`${runInfo.convergence} convergence`);
-  if (runInfo.canonical) parts.push(`canonical ${runInfo.canonical}`);
   if (state.final) parts.push(`final ${sha(state.final.commit)}${state.final.pushed ? ' · pushed' : ''}`);
   if (state.run_id) parts.push(state.run_id);
   let html = esc(parts.join(' · '));
@@ -694,7 +696,7 @@ function reviewHtml(d) {
     [esc(x.area), esc(x.kind), esc(x.note)]));
   html += table('Areas', ['Area', 'Status', 'Kept', 'Why'], (d.areas || []).map(x =>
     [esc(x.area), esc(x.status), esc(x.kept), esc(x.why)]));
-  html += table('Changes from the baseline', ['File', 'Why'], (d.changes || []).map(x =>
+  html += table('Changes from the starting tree', ['File', 'Why'], (d.changes || []).map(x =>
     [`<span class="mono">${esc(x.path)}</span>`, esc(x.why)]));
   html += table('Carry-forward decisions', ['Item', 'Decision', 'Why'], (d.carry_forward_dispositions || []).map(x =>
     [esc(x.item_id), esc(x.status), esc(x.why)]));
