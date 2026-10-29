@@ -58,6 +58,34 @@ def read(path, after=0):
     return out
 
 
+def tail(path, offset=0):
+    """Events appended after byte `offset`, and the offset to continue from.
+
+    A follower reads only what is new instead of re-parsing the whole log on every poll. A
+    partially written last line is left for the next call; a file smaller than `offset` was
+    rotated, so reading starts over.
+    """
+    path = pathlib.Path(path)
+    try:
+        if path.stat().st_size < offset:
+            offset = 0
+        with open(path, "rb") as handle:
+            handle.seek(offset)
+            chunk = handle.read()
+    except OSError:
+        return [], offset
+    end = chunk.rfind(b"\n") + 1
+    out = []
+    for line in chunk[:end].splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.append(json.loads(line))
+        except ValueError:
+            continue
+    return out, offset + end
+
+
 class EventWriter:
     def __init__(self, path, run_id):
         self.path = pathlib.Path(path)
@@ -70,7 +98,10 @@ class EventWriter:
 
     def _rotate(self):
         if self.path.exists() and self.path.stat().st_size > ROTATE_BYTES:
-            self.path.replace(self.path.with_suffix(".jsonl.1"))
+            try:
+                self.path.replace(self.path.with_suffix(".jsonl.1"))
+            except OSError:
+                pass  # Windows refuses while a reader has the file open; try again next event
 
     def emit(self, type_, round=None, agent=None, data=None):
         with self._lock:

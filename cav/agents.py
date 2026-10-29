@@ -330,6 +330,17 @@ class KimiAgent(Agent):
                 f"a tool call would block on a human approval")
 
     def run(self, prompt, cwd):
+        try:
+            return self._run(prompt, cwd)
+        finally:
+            self.close()  # also when an API call raises: the log handle must not outlive the run
+
+    def close(self):
+        if self._transcript:
+            self._transcript.close()
+            self._transcript = None
+
+    def _run(self, prompt, cwd):
         if not self.base:
             self._connect()
         cwd = str(pathlib.Path(cwd).resolve())
@@ -401,9 +412,6 @@ class KimiAgent(Agent):
         self.state.touch("finished" if not self.state.error else "failed")
         self._event("agent.done", {"ok": self.state.error is None,
                                    "reason": self.state.error or "completed"})
-        if self._transcript:
-            self._transcript.close()
-            self._transcript = None
         return {"ok": self.state.error is None, "text": text,
                 "reason": self.state.error or "completed", "session": self.session_id}
 
