@@ -74,6 +74,26 @@ def _line_count(path):
         return None
 
 
+def _shape_errors(data):
+    """Reviews are agent-written: every field the orchestrator reads must have the right shape."""
+    errors = []
+    for key in ("areas", "remaining_disagreements", "carry_forward_dispositions"):
+        value = data.get(key)
+        if value is None:
+            continue
+        if not isinstance(value, list) or any(not isinstance(item, dict) for item in value):
+            errors.append(f"{key} must be a list of objects")
+    changes = data.get("changes")
+    if changes is not None and (not isinstance(changes, list)
+                                or any(not isinstance(item, dict) or not item.get("path")
+                                       for item in changes)):
+        errors.append("changes must be a list of objects with a path")
+    incorporated = data.get("incorporated_from_other")
+    if incorporated is not None and not isinstance(incorporated, list):
+        errors.append("incorporated_from_other must be a list")
+    return errors
+
+
 def validate(data, agent, round_no, worktree, required_dispositions=()):
     errors = []
     worktree = pathlib.Path(worktree)
@@ -88,8 +108,11 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         errors.append("round missing or not an integer")
 
     findings = data.get("findings") or []
-    if not isinstance(findings, list):
-        return errors + ["findings is not a list"]
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        return errors + ["findings must be a list of objects"]
+    shaped = _shape_errors(data)
+    if shaped:
+        return errors + shaped
     ids = [finding.get("id") for finding in findings]
     if len(ids) != len(set(ids)):
         errors.append("duplicate finding ids")
@@ -113,15 +136,18 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             errors.append(f"{label}: path does not exist: {path}")
             continue
         line = finding.get("line")
-        if line is not None:
-            count = _line_count(target)
-            try:
-                line = int(line)
-            except (TypeError, ValueError):
-                errors.append(f"{label}: line is not an integer")
-            else:
-                if count is not None and (line < 1 or line > count):
-                    errors.append(f"{label}: line {line} outside {path} (1..{count})")
+        if line is None:
+            # A finding, and especially a refusal to approve, needs a citation the reader can open.
+            errors.append(f"{label}: no line")
+            continue
+        count = _line_count(target)
+        try:
+            line = int(line)
+        except (TypeError, ValueError):
+            errors.append(f"{label}: line is not an integer")
+        else:
+            if count is not None and (line < 1 or line > count):
+                errors.append(f"{label}: line {line} outside {path} (1..{count})")
 
     counts = data.get("counts") or {}
     expected = {

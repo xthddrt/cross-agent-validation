@@ -205,16 +205,21 @@ class Orchestrator:
 
     # ------------------------------------------------------------------- round
 
-    def previous_results(self, round_no):
-        if round_no == 1 or not self.state.get("history"):
-            out = {}
-            for name in self.case.agents:
-                sha = self.exchange.sha(f"candidate/{name}/r0")
-                if not sha:
-                    raise RuntimeError(f"missing candidate/{name}/r0")
-                out[name] = {"commit": sha, "tree": self.exchange.tree_of(sha), "checks_ok": None}
-            return out
-        return json.loads(json.dumps(self.state["history"][-1].get("results") or {}))
+    def previous_results(self):
+        """Candidates from the last round that produced results, else the r0 candidates.
+
+        A failed round leaves a history entry without results; resuming must not stop there.
+        """
+        for item in reversed(self.state.get("history") or []):
+            if item.get("results"):
+                return json.loads(json.dumps(item["results"]))
+        out = {}
+        for name in self.case.agents:
+            sha = self.exchange.sha(f"candidate/{name}/r0")
+            if not sha:
+                raise RuntimeError(f"missing candidate/{name}/r0")
+            out[name] = {"commit": sha, "tree": self.exchange.tree_of(sha), "checks_ok": None}
+        return out
 
     def choose_baseline(self, previous):
         """One whole candidate, never a per-file mixture: cross-file consistency depends on it.
@@ -234,7 +239,7 @@ class Orchestrator:
         self.state["round"] = round_no
         self.save()
         self.repo.fetch()
-        previous = self.previous_results(round_no)
+        previous = self.previous_results()
         baseline, reason, owner = self.choose_baseline(previous)
         phase = "implement" if (case.bootstrap == "base" and round_no == 1) else "reconcile"
         self.emit("baseline.selected", round_no,
@@ -311,7 +316,9 @@ class Orchestrator:
         self.state["phase"] = f"r{round_no}-agents"
         self.save()
         self.emit("round.start", round_no, data={"phase": phase, "baseline": baseline})
-        self.drive(round_no, runs, prompts, worktrees, paths)
+        dispositions = {name: (tuple(ledger_ids) if (name == owner and ledger_ids) else ())
+                        for name in case.agents}
+        self.drive(round_no, runs, prompts, worktrees, paths, dispositions)
 
         results = {}
         failed = []
@@ -505,13 +512,14 @@ class Orchestrator:
 
     # --------------------------------------------------------------- drive/monitor
 
-    def drive(self, round_no, runs, prompts, worktrees, reviews):
+    def drive(self, round_no, runs, prompts, worktrees, reviews, required=None):
         case = self.case
+        required = required or {}
 
         def artifact_problem(name):
             worktree = worktrees[name]["path"]
             rev = review_mod.load(reviews[name]["json"], reviews[name]["md"], name, round_no,
-                                  worktree)
+                                  worktree, required.get(name) or ())
             if runs[name].state.error:
                 return runs[name].state.error
             if not runs[name].state.finished:

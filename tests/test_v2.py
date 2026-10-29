@@ -88,6 +88,30 @@ class StructuredFake:
         return {"ok": True, "text": "done", "reason": "completed"}
 
 
+class FlakyFake(StructuredFake):
+    """Produces no review at all in the rounds listed in skip_rounds."""
+
+    def __init__(self, name, files, skip_rounds=()):
+        super().__init__(name, files)
+        self.skip_rounds = set(skip_rounds)
+
+    def run(self, prompt, cwd):
+        if int(ROUND_RE.search(prompt).group(1)) in self.skip_rounds:
+            self.state.finished = True
+            self.state.touch("finished")
+            return {"ok": True, "text": "", "reason": "completed"}
+        return super().run(prompt, cwd)
+
+
+class DispositionRetryFake(StructuredFake):
+    """Omits carry-forward dispositions on its first attempt."""
+
+    def run(self, prompt, cwd):
+        self.dispositions = ([] if self.calls == 0 else
+                             [{"item_id": "CF-01", "status": "retained", "why": "test"}])
+        return super().run(prompt, cwd)
+
+
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-v2-"))
@@ -145,6 +169,30 @@ class ClassificationTest(Base):
         tree_a, tree_b = self.trees(left, right)
         diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
         self.assertEqual(diff["files"]["substantive"], ["a.c"])
+
+    def test_python_comments_are_cosmetic_but_docstrings_are_content(self):
+        left = self.commit("m.py", "x = 1\n# old note\n", "left")
+        right = self.commit("m.py", "x = 1\n# new note\n", "py comment")
+        tree_a, tree_b = self.trees(left, right)
+        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
+        self.assertEqual(diff["files"]["comments_candidate"], ["m.py"])
+
+        doc_a = 'def f():\n    """Doc.\n    # alpha\n    """\n    return 1\n'
+        doc_b = doc_a.replace("# alpha", "# beta")
+        left = self.commit("doc.py", doc_a, "docstring a")
+        right = self.commit("doc.py", doc_b, "docstring b")
+        tree_a, tree_b = self.trees(left, right)
+        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
+        self.assertEqual(diff["files"]["substantive"], ["doc.py"],
+                         "a `#` inside a docstring is content, not a comment")
+
+    def test_a_hash_inside_a_nested_fstring_does_not_hide_a_change(self):
+        """`f"{row["key#id"]}"` is one string in Python 3.12+: a `#` in it is not a comment start."""
+        left = self.commit("f.py", 'label = f"{row["key#id"]}" + "alpha"\n', "left")
+        right = self.commit("f.py", 'label = f"{row["key#id"]}" + "beta"\n', "right")
+        tree_a, tree_b = self.trees(left, right)
+        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
+        self.assertEqual(diff["files"]["substantive"], ["f.py"])
 
     def test_strict_paths_are_never_cosmetic(self):
         left = self.commit("x.h", "#define A 1\n", "left")
@@ -235,6 +283,28 @@ class ReviewValidationTest(Base):
                                  required_dispositions=["CF-01"])
         self.assertTrue(any("carry-forward" in error for error in errors))
 
+    def test_finding_without_a_line_is_invalid(self):
+        data = self.data(findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
+                                    "path": "base.txt", "summary": "wrong"}],
+                         counts={"must_fix_total": 1, "blocking_must_fix": 1,
+                                 "should_fix": 0, "nit": 0},
+                         behavior_approved=False, other_behavior_approved=False)
+        errors = review.validate(data, "deepseek", 1, self.repo)
+        self.assertTrue(any("no line" in error for error in errors), errors)
+
+    def test_malformed_review_fields_are_rejected_not_crashed(self):
+        cases = {
+            "findings": {"findings": ["F-01"]},
+            "changes": {"changes": ["cav/cli.py"]},
+            "remaining_disagreements": {"remaining_disagreements": ["review.py"]},
+            "carry_forward_dispositions": {"carry_forward_dispositions": ["CF-01"]},
+            "areas": {"areas": ["review"]},
+        }
+        for label, overrides in cases.items():
+            with self.subTest(field=label):
+                errors = review.validate(self.data(**overrides), "deepseek", 1, self.repo)
+                self.assertTrue(errors, f"{label} should be rejected")
+
 
 class AcceptanceTest(Base):
     def test_functional_accepts_different_trees(self):
@@ -310,6 +380,46 @@ class AcceptanceTest(Base):
         case.agents["kimi"].bootstrap_ref = kimi_ref
         with self.assertRaises(RuntimeError):
             self.run_with(case, fakes)
+
+    def test_carry_forward_disposition_is_retried_before_the_round_fails(self):
+        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
+        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        # The baseline owner (deepseek) is the one that must dispose of the other candidate's work.
+        deepseek = DispositionRetryFake("deepseek", lambda r: {"shared.txt": "deepseek\n"})
+        kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
+        case = self.case(max_rounds=1, carry_forward_limit=5, retries=1)
+        case.agents["kimi"].bootstrap_ref = kimi_ref
+        _, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
+        self.assertEqual(state["phase"], "converged")
+        log = (self.tmp / "run" / "run.log").read_text(encoding="utf-8")
+        self.assertIn("retry 1 for: deepseek", log,
+                      "a missing disposition must be retried, not fail the round")
+
+    def test_resume_after_a_failed_round_uses_the_last_results(self):
+        first = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}),
+            "kimi": FlakyFake("kimi", lambda r: {"shared.txt": "kimi\n"}, skip_rounds=(1,)),
+        }
+        with self.assertRaises(RuntimeError):
+            self.run_with(self.case(max_rounds=2), first)
+
+        second = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
+        }
+
+        def fake_build(spec, log_path, title_prefix=""):
+            return second[spec.name]
+
+        with mock.patch("cav.agents.build", side_effect=fake_build):
+            orchestrator = Orchestrator(self.case(max_rounds=2), self.tmp / "run", resume=True)
+            state = orchestrator.run()
+
+        self.assertEqual(state["phase"], "converged")
+        self.assertTrue(state["history"][0].get("failed"), "the failed round stays in the history")
+        self.assertEqual(state["history"][-1]["round"], 2, "resume starts after the failed round")
 
 
 class IsolationTest(Base):
