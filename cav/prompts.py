@@ -5,7 +5,7 @@ import sys
 REVIEW_SCHEMA = """{
   "round": <round number>,
   "agent": "<your name>",
-  "counts": {"must_fix_total": <n>, "blocking_must_fix": <n>, "should_fix": <n>, "nit": <n>},
+  "counts": {"must_fix_total": <MUST_FIX findings>, "blocking_must_fix": <MUST_FIX findings with kind behavioral>, "should_fix": <n>, "nit": <n>},
   "behavior_approved": <true|false>,
   "other_behavior_approved": <true|false>,
   "findings": [
@@ -68,6 +68,11 @@ def review_rules(agent, review_md, review_json, template_path, ledger_dispositio
 - The legacy template is here for reference: {template_path}
 - MUST_FIX counts only defects: correctness, the original objective, security, data integrity,
   or required validation. Formatting, wording and taste are NIT or SHOULD_FIX, never MUST_FIX.
+- Counts are derived from your findings and recomputed by the orchestrator; they are for your
+  own summary, not trusted. `blocking_must_fix` is the number of MUST_FIX findings of kind
+  "behavioral".
+- If you approve (behavior_approved true), remaining_disagreements must contain no "behavioral"
+  entry. Work you still want goes in `areas` with status "open", or as a SHOULD_FIX finding.
 - You may set behavior_approved or other_behavior_approved to false only by citing a MUST_FIX
   finding of kind "behavioral" with a real path and line. A refusal without one is invalid.{dispositions}
 """

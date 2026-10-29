@@ -162,10 +162,12 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
     }
     blocking = sum(1 for finding in findings
                    if finding.get("severity") == "MUST_FIX" and finding.get("kind") == "behavioral")
-    expected["blocking_must_fix"] = blocking
-    for key, value in expected.items():
-        if counts.get(key) != value:
-            errors.append(f"counts.{key} is {counts.get(key)!r}, findings say {value}")
+    # Counts are derived from findings. Recompute them rather than reject a review over
+    # arithmetic the orchestrator can do itself: the counts were never the evidence.
+    data["counts"] = {"must_fix_total": expected["must_fix_total"],
+                      "blocking_must_fix": blocking,
+                      "should_fix": expected["should_fix"],
+                      "nit": expected["nit"]}
 
     for key in ("behavior_approved", "other_behavior_approved"):
         if not isinstance(data.get(key), bool):
@@ -175,7 +177,9 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
 
     for item in (data.get("remaining_disagreements") or []):
         if (item or {}).get("kind") == "behavioral" and data.get("behavior_approved"):
-            errors.append(f"open behavioural disagreement {item.get('area')!r} contradicts approval")
+            errors.append(
+                f"remaining_disagreements lists {item.get('area')!r} as behavioural while "
+                f"behavior_approved is true; move it to areas or withhold approval")
 
     dispositions = data.get("carry_forward_dispositions") or []
     if required_dispositions:

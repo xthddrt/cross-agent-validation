@@ -13,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from cav import agents as agent_mod
-from cav import compare, config, events, review
+from cav import compare, config, events, prompts, review
 from cav.agents import KimiAgent, RunState
 from cav.gitops import Repo, git
 from cav.orchestrator import Orchestrator
@@ -251,11 +251,28 @@ class ReviewValidationTest(Base):
     def test_clean_review_is_valid(self):
         self.assertEqual(review.validate(self.data(), "deepseek", 1, self.repo), [])
 
-    def test_counts_must_match_findings(self):
-        data = self.data(counts={"must_fix_total": 2, "blocking_must_fix": 0,
-                                 "should_fix": 0, "nit": 0})
-        self.assertTrue(any("must_fix_total" in error
-                            for error in review.validate(data, "deepseek", 1, self.repo)))
+    def test_counts_are_recomputed_from_findings(self):
+        data = self.data(counts={"must_fix_total": 9, "blocking_must_fix": 9,
+                                 "should_fix": 9, "nit": 9})
+        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
+        self.assertEqual(data["counts"], {"must_fix_total": 0, "blocking_must_fix": 0,
+                                          "should_fix": 0, "nit": 0})
+
+    def test_blocking_count_is_derived_from_findings(self):
+        data = self.data(
+            counts={"must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
+            behavior_approved=False, other_behavior_approved=False,
+            findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
+                       "path": "base.txt", "line": 1}])
+        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
+        self.assertEqual(data["counts"]["blocking_must_fix"], 1)
+        self.assertEqual(data["counts"]["must_fix_total"], 1)
+
+    def test_prompt_states_the_review_rules(self):
+        text = prompts.review_rules("deepseek", "a.md", "a.json", "t.md", ["CF-01"])
+        self.assertIn("blocking_must_fix", text)
+        self.assertIn("recomputed", text)
+        self.assertIn('no "behavioral"', text)
 
     def test_cited_line_must_exist(self):
         data = self.data(findings=[{"id": "F-01", "severity": "SHOULD_FIX", "kind": "cosmetic",
