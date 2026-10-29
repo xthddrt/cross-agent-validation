@@ -273,6 +273,15 @@ class ReviewValidationTest(Base):
         self.assertIn("blocking_must_fix", text)
         self.assertIn("recomputed", text)
         self.assertIn('no "behavioral"', text)
+        self.assertIn('"equivalent"', text)
+
+    def test_equivalent_kind_is_allowed_for_remaining_differences(self):
+        data = self.data(remaining_disagreements=[
+            {"area": "observer summary envelope", "kind": "equivalent", "note": "both behave the same"}])
+        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
+        data = self.data(remaining_disagreements=[{"area": "x", "kind": "equivalent"}])
+        data["behavior_approved"] = True
+        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
 
     def test_cited_line_must_exist(self):
         data = self.data(findings=[{"id": "F-01", "severity": "SHOULD_FIX", "kind": "cosmetic",

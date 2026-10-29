@@ -6,7 +6,11 @@ import re
 
 MUST_FIX_RE = re.compile(r"(?m)^MUST_FIX\s*:\s*(\d+)\s*$")
 SEVERITIES = ("MUST_FIX", "SHOULD_FIX", "NIT")
-KINDS = ("behavioral", "cosmetic", "editorial")
+FINDING_KINDS = ("behavioral", "cosmetic", "editorial")
+# "equivalent" exists so an agent can record a difference it accepts without calling it open:
+# only "behavioral" blocks functional convergence.
+DISAGREEMENT_KINDS = FINDING_KINDS + ("equivalent",)
+KINDS = FINDING_KINDS
 
 
 def parse_must_fix(path):
@@ -176,10 +180,13 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             errors.append(f"{key} is false without a blocking finding")
 
     for item in (data.get("remaining_disagreements") or []):
-        if (item or {}).get("kind") == "behavioral" and data.get("behavior_approved"):
+        kind = (item or {}).get("kind")
+        if kind not in DISAGREEMENT_KINDS:
+            errors.append(f"remaining disagreement {item.get('area')!r}: kind {kind!r} invalid")
+        if kind == "behavioral" and data.get("behavior_approved"):
             errors.append(
                 f"remaining_disagreements lists {item.get('area')!r} as behavioural while "
-                f"behavior_approved is true; move it to areas or withhold approval")
+                f"behavior_approved is true; mark it equivalent, move it to areas, or withhold approval")
 
     dispositions = data.get("carry_forward_dispositions") or []
     if required_dispositions:

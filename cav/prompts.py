@@ -17,7 +17,7 @@ REVIEW_SCHEMA = """{
   "changes": [{"path": "<file you changed>", "why": "<why>"}],
   "incorporated_from_other": ["<file>"],
   "carry_forward_dispositions": [{"item_id": "CF-01", "status": "retained|reoffered|intentionally_dropped", "why": "<why>"}],
-  "remaining_disagreements": [{"area": "<name>", "kind": "behavioral|cosmetic|editorial", "note": "<why>"}]
+  "remaining_disagreements": [{"area": "<name>", "kind": "behavioral|cosmetic|editorial|equivalent", "note": "<why>"}]
 }"""
 
 
@@ -72,7 +72,9 @@ def review_rules(agent, review_md, review_json, template_path, ledger_dispositio
   own summary, not trusted. `blocking_must_fix` is the number of MUST_FIX findings of kind
   "behavioral".
 - If you approve (behavior_approved true), remaining_disagreements must contain no "behavioral"
-  entry. Work you still want goes in `areas` with status "open", or as a SHOULD_FIX finding.
+  entry. A difference you accept as behaviourally equivalent is kind "equivalent"; "behavioral"
+  means unresolved and blocks convergence. Work you still want goes in `areas` with status
+  "open", or as a SHOULD_FIX finding.
 - You may set behavior_approved or other_behavior_approved to false only by citing a MUST_FIX
   finding of kind "behavioral" with a real path and line. A refusal without one is invalid.{dispositions}
 """
