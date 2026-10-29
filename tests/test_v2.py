@@ -247,12 +247,33 @@ class AcceptanceTest(Base):
         self.assertEqual(state["phase"], "converged")
         self.assertEqual(state["final"]["verdict"], "functional")
         self.assertIsNotNone((orchestrator.run_dir / "WAIVED.md").exists())
-        self.assertTrue((orchestrator.run_dir / "reviews" / "r1-confirm" / "kimi-review.json").exists())
+        self.assertEqual(state["final"]["confirmation"], "skipped (approved tree)")
         self.assertTrue((orchestrator.run_dir / "signoff" / "deepseek.json").exists())
         final_tree = state["final"]["tree"]
         canonical_tree = state["history"][-1]["results"]["deepseek"]["tree"]
         self.assertEqual(final_tree, canonical_tree, "functional acceptance publishes canonical")
         self.assertIn("shared.txt", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+
+    def test_unchanged_acceptance_skips_confirmation(self):
+        """Both agents already approved that exact tree; asking again is pure overhead."""
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
+        }
+        orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
+        self.assertEqual(state["final"]["confirmation"], "skipped (approved tree)")
+        self.assertFalse((orchestrator.run_dir / "reviews" / "r1-confirm").exists())
+        self.assertEqual(sum(fake.calls for fake in fakes.values()), 2)
+
+    def test_settlement_change_requires_confirmation(self):
+        """If settlement rewrites bytes, the approved tree is no longer what gets published."""
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "value   \n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "value\n"}),
+        }
+        orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
+        self.assertEqual(state["final"]["confirmation"], "confirmed")
+        self.assertTrue((orchestrator.run_dir / "reviews" / "r1-confirm" / "kimi-review.json").exists())
 
     def test_refusal_with_finding_blocks_publication(self):
         finding = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",

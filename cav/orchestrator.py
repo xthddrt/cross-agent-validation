@@ -770,29 +770,41 @@ class Orchestrator:
         self.emit("final.start", round_no, data={"commit": commit})
         self.state["phase"] = f"r{round_no}-final"
         self.save()
-        final_checks = self.execute_checks("final", final_wt, self.run_dir / "final" / "checks.json")
-        self.emit("final.checks", round_no, data={"ok": final_checks["ok"]})
+        # The canonical candidate is one of the two trees both agents just approved. Re-running
+        # the matrix and re-asking for approval on byte-identical content is pure overhead.
+        unchanged = commit == results[canonical]["commit"]
+        if unchanged:
+            final_checks = dict(history["checks"][canonical])
+            self.write_check(self.run_dir / "final" / "checks.json", final_checks)
+            self.emit("final.checks", round_no, data={"ok": final_checks["ok"], "reused": True})
+        else:
+            final_checks = self.execute_checks("final", final_wt, self.run_dir / "final" / "checks.json")
+            self.emit("final.checks", round_no, data={"ok": final_checks["ok"], "reused": False})
         if not final_checks["ok"]:
             return self.refuse(round_no, "final checks failed", final_checks)
 
-        if verdict == "strict" and commit == results[canonical]["commit"]:
+        if unchanged:
             confirmed = True
+            self.log(f"r{round_no}: final commit is the approved candidate; confirmation skipped")
+            self.emit("final.confirmation", round_no, data={"ok": True, "skipped": "unchanged tree"})
         else:
             confirmed = self.confirm(round_no, commit, history)
         if not confirmed:
             return self.refuse(round_no, "final confirmation refused", final_checks)
 
         waived = self.waived_list(history)
+        confirmation = "skipped (approved tree)" if unchanged else "confirmed"
         for name in case.agents:
             entry = self.state["agents"].setdefault(name, {})
             entry.update({"state": "done", "detail": "finished", "error": None})
-        self.write_signoffs(round_no, commit, final_tree, verdict, waived)
+        self.write_signoffs(round_no, commit, final_tree, verdict, waived, confirmation)
         self.write_waived(round_no, history, waived)
         self.state["phase"] = "converged"
         self.state["final"] = {"round": round_no, "commit": commit, "tree": final_tree,
                                "verdict": verdict, "pushed": False,
                                "accepted": waived["accepted"][:200],
                                "checks": final_checks["commands"],
+                               "confirmation": confirmation,
                                "basis": self.assurance_basis()}
         self.save()
         self.write_report(round_no)
@@ -886,7 +898,7 @@ class Orchestrator:
                     for path in (files.get(key) or [])]
         return {"accepted": accepted, "totals": history.get("divergence") or {}}
 
-    def write_signoffs(self, round_no, commit, tree, verdict, waived):
+    def write_signoffs(self, round_no, commit, tree, verdict, waived, confirmation):
         path = self.run_dir / "signoff"
         path.mkdir(exist_ok=True)
         for name in self.case.agents:
@@ -901,6 +913,7 @@ class Orchestrator:
                            else "final/checks.json"),
                 "final_checks": "final/checks.json",
                 "accepted_differences": waived["accepted"],
+                "confirmation": confirmation,
                 "basis": self.assurance_basis(),
                 "derived_from": ("mechanical evidence: valid reviews, zero blocking findings, "
                                  "passing checks, final confirmation on this commit"),
@@ -954,6 +967,7 @@ class Orchestrator:
             f"- Final commit: `{final.get('commit', '?')}`",
             f"- Final tree: `{final.get('tree', '?')}`",
             f"- Pushed to origin: {'yes' if final.get('pushed') else 'no'}",
+            f"- Confirmation: {final.get('confirmation', '?')}",
             "",
             "## Rounds",
             "",
