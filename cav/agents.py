@@ -14,6 +14,7 @@ import urllib.request
 from dataclasses import dataclass, field
 
 GIT_DIR = r"C:\Program Files\Git\cmd"
+KIMI_POLL_SECONDS = 3
 
 
 def _noop(*args, **kwargs):
@@ -90,9 +91,6 @@ class Agent:
         self._abort.clear()
         self.state = RunState()
 
-    def available(self):
-        raise NotImplementedError
-
     def run(self, prompt, cwd):
         raise NotImplementedError
 
@@ -134,9 +132,6 @@ class OpenCodeAgent(Agent):
                 self._proc.kill()
             except OSError:
                 pass
-
-    def available(self):
-        return True
 
     def _env(self):
         env = os.environ.copy()
@@ -265,10 +260,6 @@ class KimiAgent(Agent):
                 return match.group(1)
         raise RuntimeError("no Kimi model configured; set agents.<name>.model in the case file")
 
-    def available(self):
-        self._connect()
-        return True
-
     def _agent_config(self):
         config = {"model": self._model(), "permission_mode": "yolo"}
         if self.spec.thinking:
@@ -393,10 +384,10 @@ class KimiAgent(Agent):
             if not busy and reason == "failed" and count == self._baseline:
                 self.state.error = "kimi turn failed"
                 break
-            if idle * self._interval() > 120:
+            if idle * KIMI_POLL_SECONDS > 120:
                 self.state.error = f"kimi never produced output ({self.state.detail})"
                 break
-            time.sleep(self._interval())
+            time.sleep(KIMI_POLL_SECONDS)
 
         if not self.state.error:
             status = self._call("GET", f"/api/v1/sessions/{self.session_id}/status").get("data") or {}
@@ -414,9 +405,6 @@ class KimiAgent(Agent):
                                    "reason": self.state.error or "completed"})
         return {"ok": self.state.error is None, "text": text,
                 "reason": self.state.error or "completed", "session": self.session_id}
-
-    def _interval(self):
-        return 3
 
     def _assistant_count(self):
         return sum(1 for message in self._messages() if message.get("role") == "assistant")

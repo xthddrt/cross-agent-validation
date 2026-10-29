@@ -9,7 +9,7 @@
     color-scheme: dark;
     --bg:#0d1117; --panel:#161b22; --sunk:#0f141a; --line:#2a313a; --fg:#e6edf3; --dim:#8b949e;
     --ok:#3fb950; --ok-bg:#12261a; --warn:#d29922; --warn-bg:#2a2210; --bad:#f85149; --bad-bg:#2d1416;
-    --accent:#58a6ff; --accent-bg:#11233a; --purple:#bc8cff;
+    --accent:#58a6ff; --accent-bg:#11233a;
     --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   * { box-sizing:border-box; }
@@ -123,16 +123,9 @@
   .verdict.ok { background:var(--ok-bg); color:var(--ok); }
   .verdict.warn { background:var(--warn-bg); color:var(--warn); }
 
-  .bar { display:flex; height:12px; border-radius:6px; overflow:hidden; background:var(--sunk); }
-  .bar i { display:block; height:100%; }
-  .legend { display:flex; gap:14px; flex-wrap:wrap; margin:8px 0 10px; font-size:12.5px; color:var(--dim); }
-  .legend span::before { content:""; display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; background:var(--c); }
-  .c-identical { --c:var(--ok); } .c-formatting_candidate { --c:#8c959f; } .c-comments_candidate { --c:var(--warn); }
-  .c-substantive { --c:var(--bad); } .c-binary { --c:var(--purple); }
   .files { list-style:none; margin:0; padding:0; max-height:280px; overflow:auto; }
   .files li { display:flex; gap:10px; align-items:center; padding:4px 6px; border-radius:6px; cursor:pointer; }
   .files li:hover { background:var(--sunk); }
-  .files .tag { font-size:11px; padding:0 7px; border-radius:4px; color:var(--bg); background:var(--c); flex:none; min-width:84px; text-align:center; }
   .files .p { font-family:var(--mono); font-size:12.5px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .files .n { margin-left:auto; font-family:var(--mono); font-size:12px; flex:none; }
   .add { color:var(--ok); } .del { color:var(--bad); }
@@ -202,10 +195,7 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sha = (s) => String(s || '').slice(0, 8);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-const ACCEPTED = ['strict', 'functional'];
-const CLASSES = ['substantive', 'binary', 'comments_candidate', 'formatting_candidate', 'identical'];
-const CLASS_LABEL = {substantive:'substantive', binary:'binary', comments_candidate:'comments only',
-                     formatting_candidate:'whitespace only', identical:'identical'};
+const differ = (n) => `${plural(n, 'path')} ${n === 1 ? 'differs' : 'differ'}`;
 
 function dur(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -224,15 +214,15 @@ const parse = (text) => { try { return JSON.parse(text); } catch (e) { return nu
 
 // ------------------------------------------------------------------ model
 // Everything per round is rebuilt from events.jsonl; state.json adds the per-round results.
-let state = {}, runInfo = {}, names = [], selected = null, follow = true;
+let state = {}, names = [], selected = null, follow = true;
 const rounds = {};
 
 function R(n) {
-  return rounds[n] ||= {n, starts:null, cf:{}, start:null, agents:{}, reviews:{}, checks:{}, div:null,
-                        verdict:null, blockers:null, notes:[], fin:{confirm:{}}};
+  return rounds[n] ||= {n, starts:null, ledger:0, start:null, agents:{}, reviews:{}, checks:{}, div:null,
+                        verdict:null, blockers:null, notes:[], fin:{}};
 }
 function A(r, name) {
-  return r.agents[name] ||= {name, model:null, launch:null, last:null, done:null, confirm:false,
+  return r.agents[name] ||= {name, model:null, launch:null, last:null, done:null,
                              steps:0, tools:0, texts:0, feed:[]};
 }
 function toolTarget(input) {
@@ -245,20 +235,20 @@ function refresh(item) { if (item.el) fillItem(item.el, item); }
 
 function apply(e) {
   const d = e.data || {}, t = e.type, who = e.agent, ts = e.ts ? Date.parse(e.ts) : Date.now();
-  if (who && who !== 'final' && !names.includes(who) && names.length < 2) names.push(who);
-  if (t === 'run.start') { runInfo = d; return; }
   if (!e.round) return;
   const r = R(e.round);
-  const a = who && who !== 'final' ? A(r, who) : null;
+  const a = who ? A(r, who) : null;
   if (a) a.last = ts;
   switch (t) {
-    case 'round.prepared': r.starts = d.starts || {}; break;
-    case 'carry_forward.computed': r.cf[who] = d; break;
+    case 'round.prepared':
+      // agent order is the case's order, from the starting points: stable across reloads
+      r.starts = d.starts || {}; r.ledger = d.ledger || 0;
+      if (!names.length) names = Object.keys(r.starts);
+      break;
     case 'publication.selected': r.fin.published = {agent:who, reason:d.reason}; break;
     case 'round.start': r.start = ts; break;
     case 'agent.launch':
-      if (r.verdict && !a.confirm) { a.confirm = true; a.feed.push({k:'div', text:'final confirmation of the settled commit'}); }
-      else if (a.launch && !r.verdict) a.feed.push({k:'div', text:'retry'});
+      if (a.launch) a.feed.push({k:'div', text:'retry'});
       a.launch = ts; a.done = null; a.model = d.model || a.model;
       break;
     case 'agent.text':
@@ -294,7 +284,7 @@ function apply(e) {
     case 'agent.done': a.done = {ok:d.ok, reason:d.reason, ts}; break;
     case 'agent.retry': r.notes.push(['warn', `Retry ${d.attempt} for ${(d.agents || []).join(' and ')}: the previous attempt left no usable review`]); break;
     case 'agent.blocked': r.notes.push(['bad', `${who} stopped on a human-approval prompt (${d.detail}) and was aborted`]); break;
-    case 'review.validated': r.reviews[who] = {ok:true, fallback:d.fallback}; break;
+    case 'review.validated': r.reviews[who] = {ok:true}; break;
     case 'review.rejected': {
       const why = d.reason || (d.errors || [])[0] || 'invalid';
       r.reviews[who] = {ok:false, why};
@@ -312,18 +302,9 @@ function apply(e) {
       else list.push({cmd:d.command, exit:d.exit, sec:d.seconds});
       break;
     }
-    case 'divergence.computed': r.div = d.totals || {}; break;
-    case 'class_claim_mismatch':
-      r.notes.push(['info', `Substantive differences remain (${plural((d.substantive || []).length, 'file')}), but both reviews accept them as behaviourally equivalent`]);
-      break;
+    case 'divergence.computed': r.div = {identical:d.identical, differing:d.differing}; break;
     case 'convergence.evaluated': r.verdict = d.verdict; r.blockers = d.blockers; break;
     case 'oscillation.detected': r.osc = true; r.notes.push(['bad', 'The candidate pair repeated an earlier round, so the run stopped (oscillation)']); break;
-    case 'settle.commit': r.fin.settle = d; break;
-    case 'final.checks': r.fin.checks = d; break;
-    case 'final.confirmation':
-      if (who) r.fin.confirm[who] = d;
-      else { r.fin.result = d; if (!d.ok) r.notes.push(['bad', `Finalization refused: ${d.reason}`]); }
-      break;
     case 'final.complete': r.fin.complete = d; break;
     case 'push.result': r.fin.push = d; break;
   }
@@ -342,10 +323,9 @@ function roundStatus(n) {
   const h = hist(n), r = rounds[n];
   if (h && h.failed) return ['bad', 'failed'];
   const v = (r && r.verdict) || (h && h.verdict);
-  if (v && ACCEPTED.includes(v)) {
-    if (r && r.fin.result && r.fin.result.ok === false) return ['bad', 'finalization refused'];
+  if (v === 'accepted') {
     if ((r && r.fin.complete) || (state.final && state.final.round === n)) return ['ok', 'agreed'];
-    return isLive(n) ? ['run', 'finalizing'] : ['warn', 'accepted, not finalized'];
+    return isLive(n) ? ['run', 'publishing'] : ['warn', 'accepted, not published'];
   }
   if (v) return ['warn', 'diverged'];
   return isLive(n) ? ['run', 'running'] : ['', 'incomplete'];
@@ -357,15 +337,14 @@ function steps(n) {
   const res = (h && h.results) || {};
   const out = [];
 
-  // each agent starts from its own candidate and must decide on every change the other has
-  const decide = names.filter(x => r.cf[x] && r.cf[x].items).map(x => `${x} ${r.cf[x].items}`);
+  // each agent starts from its own candidate and must decide on every path where the two differ
   out.push({label:'Starting points', done:!!r.starts,
-            sub: r.starts ? 'each from its own' + (decide.length ? ` · to decide: ${decide.join(', ')}` : '') : '',
+            sub: r.starts ? 'each from its own' + (r.ledger ? ` · ${plural(r.ledger, 'path')} to decide` : '') : '',
             title: r.starts ? names.map(x => `${x} @ ${sha(r.starts[x])}`).join('\n') : ''});
 
-  const working = agents.filter(a => a.launch && !a.done && !a.confirm);
+  const working = agents.filter(a => a.launch && !a.done);
   const agentsDone = names.length === 2 && names.every(x => r.reviews[x] || (r.agents[x] && r.agents[x].done));
-  const failedAgent = agents.find(a => a.done && !a.done.ok && !a.confirm);
+  const failedAgent = agents.find(a => a.done && !a.done.ok);
   out.push({label:'Agents work', done:agentsDone && !failedAgent, state:failedAgent && agentsDone ? 'bad' : null,
             sub: working.length ? `${working.length} working` : failedAgent ? `${failedAgent.name}: ${failedAgent.done.reason}`
                  : agentsDone ? 'both finished' : ''});
@@ -389,23 +368,20 @@ function steps(n) {
                  : cmds.length ? `${cmds.length} run` : ''});
 
   const t = r.div || (h && h.divergence);
-  const differing = t ? CLASSES.slice(0, 4).reduce((s, k) => s + (t[k] || 0), 0) : 0;
   out.push({label:'Compare trees', done:!!t,
-            sub: t ? (differing ? `${t.substantive || 0} substantive · ${differing} differ` : 'identical trees') : ''});
+            sub: t ? (t.differing ? differ(t.differing) : 'identical trees') : ''});
 
   const v = r.verdict || (h && h.verdict);
-  const accepted = v && ACCEPTED.includes(v);
+  const accepted = v === 'accepted';
   out.push({label:'Verdict', done:!!v, state:v ? (accepted ? 'good' : 'warn') : null,
-            sub: v ? (accepted ? `accepted (${v})` : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
+            sub: v ? (accepted ? 'both approve' : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
 
   const f = r.fin;
   let fin;
-  if (v && !accepted) fin = {label:'Finalize', state:'skip', done:true, sub:'not reached'};
-  else if (f.result && f.result.ok === false) fin = {label:'Finalize', done:true, state:'bad', sub:f.result.reason};
-  else if (f.complete) fin = {label:'Finalize', done:true, state:'good', title:f.published ? f.published.reason : '',
+  if (v && !accepted) fin = {label:'Publish', state:'skip', done:true, sub:'not reached'};
+  else if (f.complete) fin = {label:'Publish', done:true, state:'good', title:f.published ? f.published.reason : '',
                               sub:`${f.published ? `${f.published.agent}'s · ` : ''}${sha(f.complete.commit)}${f.push ? ' · pushed' : ' · not pushed'}`};
-  else fin = {label:'Finalize', done:false,
-              sub: Object.keys(f.confirm).length ? 'agents confirming' : f.checks ? 'final checks done' : f.settle ? 'settling commit' : ''};
+  else fin = {label:'Publish', done:false, sub:''};
   out.push(fin);
 
   // the first unfinished step is where the round is now, or where it stopped
@@ -431,7 +407,6 @@ function renderHeader() {
   st.className = 'badge ' + cls; st.textContent = text;
 
   const parts = [];
-  if (runInfo.convergence) parts.push(`${runInfo.convergence} convergence`);
   if (state.final) parts.push(`final ${sha(state.final.commit)}${state.final.pushed ? ' · pushed' : ''}`);
   if (state.run_id) parts.push(state.run_id);
   let html = esc(parts.join(' · '));
@@ -447,7 +422,7 @@ function renderTabs() {
   const html = nums.map(n => {
     const [cls, label] = roundStatus(n);
     const t = (rounds[n] && rounds[n].div) || (hist(n) && hist(n).divergence);
-    const extra = t ? ` · ${t.substantive || 0} substantive` : '';
+    const extra = t ? ` · ${differ(t.differing || 0)}` : '';
     const color = {ok:'var(--ok)', bad:'var(--bad)', warn:'var(--warn)', run:'var(--accent)'}[cls] || 'var(--dim)';
     return `<button data-r="${n}" class="${n === selected ? 'on' : ''}"><b>Round ${n}</b>` +
            `<span style="color:${color}">${esc(label)}</span><span class="dim">${esc(extra)}</span></button>`;
@@ -518,8 +493,8 @@ function renderAgent(i) {
   const sa = live ? (state.agents || {})[name] : null;
 
   let badge = ['', 'not started'];
-  if (a.done) badge = a.done.ok ? ['ok', a.confirm ? 'confirmed' : 'finished'] : ['bad', 'failed'];
-  else if (a.launch) badge = live ? ['run', a.confirm ? 'confirming' : 'working'] : ['warn', 'stopped'];
+  if (a.done) badge = a.done.ok ? ['ok', 'finished'] : ['bad', 'failed'];
+  else if (a.launch) badge = live ? ['run', 'working'] : ['warn', 'stopped'];
   if (r.reviews[name] && !r.reviews[name].ok) badge = ['bad', 'review rejected'];
 
   const end = a.done ? a.done.ts : (live ? now : a.last);
@@ -545,7 +520,6 @@ function renderAgent(i) {
     chips.push(`<span class="chip">MUST ${c.must_fix_total ?? '?'} · SHOULD ${c.should_fix ?? '?'} · NIT ${c.nit ?? '?'}</span>`);
     chips.push(`<span class="chip ${res.approved ? 'ok' : 'bad'}">${res.approved ? '✓' : '✕'} own</span>`);
     chips.push(`<span class="chip ${res.other_approved ? 'ok' : 'bad'}">${res.other_approved ? '✓' : '✕'} other</span>`);
-    if (res.fallback) chips.push(`<span class="chip warn">markdown review</span>`);
     const ck = ((hist(selected) || {}).checks || {})[name];
     if (ck && (ck.commands || []).length) chips.push(`<span class="chip ${ck.ok ? 'ok' : 'bad'}">checks ${ck.ok ? 'pass' : 'fail'}</span>`);
   }
@@ -583,20 +557,16 @@ function renderGates() {
       : 'Evaluated after both reviews, the checks and the tree comparison.'}</div>`);
     return;
   }
-  const strict = b.verdict === 'strict' || (runInfo.convergence === 'strict' && b.verdict !== 'functional');
   const [n0, n1] = names;
   const ap = b.behaviour_approved || [], op = b.other_approved || [];
   const approve = (i) => `own ${ap[i] ? '✓' : '✕'} · other ${op[i] ? '✓' : '✕'}`;
   const rows = [
     ['Every check passes', b.checks, true],
-    ['Both reviews are valid', b.reviews_valid, true],
-    strict ? ['No MUST_FIX at all', b.must_fix_total === 0, true, `${b.must_fix_total}`]
-           : ['No blocking MUST_FIX', b.blocking_must_fix === 0, true, `${b.blocking_must_fix} blocking of ${b.must_fix_total}`],
-    [`${n0} approves both candidates`, ap[0] && op[0], !strict, approve(0)],
-    [`${n1} approves both candidates`, ap[1] && op[1], !strict, approve(1)],
-    ['No open behavioural disagreement', !b.open_behavioural, !strict],
-    ['Structured (JSON) reviews', !b.markdown_fallback, !strict],
-    ['Trees are byte-identical', b.trees_equal, strict],
+    ['No blocking MUST_FIX', b.blocking_must_fix === 0, true, `${b.blocking_must_fix} blocking of ${b.must_fix_total}`],
+    [`${n0} approves both candidates`, ap[0] && op[0], true, approve(0)],
+    [`${n1} approves both candidates`, ap[1] && op[1], true, approve(1)],
+    ['No open behavioural disagreement', !b.open_behavioural, true],
+    ['Trees are byte-identical', b.trees_equal, false],
   ];
   setHtml($('gates'), '<ul class="gates">' + rows.map(([label, ok, required, detail]) => {
     const cls = !required ? 'info' : ok ? 'pass' : 'fail';
@@ -605,7 +575,7 @@ function renderGates() {
     return `<li class="${cls}"><span class="i">${i}</span><span>${esc(label)}</span><span class="d">${esc(d)}</span></li>`;
   }).join('') + '</ul>' +
   (b.unexplained_changes ? `<div class="dim" style="margin-top:8px">${plural(b.unexplained_changes, 'undeclared change')} to agreed files (warning only)</div>` : '') +
-  `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? `Accepted · ${esc(b.verdict)}` : 'Not yet: another round'}</div>`);
+  `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? 'Accepted' : 'Not yet: another round'}</div>`);
 }
 
 const divCache = {};
@@ -621,25 +591,19 @@ async function renderDivergence() {
   const cacheKey = `${n}|${JSON.stringify(totals)}`;
   if (!divCache[cacheKey]) divCache[cacheKey] = parse(await api('divergence', {round:n})) || {};
   if (n !== selected) return;
-  const div = divCache[cacheKey], files = div.files || {}, stats = div.stats || {};
-  const sum = CLASSES.reduce((s, k) => s + (totals[k] || 0), 0) || 1;
-  const bar = CLASSES.slice().reverse().map(k => totals[k]
-    ? `<i class="c-${k}" style="width:${(totals[k] / sum) * 100}%;background:var(--c)" title="${totals[k]} ${CLASS_LABEL[k]}"></i>` : '').join('');
-  const legend = CLASSES.map(k => `<span class="c-${k}">${totals[k] || 0} ${CLASS_LABEL[k]}</span>`).join('');
-  const rows = [];
-  for (const k of CLASSES.slice(0, 4))
-    for (const p of files[k] || []) {
-      const s = stats[p] || {};
-      rows.push(`<li data-p="${esc(p)}"><span class="tag c-${k}">${CLASS_LABEL[k]}</span><span class="p" title="${esc(p)}">${esc(p)}</span>` +
-                `<span class="n"><span class="add">+${s.added || 0}</span> <span class="del">-${s.removed || 0}</span></span></li>`);
-    }
+  const div = divCache[cacheKey], stats = div.stats || {};
+  const rows = (div.differing || []).map(p => {
+    const s = stats[p] || {};
+    return `<li data-p="${esc(p)}"><span class="p" title="${esc(p)}">${esc(p)}</span>` +
+           `<span class="n"><span class="add">+${s.added || 0}</span> <span class="del">-${s.removed || 0}</span></span></li>`;
+  });
   const [n0, n1] = names;
   if ($('divergence')._key === cacheKey) return;
   $('divergence')._key = cacheKey;
   $('divergence')._html = null;
-  $('divergence').innerHTML = `<div class="bar">${bar}</div><div class="legend">${legend}</div>` +
+  $('divergence').innerHTML = `<div class="dim" style="margin-bottom:6px">${differ(totals.differing || 0)} · ${totals.identical || 0} identical</div>` +
     (rows.length ? `<div class="dim" style="font-size:12.5px;margin-bottom:4px">Click a file for the ${esc(n0)} → ${esc(n1)} diff</div><ul class="files">${rows.join('')}</ul>`
-                 : `<div class="dim">${CLASSES.slice(0, 4).some(k => totals[k]) ? 'File list not available.' : 'The two candidates are identical.'}</div>`);
+                 : `<div class="dim">${totals.differing ? 'File list not available.' : 'The two candidates are identical.'}</div>`);
   $('divergence').querySelectorAll('li[data-p]').forEach(li => li.onclick = () => openModal('diff', n, li.dataset.p));
 }
 

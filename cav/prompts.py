@@ -1,11 +1,10 @@
-"""Prompt text for reconciliation, implementation and confirmation rounds."""
+"""Prompt text for a round: the task, both candidates on equal terms, and the review contract."""
 
 import sys
 
 REVIEW_SCHEMA = """{
   "round": <round number>,
   "agent": "<your name>",
-  "counts": {"must_fix_total": <MUST_FIX findings>, "blocking_must_fix": <MUST_FIX findings with kind behavioral>, "should_fix": <n>, "nit": <n>},
   "behavior_approved": <true|false>,
   "other_behavior_approved": <true|false>,
   "findings": [
@@ -24,75 +23,51 @@ REVIEW_SCHEMA = """{
 def task_block(case):
     prompt = (case.task_prompt or "").strip()
     lines = ["ORIGINAL OBJECTIVE", prompt or "(blank - no original prompt was configured)", ""]
-    if case.task_acceptance:
-        lines.append("ACCEPTANCE CRITERIA")
-        lines += [f"- {item}" for item in case.task_acceptance]
-        lines.append("")
-    if case.base_invariants:
-        lines.append("BASE BEHAVIOUR INVARIANTS (must not regress)")
-        lines += [f"- {item}" for item in case.base_invariants]
-        lines.append("")
+    for title, items in (("ACCEPTANCE CRITERIA", case.task_acceptance),
+                         ("BASE BEHAVIOUR INVARIANTS (must not regress)", case.base_invariants),
+                         ("CONTEXT FILES (read them)", (case.task or {}).get("context_files") or [])):
+        if items:
+            lines += [title] + [f"- {item}" for item in items] + [""]
     return "\n".join(lines)
 
 
-def _check_list(checks):
-    return "\n".join(f"  - {c.replace('{python}', sys.executable)}" for c in checks) or "  (none configured)"
-
-
 def _ledger_block(ledger):
-    items = (ledger or {}).get("items") or []
-    if not items:
+    if not ledger:
         return ""
     lines = ["THE OTHER CANDIDATE'S CHANGES YOUR TREE LACKS",
              "Each path below differs in the other candidate. Neither version is the default: judge",
              "each on its merits, take it (\"retained\") or keep yours (\"intentionally_dropped\"),",
              "and give the reason in carry_forward_dispositions. Every item needs a decision.", ""]
-    for item in items:
-        lines.append(f"- {item['id']}  {item['path']}  (+{item['added']}/-{item['removed']})")
-    if (ledger or {}).get("omitted"):
-        lines.append(f"- ... and {ledger['omitted']} more, rolled up (not required individually)")
-    lines.append("")
-    return "\n".join(lines)
+    lines += [f"- {item['id']}  {item['path']}  (+{item['added']}/-{item['removed']})" for item in ledger]
+    return "\n".join(lines + [""])
 
 
-def review_rules(agent, review_md, review_json, template_path, ledger_dispositions):
+def review_rules(review_json, ledger_ids):
     dispositions = ""
-    if ledger_dispositions:
-        ids = ", ".join(f'"{item}"' for item in ledger_dispositions[:20])
-        dispositions = (f"\n- Your review must dispose of every carry-forward item: {ids}"
-                        f"{' ...' if len(ledger_dispositions) > 20 else ''}")
+    if ledger_ids:
+        dispositions = (f"\n- Decide on every carry-forward item: {', '.join(ledger_ids[:20])}"
+                        f"{' ...' if len(ledger_ids) > 20 else ''}")
     return f"""REVIEW
-- Write your review to this exact path: {review_md}
-- Write the structured review (authoritative) to: {review_json}
-  Schema:
+- Write your review as JSON to this exact path: {review_json}
 {REVIEW_SCHEMA}
-- The legacy template is here for reference: {template_path}
 - MUST_FIX counts only defects: correctness, the original objective, security, data integrity,
   or required validation. Formatting, wording and taste are NIT or SHOULD_FIX, never MUST_FIX.
-- Counts are derived from your findings and recomputed by the orchestrator; they are for your
-  own summary, not trusted. `blocking_must_fix` is the number of MUST_FIX findings of kind
-  "behavioral".
+- A MUST_FIX finding of kind "behavioral" blocks agreement. You may set behavior_approved or
+  other_behavior_approved to false only by citing one, with a real path and line.
 - If you approve (behavior_approved true), remaining_disagreements must contain no "behavioral"
-  entry. A difference you accept as behaviourally equivalent is kind "equivalent"; "behavioral"
-  means unresolved and blocks convergence. Work you still want goes in `areas` with status
-  "open", or as a SHOULD_FIX finding.
-- You may set behavior_approved or other_behavior_approved to false only by citing a MUST_FIX
-  finding of kind "behavioral" with a real path and line. A refusal without one is invalid.{dispositions}
+  entry. A difference you accept as behaviourally equivalent is kind "equivalent". Work you
+  still want goes in `areas` with status "open", or as a SHOULD_FIX finding.{dispositions}
 """
 
 
-def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
-                 template_path, checks, context):
+def round_prompt(agent, other, round_no, case, worktree, review_json, context):
     phase = context.get("phase", "reconcile")
     if phase == "implement":
         objective = ("IMPLEMENT THE TASK in your working tree. The other agent is implementing the "
                      "same task independently; you will not see their attempt this round.")
-    elif phase == "reconcile":
-        objective = ("RECONCILE the two attempts below into the strongest result, preserving the "
-                     "original objective.")
     else:
-        objective = "CONFIRM the final result."
-
+        objective = ("RECONCILE the two candidates below into the strongest result, preserving the "
+                     "original objective.")
     lines = [
         f"You are {agent}, one of two independent agents working on the same task.",
         "",
@@ -106,14 +81,14 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         objective,
         "",
     ]
-    if context.get("phase") == "reconcile":
+    if phase == "reconcile":
         lines += [
             "THE TWO CANDIDATES (equal standing: neither is the default)",
-            f"- yours, which your working tree starts from: {context.get('own_sha', '?')}",
-            f"- {other}'s: {context.get('other_sha', '?')}",
-            f"- {other}'s candidate as a diff against your tree: {context.get('other_patch', '(none)')}",
-            f"- {other}'s previous review: {context.get('other_review', '(none)')}",
-            f"- your previous review: {context.get('own_review', '(none)')}",
+            f"- yours, which your working tree starts from: {context['own_sha']}",
+            f"- {other}'s: {context['other_sha']}",
+            f"- {other}'s candidate as a diff against your tree: {context.get('other_patch') or '(none)'}",
+            f"- {other}'s previous review: {context.get('other_review') or '(none)'}",
+            f"- your previous review: {context.get('own_review') or '(none)'}",
             "",
             f"{other} receives the same material about your candidate. Review both candidates with",
             "the same scrutiny, take the stronger version of each part into your tree, and say",
@@ -125,10 +100,9 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         lines += [ledger]
     agreed = context.get("agreed") or []
     if agreed:
-        shown = ", ".join(agreed[:40]) + (" ..." if len(agreed) > 40 else "")
         lines += [
             "ALREADY IDENTICAL IN BOTH CANDIDATES",
-            shown,
+            ", ".join(agreed[:40]) + (" ..." if len(agreed) > 40 else ""),
             "",
             "Do not rewrite these for style. If one genuinely must change to support a fix",
             "elsewhere, say why in `changes` and cite the reason in your review.",
@@ -150,45 +124,14 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         "- Do NOT run git commit, add, push, checkout, switch, reset, merge, rebase, clean or stash.",
         "  Read-only git (status, diff, show, log) is allowed and encouraged. The orchestrator",
         "  commits and exchanges your result.",
-        "- Do not write anywhere under the run directory except your two review paths.",
+        "- Do not write anywhere under the run directory except your review path.",
         "- Never claim a test you did not run.",
         "- Finish with the review written. That file is how you are judged done.",
         "",
         "CHECKS THE ORCHESTRATOR RUNS AFTERWARDS",
-        _check_list(checks),
+        "\n".join(f"  - {c.replace('{python}', sys.executable)}" for c in case.checks) or "  (none configured)",
         "",
-        review_rules(agent, review_md, review_json, template_path,
-                     context.get("ledger_ids") or []),
-    ]
-    return "\n".join(lines)
-
-
-def confirm_prompt(agent, round_no, case, worktree, review_md, review_json, template_path,
-                   context):
-    lines = [
-        f"You are {agent}. Round {round_no} is being finalised.",
-        "",
-        f"Final commit: {context.get('final_commit')}",
-        f"Your working tree: {worktree} (read-only inspection; your edits are discarded)",
-        "",
-        task_block(case),
-        "FINAL RESULT",
-        f"- diff against the other candidate: {context.get('final_diff', '(none)')}",
-        f"- diff against your own last candidate: {context.get('own_diff', '(none)')}",
-        f"- accepted differences: {context.get('waived', '(none)')}",
-        f"- final checks: {context.get('checks', '(none)')}",
-        "",
-    ]
-    ledger = _ledger_block(context.get("ledger"))
-    if ledger:
-        lines += [ledger]
-    lines += [
-        "Decide whether this exact final tree may be published.",
-        "Approve only if it is acceptable as the result of the task above.",
-        "If you refuse, you must cite a MUST_FIX behavioural finding with a real path and line.",
-        "",
-        review_rules(agent, review_md, review_json, template_path,
-                     context.get("ledger_ids") or []),
+        review_rules(review_json, [item["id"] for item in context.get("ledger") or []]),
     ]
     return "\n".join(lines)
 
@@ -197,6 +140,6 @@ def retry_note(attempt, problem):
     return f"""
 
 IMPORTANT: your previous attempt did not produce a usable result ({problem}).
-Complete the task now and make sure the review files exist and are valid.
+Complete the task now and make sure the review file exists and is valid.
 Do not start over; work from the current state of your working tree.
 """

@@ -1,10 +1,9 @@
-"""Tests for schema v2: divergence, safe settlement, structured reviews, functional acceptance."""
+"""Tree comparison, review validation, acceptance, publication, events and the dashboard."""
 
 import json
 import pathlib
 import re
 import shutil
-import sys
 import tempfile
 import threading
 import unittest
@@ -14,15 +13,13 @@ from unittest import mock
 
 from cav import agents as agent_mod
 from cav import compare, config, events, prompts, review
-from cav.agents import KimiAgent, RunState
-from cav.gitops import Repo, git
+from cav.agents import RunState
+from cav.gitops import git
 from cav.orchestrator import Orchestrator
 from cav.web import Dashboard
 
 ROUND_RE = re.compile(r"Round (\d+)")
-REVIEW_MD_RE = re.compile(r"review to this exact path: (.+)")
-REVIEW_JSON_RE = re.compile(r"structured review \(authoritative\) to: (.+)")
-CONFIRM_MARK = "is being finalised"
+REVIEW_JSON_RE = re.compile(r"review as JSON to this exact path: (.+)")
 LEDGER_RE = re.compile(r"^- (CF-\d+)\s", re.M)
 
 
@@ -63,36 +60,28 @@ class StructuredFake:
     def run(self, prompt, cwd):
         self.calls += 1
         round_no = int(ROUND_RE.search(prompt).group(1))
-        md = pathlib.Path(REVIEW_MD_RE.search(prompt).group(1).strip())
-        js = pathlib.Path(REVIEW_JSON_RE.search(prompt).group(1).strip())
-        confirming = CONFIRM_MARK in prompt
-        files = {} if confirming else self.files(round_no)
+        path = pathlib.Path(REVIEW_JSON_RE.search(prompt).group(1).strip())
+        files = self.files(round_no)
         for name, text in files.items():
             target = pathlib.Path(cwd) / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(text.encode("utf-8"))
-        findings = [] if confirming else list(self.findings)
-        blocking = sum(1 for item in findings if item["kind"] == "behavioral")
         data = {
             "round": round_no,
             "agent": self.name,
-            "counts": {"must_fix_total": len(findings), "blocking_must_fix": blocking,
-                       "should_fix": 0, "nit": 0},
-            "behavior_approved": True if confirming else self.approve,
-            "other_behavior_approved": True if confirming else self.approve,
-            "findings": findings,
+            "behavior_approved": self.approve,
+            "other_behavior_approved": self.approve,
+            "findings": list(self.findings),
             "areas": [],
             "changes": [{"path": name, "why": "test"} for name in files],
             "incorporated_from_other": [],
             "carry_forward_dispositions": (
                 self.dispositions if self.dispositions is not None else
-                [{"item_id": item, "status": "retained", "why": "test"}
-                 for item in ([] if confirming else LEDGER_RE.findall(prompt))]),
+                [{"item_id": item, "status": "retained", "why": "test"} for item in LEDGER_RE.findall(prompt)]),
             "remaining_disagreements": [],
         }
-        js.parent.mkdir(parents=True, exist_ok=True)
-        js.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        md.write_text(review.render(data), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.state.finished = True
         self.state.touch("finished")
         return {"ok": True, "text": "done", "reason": "completed"}
@@ -135,8 +124,7 @@ class Base(unittest.TestCase):
             name="flow", host_repo=self.repo, base=self.base,
             agents={"deepseek": config.AgentSpec("deepseek", "opencode", bootstrap_ref=self.base),
                     "kimi": config.AgentSpec("kimi", "kimi", bootstrap_ref=self.base)},
-            checks=[], max_rounds=2, round_seconds=30, stall_seconds=5,
-            poll_seconds=0.05, retries=0, version=2, convergence="functional",
+            checks=[], max_rounds=2, round_seconds=30, stall_seconds=5, retries=0,
         )
         values.update(overrides)
         return config.Case(**values)
@@ -150,7 +138,7 @@ class Base(unittest.TestCase):
             return orchestrator, orchestrator.run()
 
 
-class ClassificationTest(Base):
+class CompareTest(Base):
     def commit(self, name, text, message):
         (self.repo / name).write_bytes(text.encode())
         git("add", "-A", cwd=self.repo)
@@ -161,81 +149,13 @@ class ClassificationTest(Base):
         return (git("rev-parse", f"{left}^{{tree}}", cwd=self.repo),
                 git("rev-parse", f"{right}^{{tree}}", cwd=self.repo))
 
-    def test_classes(self):
+    def test_paths_split_into_identical_and_differing(self):
         left = self.commit("a.c", "int a;\n// old\n", "left")
         right = self.commit("a.c", "int a;\n// new\n", "comment")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["comments_candidate"], ["a.c"])
-        self.assertEqual(diff["totals"]["substantive"], 0)
-
-        right = self.commit("a.c", "int a;   \r\n// old\n", "formatting")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["formatting_candidate"], ["a.c"])
-
-        right = self.commit("a.c", "int b;\n// new\n", "behaviour")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["substantive"], ["a.c"])
-
-    def test_python_comments_are_cosmetic_but_docstrings_are_content(self):
-        left = self.commit("m.py", "x = 1\n# old note\n", "left")
-        right = self.commit("m.py", "x = 1\n# new note\n", "py comment")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["comments_candidate"], ["m.py"])
-
-        doc_a = 'def f():\n    """Doc.\n    # alpha\n    """\n    return 1\n'
-        doc_b = doc_a.replace("# alpha", "# beta")
-        left = self.commit("doc.py", doc_a, "docstring a")
-        right = self.commit("doc.py", doc_b, "docstring b")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["substantive"], ["doc.py"],
-                         "a `#` inside a docstring is content, not a comment")
-
-    def test_a_hash_inside_a_nested_fstring_does_not_hide_a_change(self):
-        """`f"{row["key#id"]}"` is one string in Python 3.12+: a `#` in it is not a comment start."""
-        left = self.commit("f.py", 'label = f"{row["key#id"]}" + "alpha"\n', "left")
-        right = self.commit("f.py", 'label = f"{row["key#id"]}" + "beta"\n', "right")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
-        self.assertEqual(diff["files"]["substantive"], ["f.py"])
-
-    def test_adding_a_comment_line_is_cosmetic(self):
-        """Stripping a comment-only line leaves a blank line; that alone must not look substantive."""
-        left = self.commit("m.py", "x = 1\ny = 2\n", "left")
-        right = self.commit("m.py", "x = 1\n# explain y\ny = 2\n", "py comment line")
         diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["comments_candidate"], ["m.py"])
-
-        left = self.commit("a.c", "int a;\nint b;\n", "c left")
-        right = self.commit("a.c", "int a;\n/* why b */\n// and more\nint b;\n", "c comment lines")
-        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["comments_candidate"], ["a.c"])
-
-    def test_a_blank_line_only_change_stays_substantive(self):
-        left = self.commit("m.py", "x = 1\ny = 2\n", "left")
-        right = self.commit("m.py", "x = 1\n\ny = 2\n", "blank line")
-        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["substantive"], ["m.py"])
-
-    def test_hash_is_a_comment_only_at_a_word_boundary(self):
-        left = self.commit("run.sh", "echo ${#items[@]}  # count\n", "sh left")
-        right = self.commit("run.sh", "echo ${#items[*]}  # count\n", "sh right")
-        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["substantive"], ["run.sh"], "`${#` is not a comment")
-
-        left = self.commit("run.sh", "x=1  # old\n", "sh comment a")
-        right = self.commit("run.sh", "x=1  # new\n", "sh comment b")
-        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["comments_candidate"], ["run.sh"])
-
-        left = self.commit("build.cmd", "echo # 1\n", "cmd left")
-        right = self.commit("build.cmd", "echo # 2\n", "cmd right")
-        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
-        self.assertEqual(diff["files"]["substantive"], ["build.cmd"], "`#` is not a batch comment")
+        self.assertEqual(diff["differing"], ["a.c"], "a comment change is still for the agents to decide")
+        self.assertEqual(diff["identical"], ["base.txt"])
+        self.assertEqual(diff["stats"]["a.c"], {"added": 1, "removed": 1})
 
     def test_stats_cover_renamed_and_non_ascii_paths(self):
         left = self.commit("old_name.txt", "same line\n" * 5, "left")
@@ -246,45 +166,13 @@ class ClassificationTest(Base):
         self.assertEqual(diff["stats"]["new_name.txt"], {"added": 5, "removed": 0})
         self.assertEqual(diff["stats"]["café.txt"], {"added": 1, "removed": 0})
 
-    def test_strict_paths_are_never_cosmetic(self):
-        left = self.commit("x.h", "#define A 1\n", "left")
-        right = self.commit("x.h", "#define  A 1   \n", "formatting")
-        tree_a, tree_b = self.trees(left, right)
-        diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b, strict_paths=["**/*.h"])
-        self.assertEqual(diff["files"]["substantive"], ["x.h"])
-
-    def test_carry_forward_is_capped(self):
-        left = self.commit("one.txt", "a\n", "left")
-        right = self.commit("one.txt", "b\n", "right")
-        (self.repo / "two.txt").write_bytes(b"b\n")
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-q", "-m", "two", cwd=self.repo)
-        right = git("rev-parse", "HEAD", cwd=self.repo)
-        tree_a, tree_b = self.trees(left, right)
-        ledger = compare.carry_forward(self.repo / ".git", tree_b, tree_a, limit=1)
-        self.assertEqual(len(ledger["items"]), 1)
-        self.assertEqual(ledger["total"], 2)
-        self.assertEqual(ledger["omitted"], 1)
-
-
-class SettlementTest(Base):
-    def test_normalizes_eol_and_trailing_space_only(self):
-        worktree = self.tmp / "wt"
-        worktree.mkdir()
-        (worktree / "a.c").write_bytes(b"int a;   \r\n\r\n\r\n\r\nint b;\r\n")
-        (worktree / "driver.h").write_bytes(b"int h;   \r\n")
-        changed = compare.apply_safe_normalization(worktree, ["**/*.h"])
-        self.assertIn("a.c", changed)
-        self.assertNotIn("driver.h", changed)
-        self.assertEqual((worktree / "a.c").read_bytes(), b"int a;\n\n\n\nint b;\n")
-        self.assertEqual((worktree / "driver.h").read_bytes(), b"int h;   \r\n")
-
-    def test_blank_lines_survive(self):
-        worktree = self.tmp / "wt2"
-        worktree.mkdir()
-        (worktree / "a.yml").write_bytes(b"a: 1\n\n\n\n\nb: 2\n")
-        compare.apply_safe_normalization(worktree, [])
-        self.assertEqual((worktree / "a.yml").read_bytes(), b"a: 1\n\n\n\n\nb: 2\n")
+    def test_ledger_lists_every_differing_path_largest_first(self):
+        left = self.commit("small.txt", "a\n", "left")
+        (self.repo / "big.txt").write_bytes(b"1\n2\n3\n")
+        right = self.commit("small.txt", "b\n", "right")
+        items = compare.ledger(compare.compare_trees(self.repo / ".git", *self.trees(left, right)))
+        self.assertEqual([(item["id"], item["path"]) for item in items],
+                         [("CF-01", "big.txt"), ("CF-02", "small.txt")])
 
 
 class ReviewValidationTest(Base):
@@ -319,11 +207,12 @@ class ReviewValidationTest(Base):
         self.assertEqual(data["counts"]["must_fix_total"], 1)
 
     def test_prompt_states_the_review_rules(self):
-        text = prompts.review_rules("deepseek", "a.md", "a.json", "t.md", ["CF-01"])
-        self.assertIn("blocking_must_fix", text)
-        self.assertIn("recomputed", text)
+        text = prompts.review_rules("a.json", ["CF-01"])
+        self.assertIn("blocks agreement", text)
         self.assertIn('no "behavioral"', text)
         self.assertIn('"equivalent"', text)
+        self.assertIn("CF-01", text)
+        self.assertNotIn('"counts"', text, "agents are not asked for numbers the orchestrator derives")
 
     def test_equivalent_kind_is_allowed_for_remaining_differences(self):
         data = self.data(remaining_disagreements=[
@@ -352,7 +241,7 @@ class ReviewValidationTest(Base):
                          counts={"must_fix_total": 1, "blocking_must_fix": 0,
                                  "should_fix": 0, "nit": 0})
         result = review.Review("deepseek", 1, self.tmp / "r.json", data,
-                               review.validate(data, "deepseek", 1, self.repo), False)
+                               review.validate(data, "deepseek", 1, self.repo))
         self.assertTrue(result.valid)
         self.assertEqual(result.blocking, 0)
 
@@ -385,7 +274,7 @@ class ReviewValidationTest(Base):
                                  "should_fix": 0, "nit": 0},
                          behavior_approved=False, other_behavior_approved=False)
         errors = review.validate(data, "deepseek", 1, self.repo)
-        self.assertTrue(any("no line" in error for error in errors), errors)
+        self.assertTrue(any("line missing" in error for error in errors), errors)
 
     def test_malformed_review_fields_are_rejected_not_crashed(self):
         cases = {
@@ -394,7 +283,6 @@ class ReviewValidationTest(Base):
             "remaining_disagreements": {"remaining_disagreements": ["review.py"]},
             "carry_forward_dispositions": {"carry_forward_dispositions": ["CF-01"]},
             "areas": {"areas": ["review"]},
-            "counts": {"counts": "none"},
             "behavior_approved": {"behavior_approved": "true"},
             "unhashable id": {"findings": [{"id": ["F-01"], "severity": "NIT", "kind": "cosmetic",
                                             "path": "base.txt", "line": 1}],
@@ -412,21 +300,31 @@ class ReviewValidationTest(Base):
 
 
 class AcceptanceTest(Base):
-    def test_functional_accepts_different_trees(self):
+    def test_mutual_approval_accepts_different_trees(self):
         fakes = {
             "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}),
             "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}),
         }
         orchestrator, state = self.run_with(self.case(), fakes)
         self.assertEqual(state["phase"], "converged")
-        self.assertEqual(state["final"]["verdict"], "functional")
-        self.assertIsNotNone((orchestrator.run_dir / "WAIVED.md").exists())
-        self.assertEqual(state["final"]["confirmation"], "skipped (approved tree)")
-        self.assertTrue((orchestrator.run_dir / "signoff" / "deepseek.json").exists())
+        self.assertEqual(state["history"][-1]["verdict"], "accepted")
         published = state["final"]["published_from"]["agent"]
         self.assertEqual(state["final"]["tree"], state["history"][-1]["results"][published]["tree"],
-                         "functional acceptance publishes one of the two approved trees unchanged")
-        self.assertIn("shared.txt", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+                         "acceptance publishes one of the two approved trees unchanged")
+        self.assertIn("shared.txt", (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8"))
+        for gone in ("WAIVED.md", "TASK.md", "signoff", "final"):
+            self.assertFalse((orchestrator.run_dir / gone).exists(), gone)
+
+    def test_approved_candidate_is_published_without_another_agent_round(self):
+        """Nothing is rewritten after agreement, so there is nothing to re-check or re-approve."""
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "value   \n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "value\n"}),
+        }
+        _, state = self.run_with(self.case(max_rounds=1), fakes)
+        published = state["final"]["published_from"]["agent"]
+        self.assertEqual(state["final"]["commit"], state["history"][-1]["results"][published]["commit"])
+        self.assertEqual(sum(fake.calls for fake in fakes.values()), 2, "one agent run each, no confirmation")
 
     def test_publication_prefers_the_candidate_closest_to_its_original(self):
         """Neither agent is a default: the one that needed fewer changes is published, whichever
@@ -450,27 +348,6 @@ class AcceptanceTest(Base):
                 self.assertEqual(published["changes"]["deepseek"], {"lines_changed": 4, "files_changed": 2})
                 self.assertIn("fewest changes", published["reason"])
 
-    def test_unchanged_acceptance_skips_confirmation(self):
-        """Both agents already approved that exact tree; asking again is pure overhead."""
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
-        }
-        orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
-        self.assertEqual(state["final"]["confirmation"], "skipped (approved tree)")
-        self.assertFalse((orchestrator.run_dir / "reviews" / "r1-confirm").exists())
-        self.assertEqual(sum(fake.calls for fake in fakes.values()), 2)
-
-    def test_settlement_change_requires_confirmation(self):
-        """If settlement rewrites bytes, the approved tree is no longer what gets published."""
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "value   \n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "value\n"}),
-        }
-        orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
-        self.assertEqual(state["final"]["confirmation"], "confirmed")
-        self.assertTrue((orchestrator.run_dir / "reviews" / "r1-confirm" / "kimi-review.json").exists())
-
     def test_refusal_with_finding_blocks_publication(self):
         finding = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
                    "path": "shared.txt", "line": 1, "summary": "wrong", "resolution": "fix"}
@@ -481,7 +358,7 @@ class AcceptanceTest(Base):
         }
         orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
         self.assertEqual(state["phase"], "disagreement")
-        self.assertFalse((orchestrator.run_dir / "signoff" / "kimi.json").exists())
+        self.assertFalse((orchestrator.run_dir / "REPORT.md").exists())
         self.assertIsNone(state.get("final"))
 
     def test_refusal_without_finding_fails_the_round(self):
@@ -491,25 +368,6 @@ class AcceptanceTest(Base):
         }
         with self.assertRaises(RuntimeError):
             self.run_with(self.case(max_rounds=1), fakes)
-
-    def test_strict_still_requires_identical_trees(self):
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
-        }
-        orchestrator, state = self.run_with(self.case(convergence="strict", max_rounds=1), fakes)
-        self.assertEqual(state["final"]["verdict"], "strict")
-
-    def test_formatter_failure_blocks_publication(self):
-        case = self.case(max_rounds=1)
-        case.formatter = f'"{sys.executable}" -c "import sys; sys.exit(7)"'
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
-        }
-        _, state = self.run_with(case, fakes)
-        self.assertEqual(state["phase"], "disagreement")
-        self.assertIsNone(state.get("final"))
 
     def test_resume_finalizes_an_accepted_round(self):
         case = self.case(max_rounds=1)
@@ -523,7 +381,8 @@ class AcceptanceTest(Base):
         self.assertIsNone(state.get("final"))
         _, state = self.run_with(case, fakes, resume=True)
         self.assertEqual(state["phase"], "converged")
-        self.assertEqual(state["final"]["verdict"], "functional")
+        self.assertEqual(state["final"]["round"], 1, "the accepted round is published, not re-run")
+        self.assertEqual(sum(fake.calls for fake in fakes.values()), 2)
 
     def test_a_review_left_by_an_interrupted_run_is_not_accepted(self):
         """Resuming after a run died mid-round restarts that round: an old review is not a result."""
@@ -552,7 +411,7 @@ class AcceptanceTest(Base):
         case.agents["kimi"].bootstrap_ref = kimi_ref
         orchestrator, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
         self.assertEqual(state["phase"], "converged")
-        self.assertNotIn("did not take", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+        self.assertNotIn("declined", (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8"))
 
     def test_dropped_items_are_reported_for_each_agent(self):
         (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
@@ -565,9 +424,10 @@ class AcceptanceTest(Base):
         case = self.case(max_rounds=1)
         case.agents["kimi"].bootstrap_ref = kimi_ref
         orchestrator, _ = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
-        waived = (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8")
-        self.assertIn("kimi's changes deepseek did not take", waived)
-        self.assertIn("deepseek's changes kimi did not take", waived)
+        report = (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8")
+        self.assertIn("kimi's changes deepseek declined", report)
+        self.assertIn("deepseek's changes kimi declined", report)
+        self.assertIn("`shared.txt`: mine is better", report)
 
     def test_solve_bootstraps_both_agents_from_base(self):
         fakes = {
@@ -603,7 +463,7 @@ class AcceptanceTest(Base):
         git("add", "-A", cwd=self.repo)
         git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
         kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
-        # The baseline owner (deepseek) is the one that must dispose of the other candidate's work.
+        # deepseek leaves its decision out on the first attempt and is retried.
         deepseek = DispositionRetryFake("deepseek", lambda r: {"shared.txt": "deepseek\n"})
         kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
         case = self.case(max_rounds=1, retries=1)
@@ -707,14 +567,14 @@ class UnitTest(Base):
         }
         orchestrator, state = self.run_with(case, fakes)
         self.assertEqual(state["history"][0]["starts"], {"deepseek": self.base, "kimi": kimi_ref})
+        self.assertEqual(state["history"][0]["ledger"], [{"id": "CF-01", "path": "shared.txt"}])
         for name in ("deepseek", "kimi"):
-            ledger = json.loads((orchestrator.run_dir / "reviews" / "r1" / f"{name}-carry-forward.json")
-                                .read_text(encoding="utf-8"))
-            self.assertEqual([item["path"] for item in ledger["items"]], ["shared.txt"], name)
-            self.assertEqual(ledger["omitted"], 0, "the ledger is uncapped")
+            prompt = (orchestrator.run_dir / "rounds" / "r1" / f"{name}-context.md").read_text(encoding="utf-8")
+            self.assertIn("CF-01  shared.txt", prompt, f"{name} must decide on the same path")
 
     def test_removed_settings_are_rejected(self):
-        for key, value in (("canonical_agent", "deepseek"), ("carry_forward_limit", 20)):
+        for key, value in (("canonical_agent", "deepseek"), ("carry_forward_limit", 20),
+                           ("convergence", "strict"), ("strict_paths", []), ("formatter", "x")):
             path = self.tmp / f"{key}.json"
             path.write_text(json.dumps({
                 "name": "x", "repo": {"host": str(self.repo), "base": self.base},
@@ -724,20 +584,23 @@ class UnitTest(Base):
             with self.assertRaisesRegex(ValueError, key):
                 config.load(path)
 
-    def test_blank_task_basis(self):
-        orchestrator = Orchestrator(self.case(), self.tmp / "basis")
-        self.assertEqual(orchestrator.assurance_basis(), "checks + mutual review (no task prompt)")
+    def test_acceptance_rule(self):
+        """Checks pass, no behavioural MUST_FIX, both approve both, nothing behavioural left open."""
+        orchestrator = Orchestrator(self.case(), self.tmp / "rule")
 
-    def test_strict_rejects_a_nonblocking_must_fix(self):
-        orchestrator = Orchestrator(self.case(convergence="strict"), self.tmp / "strict-count")
-        results = {name: {"tree": "same", "valid": True, "blocking": 0,
-                          "counts": {"must_fix_total": 1 if name == "kimi" else 0}}
-                   for name in ("deepseek", "kimi")}
-        checks = {name: {"ok": True} for name in results}
-        self.assertEqual(orchestrator.evaluate(results, checks, {}), "diverged")
-        for result in results.values():
-            result["counts"]["must_fix_total"] = 0
-        self.assertEqual(orchestrator.evaluate(results, checks, {}), "strict")
+        def verdict(**change):
+            results = {name: {"tree": name, "blocking": 0, "counts": {"must_fix_total": 0},
+                              "approved": True, "other_approved": True, "open_behavioural": False,
+                              "unexplained": []} for name in ("deepseek", "kimi")}
+            results["kimi"].update(change)
+            checks = {name: {"ok": change.get("checks", True)} for name in results}
+            return orchestrator.blockers(results, checks)["verdict"]
+
+        self.assertEqual(verdict(), "accepted", "different trees are fine when both approve")
+        for change in ({"checks": False}, {"blocking": 1}, {"approved": False},
+                       {"other_approved": False}, {"open_behavioural": True}):
+            with self.subTest(**change):
+                self.assertEqual(verdict(**change), "diverged")
 
     def test_task_prompt_and_file_are_exclusive(self):
         path = self.tmp / "case.json"
@@ -760,14 +623,15 @@ class EventsTest(unittest.TestCase):
             writer.emit("two", 1, "kimi", {"header": "Authorization: Bearer abcdefghijklmnop"})
             writer.emit("three", 1, "kimi", {"token": "abc123",
                                              "nested": {"password": "hunter2", "note": "ok"}})
-            payload = events.read(tmp / "events.jsonl", 0)
+            payload, _ = events.tail(tmp / "events.jsonl")
             self.assertEqual([item["seq"] for item in payload], [1, 2, 3])
             self.assertIn("truncated", payload[0]["data"]["text"])
             self.assertIn("[redacted]", payload[1]["data"]["header"])
             self.assertEqual(payload[2]["data"]["token"], "[redacted]")
             self.assertEqual(payload[2]["data"]["nested"]["password"], "[redacted]")
             self.assertEqual(payload[2]["data"]["nested"]["note"], "ok")
-            self.assertEqual(len(events.read(tmp / "events.jsonl", 1)), 2)
+            resumed = events.EventWriter(tmp / "events.jsonl", "run")
+            self.assertEqual(resumed.emit("four")["seq"], 4, "a resumed run continues the sequence")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -776,11 +640,10 @@ class EventsTest(unittest.TestCase):
         try:
             writer = events.EventWriter(tmp / "events.jsonl", "run")
             writer.emit("agent.text", 1, "kimi", {"text": "x" * 9000})
-            payload = events.read(tmp / "events.jsonl", 0)
+            payload, _ = events.tail(tmp / "events.jsonl")
             self.assertEqual(len(payload[0]["data"]["text"]), 9000)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-
 
     def test_tail_reads_only_new_complete_lines(self):
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-events-"))
@@ -798,7 +661,7 @@ class EventsTest(unittest.TestCase):
             found, after = events.tail(path, offset)
             self.assertEqual([item["type"] for item in found], ["half"])
             path.write_text("", encoding="utf-8")
-            self.assertEqual(events.tail(path, after), ([], 0), "a rotated log starts over")
+            self.assertEqual(events.tail(path, after), ([], 0), "a replaced log starts over")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
@@ -847,30 +710,6 @@ class AdapterCaptureTest(unittest.TestCase):
 
 
 class DashboardTest(unittest.TestCase):
-    def test_messages_are_filtered_by_round_and_agent(self):
-        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-msg-"))
-        try:
-            rows = [
-                {"seq": 1, "ts": "t", "round": 1, "agent": "deepseek", "type": "agent.text",
-                 "data": {"text": "one"}},
-                {"seq": 2, "ts": "t", "round": 1, "agent": "kimi", "type": "agent.text",
-                 "data": {"text": "two"}},
-                {"seq": 3, "ts": "t", "round": 2, "agent": "deepseek", "type": "agent.text",
-                 "data": {"text": "three"}},
-                {"seq": 4, "ts": "t", "round": 1, "agent": "deepseek", "type": "agent.tool.start",
-                 "data": {"tool": "Bash", "input": {"command": "git status"}}},
-            ]
-            (tmp / "events.jsonl").write_text(
-                "\n".join(json.dumps(row) for row in rows), encoding="utf-8")
-            dashboard = Dashboard(tmp, port=0)
-            items = dashboard.messages(1, "deepseek")
-            self.assertEqual([(m["kind"], m["text"]) for m in items],
-                             [("text", "one"), ("tool", "Bash git status")])
-            self.assertEqual([m["text"] for m in dashboard.messages(2, "deepseek")], ["three"])
-            self.assertEqual([m["text"] for m in dashboard.messages(1, "kimi")], ["two"])
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
     def test_endpoints_are_read_only_and_tokenised(self):
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-web-"))
         try:
@@ -886,13 +725,13 @@ class DashboardTest(unittest.TestCase):
                 base = f"http://127.0.0.1:{port}/{dashboard.token}"
                 with urllib.request.urlopen(base + "/api/state", timeout=5) as response:
                     self.assertEqual(json.loads(response.read())["case"], "x")
-                with urllib.request.urlopen(base + "/api/events?after=0", timeout=5) as response:
-                    self.assertEqual(len(json.loads(response.read())), 1)
+                with urllib.request.urlopen(base + "/api/divergence?round=1", timeout=5) as response:
+                    self.assertEqual(json.loads(response.read()), {}, "a round not yet compared is empty")
                 with self.assertRaises(urllib.error.HTTPError):
                     urllib.request.urlopen(f"http://127.0.0.1:{port}/wrong/api/state", timeout=5)
                 with self.assertRaises(urllib.error.HTTPError) as caught:
-                    urllib.request.urlopen(base + "/api/file?rev=--output=x&path=a.txt", timeout=5)
-                self.assertEqual(caught.exception.code, 400, "an option-shaped rev is refused")
+                    urllib.request.urlopen(base + "/api/diff?round=1&path=../secret", timeout=5)
+                self.assertEqual(caught.exception.code, 400, "a path outside the tree is refused")
             finally:
                 server.shutdown()
                 server.server_close()
