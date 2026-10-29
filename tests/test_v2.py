@@ -20,7 +20,6 @@ from cav.web import Dashboard
 
 ROUND_RE = re.compile(r"Round (\d+)")
 REVIEW_JSON_RE = re.compile(r"review as JSON to this exact path: (.+)")
-LEDGER_RE = re.compile(r"^- (CF-\d+)\s", re.M)
 
 
 def make_repo(root):
@@ -36,18 +35,13 @@ def make_repo(root):
 
 
 class StructuredFake:
-    """Writes a valid JSON review and the files it claims to have changed.
+    """Writes its proposal's files and a valid JSON review."""
 
-    Unless `dispositions` is given, it keeps every ledger item its prompt lists, as an agent
-    that decides on each one would.
-    """
-
-    def __init__(self, name, files, approve=True, findings=None, dispositions=None):
+    def __init__(self, name, files, approve=True, findings=None):
         self.name = name
         self.files = files
         self.approve = approve
         self.findings = findings or []
-        self.dispositions = dispositions
         self.state = RunState()
         self.calls = 0
 
@@ -73,11 +67,6 @@ class StructuredFake:
             "other_behavior_approved": self.approve,
             "findings": list(self.findings),
             "areas": [],
-            "changes": [{"path": name, "why": "test"} for name in files],
-            "incorporated_from_other": [],
-            "carry_forward_dispositions": (
-                self.dispositions if self.dispositions is not None else
-                [{"item_id": item, "status": "retained", "why": "test"} for item in LEDGER_RE.findall(prompt)]),
             "remaining_disagreements": [],
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,12 +91,14 @@ class FlakyFake(StructuredFake):
         return super().run(prompt, cwd)
 
 
-class DispositionRetryFake(StructuredFake):
-    """Omits carry-forward dispositions on its first attempt."""
+class NoReviewFirstFake(StructuredFake):
+    """Finishes its first attempt without writing a review."""
 
     def run(self, prompt, cwd):
-        self.dispositions = ([] if self.calls == 0 else
-                             [{"item_id": "CF-01", "status": "retained", "why": "test"}])
+        if self.calls == 0:
+            self.calls += 1
+            self.state.finished = True
+            return {"ok": True, "text": "", "reason": "completed"}
         return super().run(prompt, cwd)
 
 
@@ -166,22 +157,13 @@ class CompareTest(Base):
         self.assertEqual(diff["stats"]["new_name.txt"], {"added": 5, "removed": 0})
         self.assertEqual(diff["stats"]["café.txt"], {"added": 1, "removed": 0})
 
-    def test_ledger_lists_every_differing_path_largest_first(self):
-        left = self.commit("small.txt", "a\n", "left")
-        (self.repo / "big.txt").write_bytes(b"1\n2\n3\n")
-        right = self.commit("small.txt", "b\n", "right")
-        items = compare.ledger(compare.compare_trees(self.repo / ".git", *self.trees(left, right)))
-        self.assertEqual([(item["id"], item["path"]) for item in items],
-                         [("CF-01", "big.txt"), ("CF-02", "small.txt")])
-
-
 class ReviewValidationTest(Base):
     def data(self, **overrides):
         base = {
             "round": 1, "agent": "deepseek", "counts": {
                 "must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
             "behavior_approved": True, "other_behavior_approved": True,
-            "findings": [], "areas": [], "changes": [], "remaining_disagreements": [],
+            "findings": [], "areas": [], "remaining_disagreements": [],
         }
         base.update(overrides)
         return base
@@ -207,11 +189,11 @@ class ReviewValidationTest(Base):
         self.assertEqual(data["counts"]["must_fix_total"], 1)
 
     def test_prompt_states_the_review_rules(self):
-        text = prompts.review_rules("a.json", ["CF-01"])
+        text = prompts.review_rules("a.json")
         self.assertIn("blocks agreement", text)
         self.assertIn('no "behavioral"', text)
         self.assertIn('"equivalent"', text)
-        self.assertIn("CF-01", text)
+        self.assertIn("not per file", text)
         self.assertNotIn('"counts"', text, "agents are not asked for numbers the orchestrator derives")
 
     def test_equivalent_kind_is_allowed_for_remaining_differences(self):
@@ -245,28 +227,6 @@ class ReviewValidationTest(Base):
         self.assertTrue(result.valid)
         self.assertEqual(result.blocking, 0)
 
-    def test_missing_disposition_is_invalid(self):
-        errors = review.validate(self.data(), "deepseek", 1, self.repo,
-                                 required_dispositions=["CF-01"])
-        self.assertTrue(any("carry-forward" in error for error in errors))
-
-    def test_disposition_needs_a_reason(self):
-        for why in (None, "  ", 3):
-            with self.subTest(why=why):
-                entry = {"item_id": "CF-01", "status": "intentionally_dropped"}
-                if why is not None:
-                    entry["why"] = why
-                data = self.data(carry_forward_dispositions=[entry])
-                errors = review.validate(data, "deepseek", 1, self.repo,
-                                         required_dispositions=["CF-01"])
-                self.assertTrue(any("needs a why" in error for error in errors), errors)
-
-    def test_disposition_status_is_checked_without_a_ledger(self):
-        data = self.data(carry_forward_dispositions=[
-            {"item_id": "CF-01", "status": "ignored", "why": "x"}])
-        errors = review.validate(data, "deepseek", 1, self.repo)
-        self.assertTrue(any("invalid disposition" in error for error in errors), errors)
-
     def test_finding_without_a_line_is_invalid(self):
         data = self.data(findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
                                     "path": "base.txt", "summary": "wrong"}],
@@ -279,9 +239,7 @@ class ReviewValidationTest(Base):
     def test_malformed_review_fields_are_rejected_not_crashed(self):
         cases = {
             "findings": {"findings": ["F-01"]},
-            "changes": {"changes": ["cav/cli.py"]},
             "remaining_disagreements": {"remaining_disagreements": ["review.py"]},
-            "carry_forward_dispositions": {"carry_forward_dispositions": ["CF-01"]},
             "areas": {"areas": ["review"]},
             "behavior_approved": {"behavior_approved": "true"},
             "unhashable id": {"findings": [{"id": ["F-01"], "severity": "NIT", "kind": "cosmetic",
@@ -399,36 +357,6 @@ class AcceptanceTest(Base):
         with self.assertRaises(RuntimeError):
             self.run_with(self.case(max_rounds=1), fakes)
 
-    def test_retained_carry_forward_items_are_not_reported_as_dropped(self):
-        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
-        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
-        deepseek = StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
-                                  dispositions=[{"item_id": "CF-01", "status": "retained", "why": "kept"}])
-        kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
-        case = self.case(max_rounds=1)
-        case.agents["kimi"].bootstrap_ref = kimi_ref
-        orchestrator, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
-        self.assertEqual(state["phase"], "converged")
-        self.assertNotIn("declined", (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8"))
-
-    def test_dropped_items_are_reported_for_each_agent(self):
-        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
-        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
-        drop = [{"item_id": "CF-01", "status": "intentionally_dropped", "why": "mine is better"}]
-        deepseek = StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}, dispositions=drop)
-        kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}, dispositions=drop)
-        case = self.case(max_rounds=1)
-        case.agents["kimi"].bootstrap_ref = kimi_ref
-        orchestrator, _ = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
-        report = (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8")
-        self.assertIn("kimi's changes deepseek declined", report)
-        self.assertIn("deepseek's changes kimi declined", report)
-        self.assertIn("`shared.txt`: mine is better", report)
-
     def test_solve_bootstraps_both_agents_from_base(self):
         fakes = {
             "deepseek": StructuredFake("deepseek", lambda r: {"task.txt": "impl\n"}),
@@ -440,39 +368,13 @@ class AcceptanceTest(Base):
         for name in ("deepseek", "kimi"):
             self.assertEqual(orchestrator.exchange.sha(f"candidate/{name}/r0"), self.base)
 
-    def test_carry_forward_requires_dispositions(self):
-        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
-        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
-        finding = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
-                   "path": "shared.txt", "line": 1}
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
-                                       dispositions=[]),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}, approve=False,
-                                   findings=[finding]),
-        }
-        case = self.case(max_rounds=1)
-        case.agents["kimi"].bootstrap_ref = kimi_ref
-        with self.assertRaises(RuntimeError):
-            self.run_with(case, fakes)
-
-    def test_carry_forward_disposition_is_retried_before_the_round_fails(self):
-        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
-        git("add", "-A", cwd=self.repo)
-        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
-        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
-        # deepseek leaves its decision out on the first attempt and is retried.
-        deepseek = DispositionRetryFake("deepseek", lambda r: {"shared.txt": "deepseek\n"})
+    def test_missing_review_is_retried_before_the_round_fails(self):
+        deepseek = NoReviewFirstFake("deepseek", lambda r: {"shared.txt": "deepseek\n"})
         kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
-        case = self.case(max_rounds=1, retries=1)
-        case.agents["kimi"].bootstrap_ref = kimi_ref
-        _, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
+        _, state = self.run_with(self.case(max_rounds=1, retries=1), {"deepseek": deepseek, "kimi": kimi})
         self.assertEqual(state["phase"], "converged")
         log = (self.tmp / "run" / "run.log").read_text(encoding="utf-8")
-        self.assertIn("retry 1 for: deepseek", log,
-                      "a missing disposition must be retried, not fail the round")
+        self.assertIn("retry 1 for: deepseek", log, "a missing review is retried, not a failed round")
 
     def test_resume_after_a_failed_round_uses_the_last_results(self):
         first = {
@@ -554,7 +456,7 @@ class UnitTest(Base):
             {"round": 3, "results": {"deepseek": {"tree": "a"}, "kimi": {"tree": "b"}}})
         self.assertTrue(orchestrator.oscillating(3))
 
-    def test_each_agent_starts_from_its_own_candidate_with_its_own_ledger(self):
+    def test_each_agent_starts_from_its_own_candidate_and_writes_one_proposal(self):
         (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
         git("add", "-A", cwd=self.repo)
         git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
@@ -567,10 +469,10 @@ class UnitTest(Base):
         }
         orchestrator, state = self.run_with(case, fakes)
         self.assertEqual(state["history"][0]["starts"], {"deepseek": self.base, "kimi": kimi_ref})
-        self.assertEqual(state["history"][0]["ledger"], [{"id": "CF-01", "path": "shared.txt"}])
         for name in ("deepseek", "kimi"):
             prompt = (orchestrator.run_dir / "rounds" / "r1" / f"{name}-context.md").read_text(encoding="utf-8")
-            self.assertIn("CF-01  shared.txt", prompt, f"{name} must decide on the same path")
+            self.assertIn("WRITE ONE NEW PROPOSAL", prompt)
+            self.assertNotIn("CF-01", prompt, "no per-file decisions are asked for")
 
     def test_removed_settings_are_rejected(self):
         for key, value in (("canonical_agent", "deepseek"), ("carry_forward_limit", 20),

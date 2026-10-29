@@ -218,7 +218,7 @@ let state = {}, names = [], selected = null, follow = true;
 const rounds = {};
 
 function R(n) {
-  return rounds[n] ||= {n, starts:null, ledger:0, start:null, agents:{}, reviews:{}, checks:{}, div:null,
+  return rounds[n] ||= {n, starts:null, differing:0, start:null, agents:{}, reviews:{}, checks:{}, div:null,
                         verdict:null, blockers:null, notes:[], fin:{}};
 }
 function A(r, name) {
@@ -242,7 +242,7 @@ function apply(e) {
   switch (t) {
     case 'round.prepared':
       // agent order is the case's order, from the starting points: stable across reloads
-      r.starts = d.starts || {}; r.ledger = d.ledger || 0;
+      r.starts = d.starts || {}; r.differing = d.differing || 0;
       if (!names.length) names = Object.keys(r.starts);
       break;
     case 'publication.selected': r.fin.published = {agent:who, reason:d.reason}; break;
@@ -291,9 +291,6 @@ function apply(e) {
       r.notes.push(['bad', `${who}'s review was rejected: ${why}`]);
       break;
     }
-    case 'agent.unexplained_change':
-      r.notes.push(['warn', `${who} changed ${plural((d.paths || []).length, 'already-agreed file')} without declaring it: ${(d.paths || []).slice(0, 4).join(', ')}`]);
-      break;
     case 'check.start': (r.checks[who] ||= []).push({cmd:d.command}); break;
     case 'check.result': {
       const list = r.checks[who] ||= [];
@@ -337,9 +334,9 @@ function steps(n) {
   const res = (h && h.results) || {};
   const out = [];
 
-  // each agent starts from its own candidate and must decide on every path where the two differ
+  // each agent reads both candidates and writes one combined proposal from its own
   out.push({label:'Starting points', done:!!r.starts,
-            sub: r.starts ? 'each from its own' + (r.ledger ? ` · ${plural(r.ledger, 'path')} to decide` : '') : '',
+            sub: r.starts ? 'each from its own' + (r.differing ? ` · ${differ(r.differing)}` : '') : '',
             title: r.starts ? names.map(x => `${x} @ ${sha(r.starts[x])}`).join('\n') : ''});
 
   const working = agents.filter(a => a.launch && !a.done);
@@ -574,7 +571,6 @@ function renderGates() {
     const d = detail || (!required ? 'not required' : '');
     return `<li class="${cls}"><span class="i">${i}</span><span>${esc(label)}</span><span class="d">${esc(d)}</span></li>`;
   }).join('') + '</ul>' +
-  (b.unexplained_changes ? `<div class="dim" style="margin-top:8px">${plural(b.unexplained_changes, 'undeclared change')} to agreed files (warning only)</div>` : '') +
   `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? 'Accepted' : 'Not yet: another round'}</div>`);
 }
 
@@ -660,12 +656,6 @@ function reviewHtml(d) {
     [esc(x.area), esc(x.kind), esc(x.note)]));
   html += table('Areas', ['Area', 'Status', 'Kept', 'Why'], (d.areas || []).map(x =>
     [esc(x.area), esc(x.status), esc(x.kept), esc(x.why)]));
-  html += table('Changes from the starting tree', ['File', 'Why'], (d.changes || []).map(x =>
-    [`<span class="mono">${esc(x.path)}</span>`, esc(x.why)]));
-  html += table('Carry-forward decisions', ['Item', 'Decision', 'Why'], (d.carry_forward_dispositions || []).map(x =>
-    [esc(x.item_id), esc(x.status), esc(x.why)]));
-  if ((d.incorporated_from_other || []).length)
-    html += `<h4>Taken from the other candidate</h4><div class="mono">${d.incorporated_from_other.map(esc).join('<br>')}</div>`;
   return html;
 }
 

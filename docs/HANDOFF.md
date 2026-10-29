@@ -5,7 +5,7 @@ designed to do.
 
 ## What is actually proven
 
-- **57 unit tests pass** (`py -m unittest discover -s tests -t .`), including a two-round loop
+- **50 unit tests pass** (`py -m unittest discover -s tests -t .`), including a two-round loop
   with fake agents (round 1 blocked by a real finding, round 2 agreed), review validation, the
   acceptance rule, publication choice, resume, retries, oscillation, parallel checks and the
   dashboard endpoints.
@@ -16,11 +16,13 @@ designed to do.
 
 ## What is NOT proven — start here
 
-1. **The current round design has not run with real agents.** Each agent now starts from its
-   own candidate with the other's full diff and an uncapped ledger; the approved candidate is
-   published without a confirmation round. Fake-agent tests cover it; a real run does not yet.
-2. **Ledger size on large divergences.** Every differing path is a decision item, including
-   comment- and whitespace-only ones. The monitor case started with 63; reviews get long.
+1. **The current round design has not run with real agents.** Each agent reads both
+   candidates and writes one combined proposal from its own; there are no per-file decisions,
+   and the approved candidate is published without a confirmation round. Fake-agent tests
+   cover it; a real run does not yet.
+2. **Nothing forces an agent to consider every difference.** Without per-file decisions, an
+   agent may overlook part of the other candidate; the other agent's review of its proposal
+   next round is what catches that.
 3. **`--resume` with real agents.** Covered by tests (failed round, accepted-but-unpublished
    round); never exercised by a real interrupted run.
 4. **Kimi adapter polling assumptions.** It reads `pending_interaction`, `busy`,
@@ -52,7 +54,7 @@ cav/gitops.py        exchange repo, worktrees, commits
 cav/agents.py        OpenCode CLI + Kimi HTTP adapters, progress state, event emission
 cav/prompts.py       round prompt and review contract
 cav/review.py        review validation
-cav/compare.py       identical vs differing paths, decision ledger
+cav/compare.py       identical vs differing paths
 cav/orchestrator.py  bootstrap, symmetric rounds, parallel checks, acceptance, publication, report
 cav/events.py        append-only events.jsonl, monotonic seq, redaction
 cav/web.py           read-only dashboard server (cav/web/index.html)

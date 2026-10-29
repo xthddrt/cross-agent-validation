@@ -21,13 +21,13 @@ On Windows use `py` rather than `python`: the bare `python` on PATH is the Micro
 ## What a run does
 
 1. **Bootstrap** — publish both starting candidates (r0) into a local bare repo (`exchange.git`), from a ref, the base commit (`solve`), or a snapshot of an uncommitted working tree. Nothing touches GitHub.
-2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* previous candidate, the other candidate's full diff against it, and a ledger of every path where the two differ.
-3. **Drive** — both agents run in parallel. Each reviews both candidates, takes the stronger version of each part into its tree, and writes a JSON review: approval of each candidate, findings with a real path and line, and a decision with a reason on every ledger item. An agent that writes no valid review is retried once.
+2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* previous candidate and the other candidate's full diff against it.
+3. **Propose** — both agents run in parallel. Each reads both candidates in full, judges what it agrees with in each, and turns its worktree into **one new proposal** combining the best of both. It writes a JSON review: approval of each candidate, findings with a real path and line, and its judgement per area of the task (not per file). An agent that writes no valid review is retried once. Next round, each agent receives the two new proposals and does the same.
 4. **Monitor** — live progress in `state.json` and `events.jsonl`; an agent blocked on a human prompt is aborted, a stall is reported, and the round has a timeout.
 5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN`. Agents never run git commands that change history.
 6. **Check** — the case's checks run on both candidates at once (an identical tree once).
 7. **Decide** — accepted when every check passes, no review has a `MUST_FIX` finding of kind `behavioral`, both agents approve both candidates, and no behavioural disagreement is left open. Otherwise the next round starts from the new candidates; a pair that repeats an earlier round stops the run.
-8. **Publish** — the approved candidate that changed least from its own original branch is published as it is: nothing is rewritten after agreement, so nothing is re-checked or re-approved. `REPORT.md` records the rounds, the accepted differences and every change an agent declined. `--push` fast-forwards `origin/<branch>`.
+8. **Publish** — the approved candidate that changed least from its own original branch is published as it is: nothing is rewritten after agreement, so nothing is re-checked or re-approved. `REPORT.md` records the rounds, the differences both agents accepted, and each agent's judgement by area. `--push` fast-forwards `origin/<branch>`.
 
 Refusing approval requires a behavioural `MUST_FIX` finding with a real path and line, so taste does not block. Counts are derived from the findings, never trusted from the agent.
 

@@ -55,8 +55,8 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(len(state["history"]), 2)
         self.assertFalse(state["history"][0]["converged"], "a blocking finding stops round 1")
         self.assertFalse(state["history"][0]["blockers"]["trees_equal"])
-        self.assertEqual(state["history"][1]["ledger"], [{"id": "CF-01", "path": "shared.txt"}],
-                         "round 2 asks both agents to decide on the path they differed on")
+        self.assertEqual(state["history"][0]["divergence"]["differing"], 1,
+                         "round 2 starts from two proposals that differ in one path")
         self.assertTrue(state["history"][1]["converged"])
         final = state["final"]
         self.assertEqual(final["tree"], state["history"][1]["results"]["kimi"]["tree"])
