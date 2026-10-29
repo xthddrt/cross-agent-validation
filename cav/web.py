@@ -106,10 +106,13 @@ class Dashboard:
                         self._stream(query)
                     else:
                         self._send(404, "not found", "text/plain")
-                except (BrokenPipeError, ConnectionResetError):
+                except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                     return
                 except Exception as error:  # keep the dashboard alive for a bad request
-                    self._send(500, json.dumps({"error": str(error)}))
+                    try:
+                        self._send(500, json.dumps({"error": str(error)}))
+                    except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
+                        return
 
             def _api(self, name, query):
                 round_no = int((query.get("round") or ["0"])[0])
