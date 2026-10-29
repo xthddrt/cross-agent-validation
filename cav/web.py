@@ -1,5 +1,6 @@
 """Read-only local dashboard: one stdlib HTTP server over a run directory."""
 
+import collections
 import json
 import pathlib
 import secrets
@@ -62,6 +63,33 @@ class Dashboard:
     def file_at(self, rev, file_path):
         exchange = self.run_dir / "exchange.git"
         return git("--git-dir", str(exchange), "show", f"{rev}:{file_path}", check=False)[:400000]
+
+    def messages(self, round_no, agent, limit=300):
+        """The agents' own messages for one round: the most useful live signal there is.
+
+        Scanned from the event log rather than held in memory, so a dashboard can attach to a
+        finished run without the orchestrator still being alive.
+        """
+        path = self.run_dir / "events.jsonl"
+        out = collections.deque(maxlen=max(1, limit))
+        if not path.exists():
+            return []
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if '"agent.text"' not in line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if event.get("type") != "agent.text":
+                    continue
+                if event.get("round") != round_no or event.get("agent") != agent:
+                    continue
+                text = (event.get("data") or {}).get("text") or ""
+                if text.strip():
+                    out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""), "text": text})
+        return list(out)
 
     # ----------------------------------------------------------------- server
 
@@ -138,6 +166,9 @@ class Dashboard:
                 if name == "checks":
                     body = dashboard.artifact("checks", f"r{round_no}", f"{agent}.json")
                     return self._send(200, body or "{}")
+                if name == "messages":
+                    limit = int((query.get("limit") or ["300"])[0])
+                    return self._send(200, json.dumps(dashboard.messages(round_no, agent, limit)))
                 if name == "diff":
                     if ".." in path or path.startswith("-"):
                         return self._send(400, '{"error": "bad path"}')

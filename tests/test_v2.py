@@ -648,6 +648,28 @@ class AdapterCaptureTest(unittest.TestCase):
 
 
 class DashboardTest(unittest.TestCase):
+    def test_messages_are_filtered_by_round_and_agent(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-msg-"))
+        try:
+            rows = [
+                {"seq": 1, "ts": "t", "round": 1, "agent": "deepseek", "type": "agent.text",
+                 "data": {"text": "one"}},
+                {"seq": 2, "ts": "t", "round": 1, "agent": "kimi", "type": "agent.text",
+                 "data": {"text": "two"}},
+                {"seq": 3, "ts": "t", "round": 2, "agent": "deepseek", "type": "agent.text",
+                 "data": {"text": "three"}},
+                {"seq": 4, "ts": "t", "round": 1, "agent": "deepseek", "type": "agent.tool.start",
+                 "data": {}},
+            ]
+            (tmp / "events.jsonl").write_text(
+                "\n".join(json.dumps(row) for row in rows), encoding="utf-8")
+            dashboard = Dashboard(tmp, port=0)
+            self.assertEqual([m["text"] for m in dashboard.messages(1, "deepseek")], ["one"])
+            self.assertEqual([m["text"] for m in dashboard.messages(2, "deepseek")], ["three"])
+            self.assertEqual([m["text"] for m in dashboard.messages(1, "kimi")], ["two"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_endpoints_are_read_only_and_tokenised(self):
         tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-web-"))
         try:
