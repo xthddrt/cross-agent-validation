@@ -303,6 +303,24 @@ class KimiAgent(Agent):
         self._seen_parts = len(flat)
         self._transcript.flush()
 
+    def _pending(self, detail):
+        pending = (detail or {}).get("pending_interaction")
+        if pending in (None, "", "none"):
+            return None
+        return f"waiting:{pending}"
+
+    def _verify_permission(self, requested):
+        """A silently different permission mode means the first tool call blocks on a human."""
+        try:
+            status = self._call("GET", f"/api/v1/sessions/{self.session_id}/status").get("data") or {}
+        except RuntimeError:
+            return
+        effective = status.get("permission")
+        if effective and effective != requested:
+            raise RuntimeError(
+                f"kimi session runs with permission {effective!r}, not {requested!r}; "
+                f"a tool call would block on a human approval")
+
     def run(self, prompt, cwd):
         if not self.base:
             self._connect()
@@ -320,6 +338,7 @@ class KimiAgent(Agent):
         self._call("POST", f"/api/v1/sessions/{self.session_id}/profile", {
             "agent_config": self._agent_config(),
         })
+        self._verify_permission(self._agent_config()["permission_mode"])
         self._baseline = self._assistant_count()
         self._seen_parts = 0
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
@@ -334,18 +353,19 @@ class KimiAgent(Agent):
             items = self._messages()
             self._capture(items)
             count = sum(1 for m in items if m.get("role") == "assistant")
-            pending = detail.get("pending_interaction", "none")
             busy = detail.get("busy", False) or detail.get("main_turn_active", False)
-            if count > self._baseline:
+            waiting = self._pending(detail)
+            if waiting:
+                # Kimi reports busy=True while it waits for approval, so this must be checked
+                # before the busy branch: otherwise the block is invisible until the round timeout.
+                self.state.detail = waiting
+                idle += 1
+            elif count > self._baseline:
                 self.state.touch("writing" if busy else "finishing", count - self._baseline)
                 idle = 0
             elif busy:
                 self.state.touch("running")
                 idle = 0
-            elif pending not in (None, "none"):
-                # Not touching: a run waiting on a human must look stalled to the monitor.
-                self.state.detail = f"waiting:{pending}"
-                idle += 1
             else:
                 idle += 1
             reason = detail.get("last_turn_reason")

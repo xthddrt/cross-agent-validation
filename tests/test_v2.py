@@ -11,6 +11,7 @@ import urllib.error
 import urllib.request
 from unittest import mock
 
+from cav import agents as agent_mod
 from cav import compare, config, events, review
 from cav.agents import RunState
 from cav.gitops import Repo, git
@@ -401,6 +402,31 @@ class EventsTest(unittest.TestCase):
             self.assertEqual(len(events.read(tmp / "events.jsonl", 1)), 1)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class KimiBlockingTest(unittest.TestCase):
+    def agent(self):
+        return agent_mod.KimiAgent(config.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro"),
+                                   "log.txt")
+
+    def test_pending_approval_wins_over_busy(self):
+        """Kimi reports busy=True while waiting for approval; the block must still be visible."""
+        agent = self.agent()
+        self.assertEqual(agent._pending({"busy": True, "main_turn_active": True,
+                                         "pending_interaction": "approval"}), "waiting:approval")
+        self.assertIsNone(agent._pending({"busy": True, "pending_interaction": "none"}))
+        self.assertIsNone(agent._pending({}))
+
+    def test_permission_mismatch_fails_fast(self):
+        agent = self.agent()
+        agent.session_id = "s"
+        agent._call = lambda *args, **kwargs: {"data": {"permission": "ask"}}
+        with self.assertRaises(RuntimeError):
+            agent._verify_permission("yolo")
+        agent._call = lambda *args, **kwargs: {"data": {"permission": "yolo"}}
+        agent._verify_permission("yolo")
+        agent._call = lambda *args, **kwargs: {"data": {}}
+        agent._verify_permission("yolo")
 
 
 class DashboardTest(unittest.TestCase):
