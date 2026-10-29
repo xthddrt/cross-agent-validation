@@ -29,6 +29,9 @@ class FakeAgent:
     def abort(self):
         pass
 
+    def reset(self):
+        self.state = RunState()
+
     def content(self, round_no):
         return "agreed\n" if round_no >= 2 else f"{self.name}\n"
 
@@ -194,8 +197,12 @@ class LoopTest(unittest.TestCase):
 
     def test_review_parsing(self):
         path = self.tmp / "review.md"
-        path.write_text("MUST_FIX: 3\nMUST_FIX: 0\n", encoding="utf-8")
+        path.write_text("MUST_FIX: 0\n", encoding="utf-8")
         self.assertEqual(parse_must_fix(path), 0)
+        path.write_text("MUST_FIX: 3\nMUST_FIX: 0\n", encoding="utf-8")
+        self.assertIsNone(parse_must_fix(path))
+        path.write_text("MUST_FIX: 0 trailing\n", encoding="utf-8")
+        self.assertIsNone(parse_must_fix(path))
         path.write_text("no verdict here\n", encoding="utf-8")
         self.assertIsNone(parse_must_fix(path))
         self.assertIsNone(parse_must_fix(self.tmp / "missing.md"))
@@ -207,6 +214,17 @@ class LoopTest(unittest.TestCase):
         result = orchestrator.execute_checks("deepseek", self.repo, self.tmp / "checks" / "out.json")
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["commands"][0]["exit"], 0)
+
+    def test_reused_check_result_keeps_each_agent_label(self):
+        case = self.case()
+        case.checks = ['{python} -c "print(1)"']
+        orchestrator = Orchestrator(case, self.tmp / "checks-cache")
+        results = {name: {"tree": "same"} for name in ("deepseek", "kimi")}
+        worktrees = {name: {"path": self.repo} for name in ("deepseek", "kimi")}
+        report = orchestrator.run_checks(1, results, worktrees)
+        self.assertEqual(report["kimi"]["agent"], "kimi")
+        self.assertEqual(report["deepseek"]["agent"], "deepseek")
+        self.assertIsNot(report["kimi"], report["deepseek"])
 
     def test_conflict_markers_block_commit(self):
         (self.repo / "bad.txt").write_text("<<<<<<< HEAD\nours\n>>>>>>> theirs\n", encoding="utf-8")
@@ -263,6 +281,46 @@ class ConfigTest(unittest.TestCase):
         self.assertIsNone(case.base)
         self.assertEqual(case.agents["deepseek"].bootstrap_ref, "HEAD")
         self.assertEqual(case.secondary_repo.name, "cross-agent-validation")
+
+
+class AgentLifecycleTest(unittest.TestCase):
+    def test_reset_clears_abort_and_failure_state(self):
+        agent = agent_mod.Agent(config.AgentSpec("kimi", "kimi"), "log.txt")
+        agent.state.error = "round timeout"
+        agent.abort()
+        agent.reset()
+        self.assertFalse(agent._abort.is_set())
+        self.assertIsNone(agent.state.error)
+
+    def test_opencode_abort_kills_running_process(self):
+        spec = config.AgentSpec("deepseek", "opencode")
+        with mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"):
+            agent = agent_mod.OpenCodeAgent(spec, "log.txt")
+        agent._proc = mock.Mock()
+        agent._proc.poll.return_value = None
+        agent.abort()
+        agent._proc.kill.assert_called_once_with()
+
+    def test_aborted_opencode_keeps_the_monitor_reason(self):
+        class Proc:
+            returncode = -9
+
+            def __init__(self):
+                self.stdout = iter(())
+
+            def wait(self):
+                return -9
+
+        spec = config.AgentSpec("deepseek", "opencode")
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"), \
+                mock.patch("cav.agents.subprocess.Popen", return_value=Proc()):
+            agent = agent_mod.OpenCodeAgent(spec, pathlib.Path(tmp) / "run.log")
+            agent.state.error = "blocked: waiting:permission"
+            agent.abort()
+            result = agent.run("prompt", tmp)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["reason"], "blocked: waiting:permission")
 
 
 class ModelPinningTest(unittest.TestCase):

@@ -6,7 +6,7 @@ First case: reconciling the two independent five-phase logging/coverage implemen
 
 ```
 candidate/deepseek/r0 ─┐
-                       ├─► round 1 ─► r1 ─► round 2 ─► r2 ─► converged
+                       ├─ round 1 ─ r1 ─ round 2 ─ r2 ─ converged
 candidate/kimi/r0 ─────┘
 ```
 
@@ -64,6 +64,14 @@ powershell -Command "Get-Content runs\<id>\run.log -Wait -Tail 20"
 
 Each `PROG` line shows the round, agent, state (`WORK`/`DONE`), elapsed time, idle time, message count, and what the agent is currently doing (`tool:shell`, `writing`, `step`). Things worth watching for: `idle` climbing while `detail` stays put (a stall), and one agent `DONE` while the other keeps working (the lag line names it).
 
+## Tests
+
+```bat
+python -m unittest discover -s tests -t .
+```
+
+The suite drives a full two-round loop with fake agents and covers the commit guards: unrelated-history merges, conflict markers, snapshotting a repo with no commits or no git identity, the check runner, and the agent lifecycle (retry after abort, process kill).
+
 ## A round, concretely
 
 | Agent | Worktree | Starts from | Prompt outcome |
@@ -78,7 +86,7 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 | Situation | Behaviour |
 |---|---|
 | Agent fails or exits non-zero | one retry, then the round fails with the reason |
-| Review file missing or without `MUST_FIX` | treated as no result; retried once |
+| Review file missing or without exactly one valid `MUST_FIX` line | treated as no result; retried once |
 | Unresolved merge conflicts or leftover `<<<<<<<` markers | commit refused, round fails with the file list |
 | Agent waits for a permission prompt | aborted immediately with `blocked: ...` |
 | No activity for `stall_seconds` | warning logged, run continues |
@@ -107,14 +115,14 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 - `bootstrap_ref` — an existing commit to publish as that agent's r0.
 - `base` — omit it when the two implementations have unrelated histories (the self case). Merges then run with `--allow-unrelated-histories` and the prompt says there is no shared base.
 - `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model (observed: `opencode/flint-40b-free`). The suffix `#high` is the reasoning variant.
-- `thinking` — Kimi's thinking level (`low`, `high`, `max`). Kimi's status is checked after each run and a mismatch fails the round.
+- `thinking` — Kimi's thinking level (`low`, `high`, `max`). Kimi's model and thinking level are checked after each run and a mismatch fails the round.
 - No `bootstrap_ref` — snapshot that agent's dirty working tree from `secondary` into r0 (the working tree, branch and index are left untouched).
 - `{python}` in a check command is replaced with the interpreter running the tool.
 - `checks` may be omitted; convergence then rests on identical trees and clean reviews only.
 
 ## Limits
 
-- Kimi Code must be running; there is no CLI. If it is closed, `smoke` fails with "server not running".
+- Kimi Code must be running; the adapter uses its local HTTP API and fails with "server not running" when there is no instance file.
 - A timed-out Kimi turn is abandoned, not cancelled: the server keeps working and the run stops waiting for it.
 - Signoffs are derived mechanically from each agent's own review, the shared tree hash, and the check results. They are not independent human approvals.
 - Checks are whatever the case lists. This tool does not verify driver runtime behaviour — a green check matrix means it builds, not that it works on hardware.

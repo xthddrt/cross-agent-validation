@@ -56,6 +56,10 @@ class Agent:
     def abort(self):
         self._abort.set()
 
+    def reset(self):
+        self._abort.clear()
+        self.state = RunState()
+
     def available(self):
         raise NotImplementedError
 
@@ -87,6 +91,14 @@ class OpenCodeAgent(Agent):
         self.session_id = None
         self.title_prefix = title_prefix
         self._proc = None
+
+    def abort(self):
+        super().abort()
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
 
     def available(self):
         return True
@@ -123,10 +135,11 @@ class OpenCodeAgent(Agent):
                     break
                 self._consume(line)
             self._proc.wait()
-        if self._abort.is_set():
-            self.state.error = "aborted"
-        elif self._proc.returncode != 0:
-            self.state.error = f"opencode exit {self._proc.returncode}"
+        if self.state.error is None:
+            if self._abort.is_set():
+                self.state.error = "aborted"
+            elif self._proc.returncode != 0:
+                self.state.error = f"opencode exit {self._proc.returncode}"
         self.state.finished = True
         self.state.touch("finished" if not self.state.error else "failed")
         return {"ok": self.state.error is None, "text": self.state.text,

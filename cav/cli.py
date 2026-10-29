@@ -29,7 +29,7 @@ def cmd_run(args):
         return 1
     final = state.get("final")
     if not final:
-        print("\nNo agreement. See state.json and REPORT.md is not written.")
+        print("\nNo agreement. See state.json; REPORT.md was not written.")
         return 2
     print(f"\nConverged: {final['commit']}")
     print(f"Tree:      {final['tree']}")

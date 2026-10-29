@@ -13,7 +13,7 @@ from . import agents as agent_mod
 from .gitops import IDENTITY, Exchange, Repo, git, git_ok
 from .prompts import retry_note, round_prompt
 
-MUST_FIX_RE = re.compile(r"(?m)^MUST_FIX\s*:\s*(\d+)")
+MUST_FIX_RE = re.compile(r"(?m)^MUST_FIX\s*:\s*(\d+)\s*$")
 TEMPLATE = pathlib.Path(__file__).resolve().parent.parent / "docs" / "REVIEW_TEMPLATE.md"
 
 
@@ -27,7 +27,7 @@ def parse_must_fix(path):
     if not path.exists():
         return None
     found = MUST_FIX_RE.findall(path.read_text(encoding="utf-8", errors="replace"))
-    return int(found[-1]) if found else None
+    return int(found[0]) if len(found) == 1 else None
 
 
 class Orchestrator:
@@ -206,14 +206,14 @@ class Orchestrator:
             if not review_ok:
                 failed.append(f"{name}: no usable review file at {self.rel(reviews[name])}")
                 continue
-            if not agent_result.get("ok"):
-                failed.append(f"{name}: agent failed ({agent_result.get('reason')})")
+            if runs[name].state.error or not agent_result.get("ok"):
+                failed.append(f"{name}: agent failed ({runs[name].state.error or agent_result.get('reason')})")
                 continue
             path = worktrees[name]["path"]
             sha, problem = self.repo.commit_all(
                 path,
                 f"Reconcile round {round_no}: {name} recommendation\n\n"
-                f"Inputs: {own_refs[primary]} + {own_refs[case.other(primary)]}\n"
+                f"Inputs: {own_refs[name]} + {own_refs[case.other(name)]}\n"
                 f"Base: {case.base}")
             if problem:
                 failed.append(f"{name}: {problem}")
@@ -281,7 +281,7 @@ class Orchestrator:
             for name in pending:
                 agent = runs[name]
                 previous_error = agent.state.error
-                agent.state = agent_mod.RunState()
+                agent.reset()
                 prompt = prompts[name] + (retry_note(attempt, previous_error) if attempt else "")
                 thread = threading.Thread(target=self._worker, args=(agent, prompt, worktrees[name]["path"]),
                                           daemon=True, name=f"agent-{name}")
@@ -342,8 +342,9 @@ class Orchestrator:
                     continue
                 if state.detail.startswith("waiting:"):
                     self.log(f"r{round_no} {name}: blocked on a human interaction ({state.detail}); aborting", "ERROR")
+                    # Set the reason before aborting: the run thread sets "aborted" if it wins the race.
+                    state.error = f"blocked: {state.detail}"
                     runs[name].abort()
-                    state.error = state.error or f"blocked: {state.detail}"
                 if state.idle > case.stall_seconds and name not in warned:
                     warned.add(name)
                     self.log(f"r{round_no} {name}: no activity for {clock(state.idle)} "
@@ -394,7 +395,7 @@ class Orchestrator:
         for name in case.agents:
             tree = results[name]["tree"]
             if tree in cache:
-                result = cache[tree]
+                result = dict(cache[tree], agent=name)
                 self.log(f"checks {name}: identical tree to another agent, reusing result")
             else:
                 result = self.execute_checks(name, worktrees[name]["path"], out_dir / f"{name}.json")
@@ -524,8 +525,9 @@ class Orchestrator:
             lines.append("")
 
         conflicts = results[primary].get("conflicts") or []
-        lines += ["## Merge conflicts", "",
-                  "- none" if not conflicts else "\n".join(f"- `{c}`" for c in conflicts), ""]
+        lines += ["## Merge conflicts", ""]
+        lines += [f"- `{c}`" for c in conflicts] if conflicts else ["- none"]
+        lines.append("")
         lines += ["## Signoff", "",
                   "Both signoffs are derived from each agent's own review file, the identical tree hash, "
                   "and the recorded check results. They are not independent human approvals.", ""]
