@@ -183,13 +183,31 @@ class Orchestrator:
 
     def run(self):
         start = 1
+        accepted = None
         if self.resume and (self.run_dir / "state.json").exists():
             self.state = json.loads((self.run_dir / "state.json").read_text(encoding="utf-8"))
+            if self.state.get("final"):
+                return self.state
             rounds = [item["round"] for item in self.state.get("history", [])]
             start = (max(rounds) + 1) if rounds else 1
+            last = next((item for item in reversed(self.state.get("history") or [])
+                         if item.get("results")), None)
+            if last and last.get("converged") and not last.get("finalization"):
+                accepted = last
             self.log(f"resuming at round {start}")
             self.emit("run.resume", start, data={"history": len(rounds)})
         self.bootstrap()
+        if accepted:
+            # The round was accepted but its finalization did not finish: finish it here instead
+            # of advancing past it and letting the next round turn an accepted result into a
+            # disagreement.
+            names = list(self.case.agents)
+            results = accepted["results"]
+            self._divergence_files = compare.compare_trees(
+                self.exchange.path, results[names[0]]["tree"], results[names[1]]["tree"],
+                self.case.strict_paths)["files"]
+            if self.finalize(accepted["round"], accepted["verdict"]) == "accepted":
+                return self.state
         for round_no in range(start, self.case.max_rounds + 1):
             outcome = self.round(round_no)
             if outcome == "accepted":
@@ -549,11 +567,16 @@ class Orchestrator:
                 thread = threading.Thread(target=self._worker, args=(agent, prompt, worktrees[name]["path"]),
                                           daemon=True, name=f"agent-{name}")
                 thread.start()
-                threads.append(thread)
+                threads.append((name, thread))
             self.monitor(round_no, runs, pending)
-            for thread in threads:
+            for _, thread in threads:
                 thread.join(timeout=30)
+            alive = {name for name, thread in threads if thread.is_alive()}
             for name in pending:
+                if name in alive:
+                    # Never start a second agent on a worktree another one is still editing.
+                    self.log(f"r{round_no} {name}: worker still exiting; not retrying it", "ERROR")
+                    continue
                 problem = artifact_problem(name)
                 if problem:
                     runs[name].state.error = runs[name].state.error or problem
@@ -706,7 +729,11 @@ class Orchestrator:
         valid = all(results[name]["valid"] for name in names)
         blocking = sum(results[name]["blocking"] for name in names)
         if self.strict:
-            ok = equal and checks_ok and valid and blocking == 0
+            # Strict keeps the documented old rule: identical trees and every review says MUST_FIX: 0,
+            # so a nonblocking MUST_FIX cannot slip through.
+            must_fix = sum(int(results[name].get("counts", {}).get("must_fix_total") or 0)
+                           for name in names)
+            ok = equal and checks_ok and valid and must_fix == 0
             return "strict" if ok else "diverged"
         approved = all(results[name]["approved"] and results[name]["other_approved"] for name in names)
         open_behaviour = any(results[name]["open_behavioural"] for name in names)
@@ -721,6 +748,8 @@ class Orchestrator:
         return {
             "checks": all(item["ok"] for item in checks.values()),
             "blocking_must_fix": sum(results[name]["blocking"] for name in names),
+            "must_fix_total": sum(int(results[name].get("counts", {}).get("must_fix_total") or 0)
+                                  for name in names),
             "behaviour_approved": [results[name]["approved"] for name in names],
             "other_approved": [results[name]["other_approved"] for name in names],
             "open_behavioural": any(results[name]["open_behavioural"] for name in names),
@@ -762,8 +791,13 @@ class Orchestrator:
         changed = compare.apply_safe_normalization(final_wt, case.strict_paths, cosmetic)
         if case.formatter:
             self.log(f"format: {case.formatter}")
-            subprocess.run(case.formatter, shell=True, cwd=str(final_wt),
-                           capture_output=True, text=True)
+            formatted = subprocess.run(case.formatter, shell=True, cwd=str(final_wt),
+                                       capture_output=True, text=True)
+            if formatted.returncode:
+                tail = ((formatted.stdout or "") + (formatted.stderr or ""))[-1000:]
+                self.log(f"formatter exited {formatted.returncode}: {tail}", "ERROR")
+                return self.refuse(round_no, f"formatter exited {formatted.returncode}",
+                                   {"ok": False, "commands": []})
         self.emit("settle.commit", round_no,
                   data={"commit": commit, "normalised": changed[:50], "count": len(changed)})
         if self.repo.dirty(final_wt):

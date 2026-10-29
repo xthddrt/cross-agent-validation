@@ -4,6 +4,7 @@ import json
 import pathlib
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import unittest
@@ -12,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from cav import compare, config, events, review
-from cav.agents import RunState
+from cav.agents import KimiAgent, RunState
 from cav.gitops import Repo, git
 from cav.orchestrator import Orchestrator
 from cav.web import Dashboard
@@ -299,6 +300,16 @@ class ReviewValidationTest(Base):
             "remaining_disagreements": {"remaining_disagreements": ["review.py"]},
             "carry_forward_dispositions": {"carry_forward_dispositions": ["CF-01"]},
             "areas": {"areas": ["review"]},
+            "counts": {"counts": "none"},
+            "behavior_approved": {"behavior_approved": "true"},
+            "unhashable id": {"findings": [{"id": ["F-01"], "severity": "NIT", "kind": "cosmetic",
+                                            "path": "base.txt", "line": 1}],
+                              "counts": {"must_fix_total": 0, "blocking_must_fix": 0,
+                                         "should_fix": 0, "nit": 1}},
+            "path is not a string": {"findings": [{"id": "F-01", "severity": "NIT",
+                                                   "kind": "cosmetic", "path": 3, "line": 1}],
+                                     "counts": {"must_fix_total": 0, "blocking_must_fix": 0,
+                                                "should_fix": 0, "nit": 1}},
         }
         for label, overrides in cases.items():
             with self.subTest(field=label):
@@ -351,6 +362,31 @@ class AcceptanceTest(Base):
         }
         orchestrator, state = self.run_with(self.case(convergence="strict", max_rounds=1), fakes)
         self.assertEqual(state["final"]["verdict"], "strict")
+
+    def test_formatter_failure_blocks_publication(self):
+        case = self.case(max_rounds=1)
+        case.formatter = f'"{sys.executable}" -c "import sys; sys.exit(7)"'
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
+        }
+        _, state = self.run_with(case, fakes)
+        self.assertEqual(state["phase"], "disagreement")
+        self.assertIsNone(state.get("final"))
+
+    def test_resume_finalizes_an_accepted_round(self):
+        case = self.case(max_rounds=1)
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}),
+        }
+        with mock.patch.object(Orchestrator, "finalize", return_value="next"):
+            _, state = self.run_with(case, fakes)
+        self.assertTrue(state["history"][-1]["converged"])
+        self.assertIsNone(state.get("final"))
+        _, state = self.run_with(case, fakes, resume=True)
+        self.assertEqual(state["phase"], "converged")
+        self.assertEqual(state["final"]["verdict"], "functional")
 
     def test_solve_bootstraps_both_agents_from_base(self):
         fakes = {
@@ -485,6 +521,17 @@ class UnitTest(Base):
         orchestrator = Orchestrator(self.case(), self.tmp / "basis")
         self.assertEqual(orchestrator.assurance_basis(), "checks + mutual review (no task prompt)")
 
+    def test_strict_rejects_a_nonblocking_must_fix(self):
+        orchestrator = Orchestrator(self.case(convergence="strict"), self.tmp / "strict-count")
+        results = {name: {"tree": "same", "valid": True, "blocking": 0,
+                          "counts": {"must_fix_total": 1 if name == "kimi" else 0}}
+                   for name in ("deepseek", "kimi")}
+        checks = {name: {"ok": True} for name in results}
+        self.assertEqual(orchestrator.evaluate(results, checks, {}), "diverged")
+        for result in results.values():
+            result["counts"]["must_fix_total"] = 0
+        self.assertEqual(orchestrator.evaluate(results, checks, {}), "strict")
+
     def test_task_prompt_and_file_are_exclusive(self):
         path = self.tmp / "case.json"
         path.write_text(json.dumps({
@@ -504,13 +551,36 @@ class EventsTest(unittest.TestCase):
             writer = events.EventWriter(tmp / "events.jsonl", "run")
             writer.emit("one", 1, "kimi", {"text": "x" * 9000})
             writer.emit("two", 1, "kimi", {"header": "Authorization: Bearer abcdefghijklmnop"})
+            writer.emit("three", 1, "kimi", {"token": "abc123",
+                                             "nested": {"password": "hunter2", "note": "ok"}})
             payload = events.read(tmp / "events.jsonl", 0)
-            self.assertEqual([item["seq"] for item in payload], [1, 2])
+            self.assertEqual([item["seq"] for item in payload], [1, 2, 3])
             self.assertIn("truncated", payload[0]["data"]["text"])
             self.assertIn("[redacted]", payload[1]["data"]["header"])
-            self.assertEqual(len(events.read(tmp / "events.jsonl", 1)), 1)
+            self.assertEqual(payload[2]["data"]["token"], "[redacted]")
+            self.assertEqual(payload[2]["data"]["nested"]["password"], "[redacted]")
+            self.assertEqual(payload[2]["data"]["nested"]["note"], "ok")
+            self.assertEqual(len(events.read(tmp / "events.jsonl", 1)), 2)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class AdapterCaptureTest(unittest.TestCase):
+    def test_kimi_capture_emits_an_updated_part_once(self):
+        with tempfile.TemporaryDirectory(prefix="cav-capture-") as tmp:
+            emitted = []
+            agent = KimiAgent(config.AgentSpec("kimi", "kimi"), pathlib.Path(tmp) / "kimi.log",
+                              emit=lambda kind, name, data: emitted.append((kind, data)))
+            message = {"id": "m", "role": "assistant",
+                       "content": [{"id": "p", "type": "text", "text": "hello"}]}
+            agent._capture([message])
+            agent._capture([message])
+            message["content"][0]["text"] = "hello, updated"
+            agent._capture([message])
+            agent._transcript.close()
+            texts = [data["text"] for kind, data in emitted if kind == "agent.text"]
+            self.assertEqual(texts, ["hello", "hello, updated"])
+            self.assertEqual(len((pathlib.Path(tmp) / "kimi.log").read_text().splitlines()), 2)
 
 
 class DashboardTest(unittest.TestCase):

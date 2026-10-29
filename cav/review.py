@@ -38,8 +38,6 @@ class Review:
 
     @property
     def blocking(self):
-        if self.fallback:
-            return int(self.counts.get("blocking_must_fix") or 0)
         return int(self.counts.get("blocking_must_fix") or 0)
 
     @property
@@ -114,7 +112,9 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
     if shaped:
         return errors + shaped
     ids = [finding.get("id") for finding in findings]
-    if len(ids) != len(set(ids)):
+    if any(not isinstance(item, str) or not item for item in ids):
+        errors.append("finding ids must be non-empty strings")
+    elif len(ids) != len(set(ids)):
         errors.append("duplicate finding ids")
     for finding in findings:
         label = finding.get("id") or "?"
@@ -123,8 +123,8 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         if finding.get("kind") not in KINDS:
             errors.append(f"{label}: kind {finding.get('kind')!r} invalid")
         path = finding.get("path")
-        if not path:
-            errors.append(f"{label}: no path")
+        if not isinstance(path, str) or not path:
+            errors.append(f"{label}: no valid path")
             continue
         target = (worktree / path).resolve()
         try:
@@ -149,7 +149,12 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             if count is not None and (line < 1 or line > count):
                 errors.append(f"{label}: line {line} outside {path} (1..{count})")
 
-    counts = data.get("counts") or {}
+    counts = data.get("counts")
+    if counts is None:
+        counts = {}
+    if not isinstance(counts, dict):
+        errors.append("counts must be an object")
+        counts = {}
     expected = {
         "must_fix_total": _count(data, "MUST_FIX"),
         "should_fix": _count(data, "SHOULD_FIX"),
@@ -162,10 +167,11 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
         if counts.get(key) != value:
             errors.append(f"counts.{key} is {counts.get(key)!r}, findings say {value}")
 
-    if data.get("behavior_approved") is False and blocking == 0:
-        errors.append("behavior_approved is false without a blocking finding")
-    if data.get("other_behavior_approved") is False and blocking == 0:
-        errors.append("other_behavior_approved is false without a blocking finding")
+    for key in ("behavior_approved", "other_behavior_approved"):
+        if not isinstance(data.get(key), bool):
+            errors.append(f"{key} must be boolean")
+        elif data[key] is False and blocking == 0:
+            errors.append(f"{key} is false without a blocking finding")
 
     for item in (data.get("remaining_disagreements") or []):
         if (item or {}).get("kind") == "behavioral" and data.get("behavior_approved"):

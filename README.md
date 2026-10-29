@@ -110,6 +110,7 @@ Then the orchestrator commits both, pushes `candidate/deepseek/r1` and `candidat
 |---|---|
 | Agent fails or exits non-zero | one retry, then the round fails with the reason |
 | Review file missing, invalid, or without exactly one valid `MUST_FIX` line (including a missing carry-forward disposition) | treated as no result; retried once |
+| Configured `formatter` exits non-zero | finalization refused, formatter output in `run.log` |
 | Unresolved merge conflicts or leftover `<<<<<<<` markers | commit refused, round fails with the file list |
 | Agent waits for a permission prompt | aborted immediately with `blocked: ...` |
 | No activity for `stall_seconds` | warning logged, run continues |
