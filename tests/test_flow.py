@@ -264,7 +264,7 @@ class ConfigTest(unittest.TestCase):
     def test_shipped_case_loads(self):
         case = config.load(pathlib.Path(__file__).resolve().parents[1] / "cases" / "msmon-five-phase.json")
         self.assertEqual(sorted(case.agents), ["deepseek", "kimi"])
-        self.assertEqual(case.agents["kimi"].bootstrap_exclude, ["reconciliation"])
+        self.assertEqual(case.agents["kimi"].bootstrap_ref, "origin/candidate/kimi-phase-1-5")
         self.assertEqual(len(case.checks), 4)
         self.assertEqual(case.other("kimi"), "deepseek")
 

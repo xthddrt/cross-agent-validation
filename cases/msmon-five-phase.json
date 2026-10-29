@@ -11,13 +11,13 @@
     "deepseek": {
       "kind": "opencode",
       "model": "deepseek/deepseek-flash#high",
-      "bootstrap_ref": "798405f"
+      "bootstrap_ref": "origin/candidate/deepseek-phase-1-5"
     },
     "kimi": {
       "kind": "kimi",
       "model": "kimi-code/k3.1-pro",
       "thinking": "high",
-      "bootstrap_exclude": ["reconciliation"]
+      "bootstrap_ref": "origin/candidate/kimi-phase-1-5"
     }
   },
   "checks": [
