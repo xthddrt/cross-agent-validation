@@ -74,6 +74,12 @@ class Dashboard:
             def log_message(self, *args):
                 pass
 
+            def handle_one_request(self):
+                try:
+                    super().handle_one_request()
+                except (ConnectionResetError, BrokenPipeError):
+                    self.close_connection = True
+
             def _send(self, status, body, content_type="application/json"):
                 payload = body.encode("utf-8") if isinstance(body, str) else body
                 self.send_response(status)

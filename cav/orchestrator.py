@@ -37,7 +37,7 @@ class Orchestrator:
         self.resume = resume
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.exchange = Exchange(self.run_dir / "exchange.git").ensure()
-        self.repo = Repo(case.host_repo).attach(self.exchange)
+        self.repo = Repo(case.host_repo).attach(self.exchange, self.run_dir.name)
         self.log_path = self.run_dir / "run.log"
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_dir.name)
         self.state = {
@@ -136,7 +136,7 @@ class Orchestrator:
                 continue
             if not self.case.secondary_repo:
                 raise RuntimeError(f"{name}: no bootstrap_ref and no secondary repo to snapshot")
-            secondary = Repo(self.case.secondary_repo).attach(self.exchange)
+            secondary = Repo(self.case.secondary_repo).attach(self.exchange, self.run_dir.name)
             sha, problem = self.snapshot(secondary, spec)
             if problem:
                 raise RuntimeError(f"{name}: cannot snapshot {secondary.path}: {problem}")
@@ -267,20 +267,24 @@ class Orchestrator:
                         "json": reviews_dir / f"{name}-review.json"} for name in case.agents}
 
         agreed = self.agreed_paths(previous)
+        non_baseline = next((name for name in case.agents if name != owner), None) if owner else None
+        delta_patch = None
+        if phase == "reconcile" and non_baseline and non_baseline in previous:
+            delta_patch = self.write_patch(round_no, non_baseline,
+                                           previous[non_baseline]["commit"], baseline)
         prompts = {}
         for name in case.agents:
             other = case.other(name)
-            patch = None
-            if phase == "reconcile" and other in previous:
-                patch = self.write_patch(round_no, other, previous[other]["commit"], baseline)
             context = {
                 "phase": phase,
                 "baseline": baseline,
                 "baseline_reason": reason,
-                "other_ref": f"candidate/{other}/r{round_no - 1}",
+                "own_sha": previous.get(name, {}).get("commit", "?"),
                 "other_sha": previous.get(other, {}).get("commit", "?"),
-                "other_patch": str(patch) if patch else "(none)",
-                "other_review": self.previous_review_path(round_no, other),
+                "delta_agent": non_baseline or "(none)",
+                "delta_patch": str(delta_patch) if delta_patch else "(none)",
+                "delta_review": (self.previous_review_path(round_no, non_baseline)
+                                 if non_baseline else "(none)"),
                 "own_review": self.previous_review_path(round_no, name),
                 "ledger": ledger if name == owner else None,
                 "ledger_ids": ledger_ids if name == owner else [],
@@ -504,12 +508,22 @@ class Orchestrator:
     def drive(self, round_no, runs, prompts, worktrees, reviews):
         case = self.case
 
-        def artifact_ok(name):
+        def artifact_problem(name):
             worktree = worktrees[name]["path"]
             rev = review_mod.load(reviews[name]["json"], reviews[name]["md"], name, round_no,
                                   worktree)
-            return (not runs[name].state.error and runs[name].state.finished
-                    and rev is not None and rev.valid)
+            if runs[name].state.error:
+                return runs[name].state.error
+            if not runs[name].state.finished:
+                return "did not finish"
+            if rev is None:
+                return "no review file"
+            if not rev.valid:
+                return f"invalid review: {rev.errors[0]}"
+            return None
+
+        def artifact_ok(name):
+            return artifact_problem(name) is None
 
         for attempt in range(case.retries + 1):
             pending = [name for name in runs if not artifact_ok(name)]
@@ -521,7 +535,7 @@ class Orchestrator:
             threads = []
             for name in pending:
                 agent = runs[name]
-                previous_error = agent.state.error
+                previous_error = artifact_problem(name)
                 agent.reset()
                 prompt = prompts[name] + (retry_note(attempt, previous_error) if attempt else "")
                 thread = threading.Thread(target=self._worker, args=(agent, prompt, worktrees[name]["path"]),
@@ -532,8 +546,9 @@ class Orchestrator:
             for thread in threads:
                 thread.join(timeout=30)
             for name in pending:
-                if not artifact_ok(name):
-                    runs[name].state.error = runs[name].state.error or "no usable review"
+                problem = artifact_problem(name)
+                if problem:
+                    runs[name].state.error = runs[name].state.error or problem
         if all(artifact_ok(name) for name in runs):
             return
         self.log(f"r{round_no}: agents did not produce usable artifacts", "ERROR")

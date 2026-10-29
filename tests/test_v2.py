@@ -312,6 +312,42 @@ class AcceptanceTest(Base):
             self.run_with(case, fakes)
 
 
+class IsolationTest(Base):
+    def test_two_runs_do_not_share_a_push_target(self):
+        """A repo-global remote would let a second run repoint the first run's pushes."""
+        case = self.case(max_rounds=1)
+        first = Orchestrator(case, self.tmp / "run-one")
+        second = Orchestrator(case, self.tmp / "run-two")
+        first.bootstrap()
+        second.bootstrap()
+        self.assertEqual(git("remote", cwd=self.repo, check=False), "")
+        self.assertTrue(first.exchange.sha("candidate/deepseek/r0"))
+        self.assertTrue(second.exchange.sha("candidate/deepseek/r0"))
+        # pushing through the first run must not appear in the second exchange
+        sha = first.exchange.sha("candidate/deepseek/r0")
+        first.repo.push(sha, "candidate/probe/r1")
+        self.assertTrue(first.exchange.sha("candidate/probe/r1"))
+        self.assertIsNone(second.exchange.sha("candidate/probe/r1"))
+
+    def test_non_baseline_candidate_patch_is_not_empty(self):
+        (self.repo / "extra.txt").write_bytes(b"kimi work\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "kimi work", cwd=self.repo)
+        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        case = self.case(max_rounds=1)
+        case.agents["kimi"].bootstrap_ref = kimi_ref
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
+                                       dispositions=[{"item_id": "CF-01", "status": "reoffered",
+                                                      "why": "test"}]),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}),
+        }
+        orchestrator, _ = self.run_with(case, fakes)
+        patch = orchestrator.run_dir / "rounds" / "r1" / "other-kimi.patch"
+        self.assertTrue(patch.exists())
+        self.assertIn("extra.txt", patch.read_text(encoding="utf-8"))
+
+
 class UnitTest(Base):
     def test_oscillation_detection(self):
         orchestrator = Orchestrator(self.case(), self.tmp / "osc")

@@ -103,11 +103,16 @@ def round_prompt(agent, other, round_no, case, worktree, review_md, review_json,
         lines += [f"SHARED BASELINE: {context['baseline']} ({context.get('baseline_reason', '')})", ""]
     if context.get("phase") == "reconcile":
         lines += [
-            "THE OTHER ATTEMPT",
-            f"- candidate: {context.get('other_ref', '?')} = {context.get('other_sha', '?')}",
-            f"- patch: {context.get('other_patch', '(none)')}",
-            f"- its previous review: {context.get('other_review', '(none)')}",
+            "BASELINE AND THE ATTEMPT NOT USED AS THE BASELINE",
+            f"- your previous candidate: {context.get('own_sha', '?')}",
+            f"- the other agent's previous candidate: {context.get('other_sha', '?')}",
+            f"- not chosen as the baseline: {context.get('delta_agent', '(none)')}",
+            f"- that attempt's patch against your baseline: {context.get('delta_patch', '(none)')}",
+            f"- that attempt's review: {context.get('delta_review', '(none)')}",
             f"- your previous review: {context.get('own_review', '(none)')}",
+            "",
+            "If the unused attempt is your own work, re-offer what still applies onto the baseline.",
+            "If it is the other agent's, incorporate the stronger parts and say which you took.",
             "",
         ]
     ledger = _ledger_block(context.get("ledger"))

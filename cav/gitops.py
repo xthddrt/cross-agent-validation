@@ -10,7 +10,6 @@ EXCHANGE_REMOTE = "cav-exchange"
 # Commits the tool creates must not depend on the machine's git identity being configured.
 IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@localhost")
 
-
 def git(*args, cwd=None, check=True, env=None):
     result = subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
                             capture_output=True, text=True, encoding="utf-8",
@@ -57,29 +56,35 @@ class Exchange:
 
 
 class Repo:
-    """The working repo that hosts worktrees and pushes candidates to the exchange."""
+    """The working repo that hosts worktrees and pushes candidates to the exchange.
+
+    Push and fetch address the exchange by path, never through a named remote: a remote is
+    repo-global state, so a second run (or another tool run) would silently repoint it and
+    this run's commits would land in the wrong exchange.
+    """
 
     def __init__(self, path):
         self.path = pathlib.Path(path)
+        self.exchange_path = None
+        self.namespace = "refs/cav/run"
 
-    def attach(self, exchange):
-        existing = git("remote", "get-url", EXCHANGE_REMOTE, cwd=self.path, check=False)
-        if existing != str(exchange.path):
-            if existing:
-                git("remote", "set-url", EXCHANGE_REMOTE, str(exchange.path), cwd=self.path)
-            else:
-                git("remote", "add", EXCHANGE_REMOTE, str(exchange.path), cwd=self.path)
+    def attach(self, exchange, run_id=None):
+        self.exchange_path = str(exchange.path)
+        self.namespace = f"refs/cav/{run_id or 'run'}"
+        if git("remote", "get-url", EXCHANGE_REMOTE, cwd=self.path, check=False):
+            git("remote", "remove", EXCHANGE_REMOTE, cwd=self.path, check=False)
         return self
 
     def fetch(self):
-        git("fetch", EXCHANGE_REMOTE, "--prune", cwd=self.path)
+        git("fetch", self.exchange_path, "--prune",
+            f"+refs/heads/*:{self.namespace}/*", cwd=self.path)
         return self
 
     def ref(self, branch):
-        return f"{EXCHANGE_REMOTE}/{branch}"
+        return f"{self.namespace}/{branch}"
 
     def has(self, branch):
-        return git_ok("rev-parse", "--verify", "--quiet", f"refs/remotes/{self.ref(branch)}", cwd=self.path)
+        return git_ok("rev-parse", "--verify", "--quiet", self.ref(branch), cwd=self.path)
 
     def sha(self, rev):
         return git("rev-parse", "--verify", f"{rev}^{{commit}}", cwd=self.path)
@@ -88,7 +93,7 @@ class Repo:
         return git("rev-parse", f"{rev}^{{tree}}", cwd=self.path)
 
     def push(self, sha, branch):
-        git("push", EXCHANGE_REMOTE, f"{sha}:refs/heads/{branch}", cwd=self.path)
+        git("push", self.exchange_path, f"{sha}:refs/heads/{branch}", cwd=self.path)
         return sha
 
     def worktree_add(self, dest, rev):
