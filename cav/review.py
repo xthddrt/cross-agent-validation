@@ -7,7 +7,6 @@ SEVERITIES = ("MUST_FIX", "SHOULD_FIX", "NIT")
 FINDING_KINDS = ("behavioral", "cosmetic", "editorial")
 # "equivalent" lets an agent record a difference it accepts; only "behavioral" blocks agreement.
 DISAGREEMENT_KINDS = FINDING_KINDS + ("equivalent",)
-DISPOSITIONS = ("retained", "intentionally_dropped")
 
 
 class Review:
@@ -67,23 +66,15 @@ def _line_count(path):
 def _shape_errors(data):
     """Reviews are agent-written: every field the orchestrator reads must have the right shape."""
     errors = []
-    for key in ("areas", "remaining_disagreements", "carry_forward_dispositions"):
+    for key in ("areas", "remaining_disagreements"):
         value = data.get(key)
         if value is not None and (not isinstance(value, list)
                                   or any(not isinstance(item, dict) for item in value)):
             errors.append(f"{key} must be a list of objects")
-    changes = data.get("changes")
-    if changes is not None and (not isinstance(changes, list)
-                                or any(not isinstance(item, dict) or not item.get("path")
-                                       for item in changes)):
-        errors.append("changes must be a list of objects with a path")
-    incorporated = data.get("incorporated_from_other")
-    if incorporated is not None and not isinstance(incorporated, list):
-        errors.append("incorporated_from_other must be a list")
     return errors
 
 
-def validate(data, agent, round_no, worktree, required_dispositions=()):
+def validate(data, agent, round_no, worktree):
     """Errors in an agent's review; empty means valid. Fills in `counts` from the findings."""
     if not isinstance(data, dict):
         return ["review is not an object"]
@@ -159,21 +150,10 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             errors.append(
                 f"remaining_disagreements lists {item.get('area')!r} as behavioural while "
                 f"behavior_approved is true; mark it equivalent, move it to areas, or withhold approval")
-
-    dispositions = data.get("carry_forward_dispositions") or []
-    disposed = {entry.get("item_id") for entry in dispositions}
-    missing = [item for item in required_dispositions if item not in disposed]
-    if missing:
-        errors.append(f"carry-forward items without a disposition: {', '.join(sorted(missing)[:8])}")
-    for entry in dispositions:
-        if entry.get("status") not in DISPOSITIONS:
-            errors.append(f"{entry.get('item_id')}: invalid disposition {entry.get('status')!r}")
-        elif not isinstance(entry.get("why"), str) or not entry["why"].strip():
-            errors.append(f"{entry.get('item_id')}: disposition needs a why")
     return errors
 
 
-def load(path, agent, round_no, worktree, required_dispositions=()):
+def load(path, agent, round_no, worktree):
     """The agent's review, validated; None when it wrote none."""
     path = pathlib.Path(path)
     if not path.exists():
@@ -182,5 +162,4 @@ def load(path, agent, round_no, worktree, required_dispositions=()):
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as error:
         return Review(agent, round_no, path, {}, [f"invalid JSON: {error}"])
-    return Review(agent, round_no, path, data,
-                  validate(data, agent, round_no, worktree, required_dispositions))
+    return Review(agent, round_no, path, data, validate(data, agent, round_no, worktree))

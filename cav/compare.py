@@ -40,17 +40,3 @@ def compare_trees(git_dir, tree_a, tree_b):
         "differing": [path for path in paths if entries_a.get(path) != entries_b.get(path)],
         "stats": stats,
     }
-
-
-def ledger(diff):
-    """One decision item per differing path, largest first, seen from tree a towards tree b."""
-    stats = diff["stats"]
-
-    def size(path):
-        item = stats.get(path, {})
-        return item.get("added", 0) + item.get("removed", 0)
-
-    return [{"id": f"CF-{index + 1:02d}", "path": path,
-             "added": stats.get(path, {}).get("added", 0),
-             "removed": stats.get(path, {}).get("removed", 0)}
-            for index, path in enumerate(sorted(diff["differing"], key=lambda path: -size(path)))]

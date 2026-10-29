@@ -177,9 +177,9 @@ class Orchestrator:
     def round(self, round_no):
         """Both candidates get equal standing: neither is a default the other must argue against.
 
-        Each agent starts from its own previous candidate, receives the other candidate's full
-        diff, and must decide on every path where the two differ. Both sides are built by the
-        same code; nothing depends on agent order.
+        Each agent reads both candidates in full and turns its own worktree into one new proposal
+        that combines what it agrees with from either. The two proposals are reviewed against
+        each other next round, until both agents approve. Nothing depends on agent order.
         """
         case, names = self.case, list(self.case.agents)
         self.state.update(phase=f"r{round_no}-prepare", round=round_no)
@@ -188,15 +188,13 @@ class Orchestrator:
         previous = self.previous_results()
         phase = "implement" if (case.bootstrap == "base" and round_no == 1) else "reconcile"
         starts = {name: previous[name]["commit"] for name in names}
-        # One comparison serves both agents: the differing paths are the same set from either side.
-        diff = compare.compare_trees(self.exchange.path, previous[names[0]]["tree"],
-                                     previous[names[1]]["tree"])
-        ledger = compare.ledger(diff) if phase == "reconcile" else []
-        agreed = diff["identical"] if phase == "reconcile" else []
-        self.emit("round.prepared", round_no, data={"starts": starts, "phase": phase, "ledger": len(ledger)})
+        differing = (len(compare.compare_trees(self.exchange.path, previous[names[0]]["tree"],
+                                               previous[names[1]]["tree"])["differing"])
+                     if phase == "reconcile" else 0)
+        self.emit("round.prepared", round_no, data={"starts": starts, "phase": phase, "differing": differing})
         self.log(f"r{round_no}: each agent starts from its own candidate "
                  f"({', '.join(f'{name} {sha[:12]}' for name, sha in starts.items())}); "
-                 f"{len(ledger)} differing paths to decide")
+                 f"{differing} paths differ")
 
         reviews_dir = self.run_dir / "reviews" / f"r{round_no}"
         context_dir = self.run_dir / "rounds" / f"r{round_no}"
@@ -209,15 +207,11 @@ class Orchestrator:
             reviews[name] = reviews_dir / f"{name}-review.json"
             reviews[name].unlink(missing_ok=True)  # a restarted round must not accept an old review
             patch = (self.write_patch(context_dir / f"{name}-other.patch", starts[name], starts[other])
-                     if ledger else None)
-            # Line counts read from this agent's side: what taking the other's version would change.
-            own_ledger = ledger if name == names[0] else [
-                dict(item, added=item["removed"], removed=item["added"]) for item in ledger]
+                     if differing else None)
             prompts[name] = round_prompt(name, other, round_no, case, worktrees[name], reviews[name], {
                 "phase": phase, "own_sha": starts[name], "other_sha": starts[other],
                 "other_patch": patch, "other_review": self.previous_review(round_no, other),
-                "own_review": self.previous_review(round_no, name), "ledger": own_ledger,
-                "agreed": agreed, "history": self.history_line()})
+                "own_review": self.previous_review(round_no, name), "history": self.history_line()})
             (context_dir / f"{name}-context.md").write_text(prompts[name], encoding="utf-8")
             agent = agent_mod.build(spec, self.run_dir / "logs" / f"r{round_no}" / f"{name}.log",
                                     title_prefix=f"cav {case.name} r{round_no}")
@@ -229,12 +223,11 @@ class Orchestrator:
         self.state["phase"] = f"r{round_no}-agents"
         self.save()
         self.emit("round.start", round_no, data={"phase": phase})
-        ids = [item["id"] for item in ledger]
-        self.drive(round_no, runs, prompts, worktrees, reviews, ids)
+        self.drive(round_no, runs, prompts, worktrees, reviews)
 
         results, failed = {}, []
         for name in names:
-            rev = review_mod.load(reviews[name], name, round_no, worktrees[name], ids)
+            rev = review_mod.load(reviews[name], name, round_no, worktrees[name])
             if rev is None or not rev.valid:
                 reason = "no review written" if rev is None else f"invalid review: {rev.errors[0]}"
                 failed.append(f"{name}: {reason}")
@@ -244,18 +237,9 @@ class Orchestrator:
             sha = self.repo.commit_all(worktrees[name], f"Reconcile round {round_no}: {name} recommendation"
                                                         f"\n\nStarted from: {starts[name]}")
             self.repo.push(sha, f"candidate/{name}/r{round_no}")
-            changed = set(git("--git-dir", str(self.exchange.path), "diff", "--name-only",
-                              starts[name], sha, check=False).splitlines())
-            declared = {item.get("path") for item in rev.data.get("changes") or []}
-            unexplained = sorted((changed & set(agreed)) - declared)
-            if unexplained:
-                self.emit("agent.unexplained_change", round_no, name, {"paths": unexplained[:40]})
-                self.log(f"r{round_no} {name}: {len(unexplained)} undeclared change(s) to agreed "
-                         f"files: {', '.join(unexplained[:4])}", "WARN")
             results[name] = {"commit": sha, "tree": self.repo.tree(sha), "blocking": rev.blocking,
                              "counts": rev.counts, "approved": rev.behavior_approved,
-                             "other_approved": rev.other_approved,
-                             "open_behavioural": rev.open_behavioural, "unexplained": unexplained}
+                             "other_approved": rev.other_approved, "open_behavioural": rev.open_behavioural}
             self.emit("candidate.commit", round_no, name, {"commit": sha})
         if failed:
             self.state["phase"] = f"r{round_no}-failed"
@@ -275,7 +259,6 @@ class Orchestrator:
         blockers = self.blockers(results, checks)
         self.state["history"].append({
             "round": round_no, "phase": phase, "starts": starts,
-            "ledger": [{"id": item["id"], "path": item["path"]} for item in ledger],
             "results": results, "checks": checks,
             "divergence": {"identical": len(divergence["identical"]),
                            "differing": len(divergence["differing"])},
@@ -312,7 +295,7 @@ class Orchestrator:
 
     # --------------------------------------------------------------- drive/monitor
 
-    def drive(self, round_no, runs, prompts, worktrees, reviews, required):
+    def drive(self, round_no, runs, prompts, worktrees, reviews):
         """Run both agents in parallel; retry one that leaves no valid review."""
 
         def problem(name):
@@ -320,7 +303,7 @@ class Orchestrator:
                 return runs[name].state.error
             if not runs[name].state.finished:
                 return "did not finish"
-            rev = review_mod.load(reviews[name], name, round_no, worktrees[name], required)
+            rev = review_mod.load(reviews[name], name, round_no, worktrees[name])
             if rev is None:
                 return "no review file"
             return None if rev.valid else f"invalid review: {rev.errors[0]}"
@@ -456,7 +439,6 @@ class Orchestrator:
             "behaviour_approved": [results[name]["approved"] for name in names],
             "other_approved": [results[name]["other_approved"] for name in names],
             "open_behavioural": any(results[name]["open_behavioural"] for name in names),
-            "unexplained_changes": sum(len(results[name]["unexplained"]) for name in names),
             "trees_equal": results[names[0]]["tree"] == results[names[1]]["tree"],
         }
         item["eligible"] = (item["checks"] and not item["blocking_must_fix"]
@@ -544,7 +526,6 @@ class Orchestrator:
 
     def write_report(self, round_no):
         case, final = self.case, self.state.get("final") or {}
-        entry = next(item for item in self.state["history"] if item["round"] == round_no)
         published = final.get("published_from") or {}
         folder = self.run_dir / "reviews" / f"r{round_no}"
         lines = [
@@ -571,15 +552,13 @@ class Orchestrator:
         differing = self.read_json(folder / "divergence.json").get("differing") or []
         lines += ["", "## Differences both agents accepted", ""]
         lines += [f"- `{path}`" for path in differing[:200]] or ["None: the two candidates are identical."]
-        paths = {item["id"]: item["path"] for item in entry.get("ledger") or []}
         for name in case.agents:
-            declined = [item for item in self.read_json(folder / f"{name}-review.json")
-                        .get("carry_forward_dispositions") or []
-                        if isinstance(item, dict) and item.get("status") != "retained"]
-            if declined:
-                lines += ["", f"## {case.other(name)}'s changes {name} declined", ""]
-                lines += [f"- `{paths.get(item.get('item_id'), item.get('item_id'))}`: {item.get('why', '')}"
-                          for item in declined[:200]]
+            areas = [item for item in self.read_json(folder / f"{name}-review.json").get("areas") or []
+                     if isinstance(item, dict)]
+            if areas:
+                lines += ["", f"## {name}'s judgement by area", ""]
+                lines += [f"- {item.get('area', '')} ({item.get('status', '')}, kept {item.get('kept', '-')}): "
+                          f"{item.get('why', '')}" for item in areas[:100]]
         lines += ["", "## Checks on the published commit", ""]
         lines += [f"- `{c['command']}` exit {c['exit']} in {c['seconds']}s"
                   for c in final.get("checks") or []] or ["- none configured"]
