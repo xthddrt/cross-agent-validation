@@ -1,4 +1,4 @@
-"""Round loop: baseline, context, agents, checks, divergence, verdict, finalization."""
+"""Round loop: starting points, context, agents, checks, divergence, verdict, finalization."""
 
 import json
 import os
@@ -151,7 +151,6 @@ class Orchestrator:
             self.log(f"{name}: r0 = {sha[:12]} snapshotted from {secondary.path}")
         self.repo.fetch()
         self.emit("run.start", 0, data={"case": self.case.name, "convergence": self.case.convergence,
-                                        "canonical": self.case.canonical(),
                                         "task_present": bool(self.case.task_prompt.strip())})
 
     def snapshot(self, repo, spec):
@@ -246,78 +245,68 @@ class Orchestrator:
             out[name] = {"commit": sha, "tree": self.exchange.tree_of(sha), "checks_ok": None}
         return out
 
-    def choose_baseline(self, previous):
-        """One whole candidate, never a per-file mixture: cross-file consistency depends on it.
-
-        `checks_ok` is only known from round 2 on, so round 1 uses the canonical candidate.
-        """
-        names = list(self.case.agents)
-        passing = [name for name in names if previous.get(name, {}).get("checks_ok") is True]
-        if len(passing) == 1:
-            return previous[passing[0]]["commit"], f"only {passing[0]} passed every check", passing[0]
-        owner = self.case.canonical()
-        return previous[owner]["commit"], f"canonical candidate {owner}", owner
-
     def round(self, round_no):
+        """Both candidates get equal standing: neither is a default the other must argue against.
+
+        Each agent starts from its own previous candidate, receives the other candidate's full
+        diff, and must decide on every change the other has that it lacks. The two sides are
+        built by the same code path; nothing depends on agent order.
+        """
         case = self.case
         self.state["phase"] = f"r{round_no}-prepare"
         self.state["round"] = round_no
         self.save()
         self.repo.fetch()
         previous = self.previous_results()
-        baseline, reason, owner = self.choose_baseline(previous)
         phase = "implement" if (case.bootstrap == "base" and round_no == 1) else "reconcile"
-        self.emit("baseline.selected", round_no,
-                  data={"commit": baseline, "reason": reason, "owner": owner})
-        self.log(f"r{round_no}: baseline {baseline[:12]} ({reason})")
+        starts = {name: previous[name]["commit"] for name in case.agents}
+        self.emit("round.prepared", round_no, data={"starts": starts, "phase": phase})
+        self.log(f"r{round_no}: each agent starts from its own candidate: "
+                 + ", ".join(f"{name} {sha[:12]}" for name, sha in starts.items()))
 
         worktrees = {}
         for name in case.agents:
-            path = self.prepare_worktree(self.run_dir / "wt" / f"r{round_no}" / name, baseline)
+            path = self.prepare_worktree(self.run_dir / "wt" / f"r{round_no}" / name, starts[name])
             worktrees[name] = {"path": path}
-
-        ledger = {"items": [], "total": 0, "omitted": 0}
-        at_risk = next((name for name in case.agents if name != owner), None)
-        if phase == "reconcile" and case.carry_forward_limit > 0 and at_risk:
-            ledger = compare.carry_forward(self.exchange.path, previous[at_risk]["tree"],
-                                           self.repo.tree(baseline), case.strict_paths,
-                                           case.carry_forward_limit)
-        ledger_ids = [item["id"] for item in ledger["items"]]
-        self.emit("carry_forward.computed", round_no,
-                  data={"items": len(ledger_ids), "total": ledger.get("total", 0),
-                        "omitted": ledger.get("omitted", 0), "owner": owner})
 
         reviews_dir = self.run_dir / "reviews" / f"r{round_no}"
         reviews_dir.mkdir(parents=True, exist_ok=True)
         context_dir = self.run_dir / "rounds" / f"r{round_no}"
         context_dir.mkdir(parents=True, exist_ok=True)
-        (reviews_dir / "carry-forward.json").write_text(json.dumps(ledger, indent=2), encoding="utf-8")
         paths = {name: {"md": reviews_dir / f"{name}-review.md",
                         "json": reviews_dir / f"{name}-review.json"} for name in case.agents}
         self.clear_reviews(paths)
 
+        # One ledger per agent, uncapped: every change in the other candidate that this agent's
+        # tree lacks, each needing an explicit decision with a reason.
+        ledgers, ledger_ids, patches = {}, {}, {}
+        for name in case.agents:
+            other = case.other(name)
+            ledger = {"items": [], "total": 0, "omitted": 0}
+            if phase == "reconcile":
+                ledger = compare.carry_forward(self.exchange.path, previous[other]["tree"],
+                                               previous[name]["tree"], case.strict_paths)
+                patches[name] = self.write_patch(round_no, name, starts[name], previous[other]["commit"])
+            ledgers[name] = ledger
+            ledger_ids[name] = [item["id"] for item in ledger["items"]]
+            (reviews_dir / f"{name}-carry-forward.json").write_text(json.dumps(ledger, indent=2),
+                                                                     encoding="utf-8")
+            self.emit("carry_forward.computed", round_no, name,
+                      {"items": len(ledger_ids[name]), "total": ledger.get("total", 0), "from": other})
+
         agreed = self.agreed_paths(previous)
-        non_baseline = next((name for name in case.agents if name != owner), None) if owner else None
-        delta_patch = None
-        if phase == "reconcile" and non_baseline and non_baseline in previous:
-            delta_patch = self.write_patch(round_no, non_baseline,
-                                           previous[non_baseline]["commit"], baseline)
         prompts = {}
         for name in case.agents:
             other = case.other(name)
             context = {
                 "phase": phase,
-                "baseline": baseline,
-                "baseline_reason": reason,
-                "own_sha": previous.get(name, {}).get("commit", "?"),
-                "other_sha": previous.get(other, {}).get("commit", "?"),
-                "delta_agent": non_baseline or "(none)",
-                "delta_patch": str(delta_patch) if delta_patch else "(none)",
-                "delta_review": (self.previous_review_path(round_no, non_baseline)
-                                 if non_baseline else "(none)"),
+                "own_sha": starts[name],
+                "other_sha": starts[other],
+                "other_patch": str(patches[name]) if name in patches else "(none)",
+                "other_review": self.previous_review_path(round_no, other),
                 "own_review": self.previous_review_path(round_no, name),
-                "ledger": ledger if name == owner else None,
-                "ledger_ids": ledger_ids if name == owner else [],
+                "ledger": ledgers[name],
+                "ledger_ids": ledger_ids[name],
                 "agreed": agreed,
                 "history": self.history_line(),
             }
@@ -340,15 +329,14 @@ class Orchestrator:
 
         self.state["phase"] = f"r{round_no}-agents"
         self.save()
-        self.emit("round.start", round_no, data={"phase": phase, "baseline": baseline})
-        dispositions = {name: (tuple(ledger_ids) if (name == owner and ledger_ids) else ())
-                        for name in case.agents}
+        self.emit("round.start", round_no, data={"phase": phase, "starts": starts})
+        dispositions = {name: tuple(ledger_ids[name]) for name in case.agents}
         self.drive(round_no, runs, prompts, worktrees, paths, dispositions)
 
         results = {}
         failed = []
         for name in case.agents:
-            required = ledger_ids if (name == owner and ledger_ids) else ()
+            required = ledger_ids[name]
             rev = review_mod.load(paths[name]["json"], paths[name]["md"], name, round_no,
                                   worktrees[name]["path"], required)
             if rev is None:
@@ -366,20 +354,20 @@ class Orchestrator:
             sha, problem = self.repo.commit_all(
                 worktrees[name]["path"],
                 f"Reconcile round {round_no}: {name} recommendation\n\n"
-                f"Baseline: {baseline}\nBase: {case.base}")
+                f"Started from: {starts[name]}\nBase: {case.base}")
             if problem:
                 failed.append(f"{name}: {problem}")
                 continue
             self.repo.push(sha, f"candidate/{name}/r{round_no}")
-            diffstat = git("--git-dir", str(self.exchange.path), "diff", "--stat", baseline, sha,
+            diffstat = git("--git-dir", str(self.exchange.path), "diff", "--stat", starts[name], sha,
                            check=False)
             (context_dir / f"{name}-changes.md").write_text(
                 f"# {name} changes in round {round_no}\n\n```\n{diffstat}\n```\n", encoding="utf-8")
             (context_dir / f"{name}.patch").write_text(
-                git("--git-dir", str(self.exchange.path), "diff", baseline, sha,
+                git("--git-dir", str(self.exchange.path), "diff", starts[name], sha,
                     check=False)[:MAX_PATCH_BYTES], encoding="utf-8")
             changed_paths = set(git("--git-dir", str(self.exchange.path), "diff", "--name-only",
-                                    baseline, sha, check=False).splitlines())
+                                    starts[name], sha, check=False).splitlines())
             declared = {item.get("path") for item in (rev.data.get("changes") or [])}
             unexplained = sorted((changed_paths & set(agreed)) - declared)
             if unexplained:
@@ -432,12 +420,12 @@ class Orchestrator:
         self.state["history"].append({
             "round": round_no,
             "phase": phase,
-            "baseline": baseline,
-            "baseline_owner": owner,
+            "starts": starts,
             "results": results,
             "checks": checks,
             "divergence": divergence["totals"],
-            "carry_forward": {"items": len(ledger_ids), "total": ledger.get("total", 0)},
+            "carry_forward": {name: {"items": len(ledger_ids[name]), "total": ledgers[name]["total"]}
+                              for name in names},
             "verdict": verdict,
             "blockers": blockers,
             "trees_equal": results[names[0]]["tree"] == results[names[1]]["tree"],
@@ -475,10 +463,11 @@ class Orchestrator:
             for path in files.values():
                 path.unlink(missing_ok=True)
 
-    def write_patch(self, round_no, other, commit, baseline):
-        target = self.run_dir / "rounds" / f"r{round_no}" / f"other-{other}.patch"
+    def write_patch(self, round_no, name, start, other_commit):
+        """What the other candidate has, as a diff against the tree `name` starts from."""
+        target = self.run_dir / "rounds" / f"r{round_no}" / f"{name}-other.patch"
         target.parent.mkdir(parents=True, exist_ok=True)
-        text = git("--git-dir", str(self.exchange.path), "diff", baseline, commit, check=False)
+        text = git("--git-dir", str(self.exchange.path), "diff", start, other_commit, check=False)
         target.write_text(text[:MAX_PATCH_BYTES], encoding="utf-8")
         return target
 
@@ -799,8 +788,10 @@ class Orchestrator:
         names = list(case.agents)
         history = next(item for item in self.state["history"] if item["round"] == round_no)
         results = history["results"]
-        canonical = case.canonical()
-        commit = results[canonical]["commit"]
+        chosen, publication = self.choose_publication(results)
+        self.emit("publication.selected", round_no, chosen, publication)
+        self.log(f"r{round_no}: publishing {chosen}'s candidate ({publication['reason']})")
+        commit = results[chosen]["commit"]
 
         final_wt = self.run_dir / "final"
         self.prepare_worktree(final_wt, commit)
@@ -829,11 +820,11 @@ class Orchestrator:
         self.emit("final.start", round_no, data={"commit": commit})
         self.state["phase"] = f"r{round_no}-final"
         self.save()
-        # The canonical candidate is one of the two trees both agents just approved. Re-running
+        # The chosen candidate is one of the two trees both agents just approved. Re-running
         # the matrix and re-asking for approval on byte-identical content is pure overhead.
-        unchanged = commit == results[canonical]["commit"]
+        unchanged = commit == results[chosen]["commit"]
         if unchanged:
-            final_checks = dict(history["checks"][canonical])
+            final_checks = dict(history["checks"][chosen])
             self.write_check(self.run_dir / "final" / "checks.json", final_checks)
             self.emit("final.checks", round_no, data={"ok": final_checks["ok"], "reused": True})
         else:
@@ -861,6 +852,7 @@ class Orchestrator:
         self.state["phase"] = "converged"
         self.state["final"] = {"round": round_no, "commit": commit, "tree": final_tree,
                                "verdict": verdict, "pushed": False,
+                               "published_from": {"agent": chosen, **publication},
                                "accepted": waived["accepted"][:200],
                                "checks": final_checks["commands"],
                                "confirmation": confirmation,
@@ -882,6 +874,33 @@ class Orchestrator:
         self.emit("run.end", round_no, data={"phase": "converged", "verdict": verdict})
         return "accepted"
 
+    def choose_publication(self, results):
+        """Both agents approved both candidates; publish the one that moved least from its own
+        original branch (r0), measured in changed lines, then changed files.
+
+        Neither agent is a default. The last tie-break is the tree hash: arbitrary, but it does
+        not depend on agent order, and when the trees are identical the choice does not matter.
+        """
+        changes = {}
+        for name, result in results.items():
+            original = self.exchange.sha(f"candidate/{name}/r0")
+            out = git("--git-dir", str(self.exchange.path), "diff", "--numstat", "--no-renames", "-z",
+                      original, result["commit"], check=False)
+            lines = files = 0
+            for record in out.split("\0"):
+                parts = record.split("\t")
+                if len(parts) >= 3:
+                    files += 1
+                    lines += sum(int(part) for part in parts[:2] if part.isdigit())
+            changes[name] = {"lines_changed": lines, "files_changed": files}
+        chosen = min(results, key=lambda name: (changes[name]["lines_changed"],
+                                                changes[name]["files_changed"], results[name]["tree"]))
+        others = ", ".join(f"{name} {item['lines_changed']}" for name, item in changes.items()
+                           if name != chosen)
+        reason = (f"fewest changes from its original branch: {changes[chosen]['lines_changed']} lines "
+                  f"in {changes[chosen]['files_changed']} files (vs {others})")
+        return chosen, {"reason": reason, "changes": changes}
+
     def refuse(self, round_no, reason, final_checks):
         self.log(f"r{round_no}: {reason}; not publishing", "ERROR")
         self.emit("final.confirmation", round_no, data={"ok": False, "reason": reason})
@@ -902,10 +921,13 @@ class Orchestrator:
         folder = self.run_dir / "reviews" / f"r{round_no}-confirm"
         folder.mkdir(parents=True, exist_ok=True)
         results = history["results"]
-        final_diff = self.run_dir / "final" / "diff-other.patch"
-        final_diff.write_text(git("--git-dir", str(self.exchange.path), "diff",
-                                  results[names[0]]["commit"], commit, check=False)[:MAX_PATCH_BYTES],
-                              encoding="utf-8")
+        # Each candidate's diff to the final commit; every agent sees its own and the other's.
+        diffs = {}
+        for name in names:
+            diffs[name] = self.run_dir / "final" / f"diff-{name}.patch"
+            diffs[name].write_text(git("--git-dir", str(self.exchange.path), "diff",
+                                       results[name]["commit"], commit, check=False)[:MAX_PATCH_BYTES],
+                                   encoding="utf-8")
         worktrees, runs, prompts, reviews = {}, {}, {}, {}
         for name in names:
             worktrees[name] = {"path": self.prepare_worktree(
@@ -918,15 +940,12 @@ class Orchestrator:
             runs[name] = agent
             reviews[name] = {"md": folder / f"{name}-review.md",
                              "json": folder / f"{name}-review.json"}
-            own_diff = self.run_dir / "final" / f"diff-{name}.patch"
-            own_diff.write_text(git("--git-dir", str(self.exchange.path), "diff",
-                                    results[name]["commit"], commit, check=False)[:MAX_PATCH_BYTES],
-                                encoding="utf-8")
             waived = self.waived_list(history)["accepted"]
             prompts[name] = confirm_prompt(
                 name, round_no, case, worktrees[name]["path"],
                 reviews[name]["md"], reviews[name]["json"], TEMPLATE,
-                {"final_commit": commit, "final_diff": str(final_diff), "own_diff": str(own_diff),
+                {"final_commit": commit, "final_diff": str(diffs[case.other(name)]),
+                 "own_diff": str(diffs[name]),
                  "waived": ", ".join(waived[:40]) or "(none)",
                  "checks": "pass" if (self.run_dir / "final" / "checks.json").exists() else "unknown",
                  "ledger": None, "ledger_ids": []})
@@ -997,22 +1016,22 @@ class Orchestrator:
             lines += [f"- `{path}`" for path in waived["accepted"][:200]]
         else:
             lines += ["No candidate-to-candidate differences remained at acceptance."]
-        # The ledger is what the baseline lacked when the round started; the owner's review says
-        # what became of each item. Only items it did not keep were dropped. Read from disk so a
-        # resumed run reports the same thing.
+        # Each agent's ledger is what the other candidate had that its own tree lacked when the
+        # round started; its review says what became of each item. Read from disk so a resumed
+        # run reports the same thing.
         folder = self.run_dir / "reviews" / f"r{round_no}"
-        ledger = self.read_json(folder / "carry-forward.json")
-        owner = history.get("baseline_owner")
-        owner_review = self.read_json(folder / f"{owner}-review.json") if owner else {}
-        status = {entry.get("item_id"): entry.get("status")
-                  for entry in (owner_review.get("carry_forward_dispositions") or [])
-                  if isinstance(entry, dict)}
-        dropped = [item for item in (ledger.get("items") or [])
-                   if status.get(item["id"]) not in ("retained", "reoffered")]
-        if dropped:
-            lines += ["", "## Carry-forward items not retained", ""]
-            lines += [f"- `{item['path']}` (+{item['added']}/-{item['removed']}): "
-                      f"{status.get(item['id']) or 'no disposition'}" for item in dropped[:200]]
+        for name in self.case.agents:
+            ledger = self.read_json(folder / f"{name}-carry-forward.json")
+            review = self.read_json(folder / f"{name}-review.json")
+            status = {entry.get("item_id"): entry.get("status")
+                      for entry in (review.get("carry_forward_dispositions") or [])
+                      if isinstance(entry, dict)}
+            dropped = [item for item in (ledger.get("items") or [])
+                       if status.get(item["id"]) not in ("retained", "reoffered")]
+            if dropped:
+                lines += ["", f"## {self.case.other(name)}'s changes {name} did not take", ""]
+                lines += [f"- `{item['path']}` (+{item['added']}/-{item['removed']}): "
+                          f"{status.get(item['id']) or 'no disposition'}" for item in dropped[:200]]
         (self.run_dir / "WAIVED.md").write_text("\n".join(lines), encoding="utf-8")
 
     def push_origin(self, commit):
@@ -1032,7 +1051,9 @@ class Orchestrator:
             "",
             f"- Run: `{self.run_dir.name}`",
             f"- Base: `{case.base or 'none'}`",
-            f"- Convergence: `{case.convergence}`   canonical agent: `{case.canonical()}`",
+            f"- Convergence: `{case.convergence}`   (both candidates weighed equally)",
+            f"- Published from: {(final.get('published_from') or {}).get('agent', '?')}, "
+            f"{(final.get('published_from') or {}).get('reason', '')}",
             f"- Acceptance basis: {self.assurance_basis()}",
             f"- Accepted in round {round_no} of at most {case.max_rounds}",
             f"- Final commit: `{final.get('commit', '?')}`",

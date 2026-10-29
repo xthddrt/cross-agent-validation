@@ -258,7 +258,7 @@ def render(data):
         lines.append(f"| {area.get('area', '')} | {area.get('status', '')} "
                      f"| {area.get('kept', '')} | {area.get('why', '')} |")
     if data.get("changes"):
-        lines += ["", "## Changes from baseline", ""]
+        lines += ["", "## Changes from the starting tree", ""]
         lines += [f"- `{entry.get('path')}`: {entry.get('why', '')}" for entry in data["changes"]]
     if data.get("incorporated_from_other"):
         lines += ["", "## Incorporated from the other candidate", ""]

@@ -16,10 +16,10 @@ The loop now converges on **reviewed behavioural agreement**, not only byte-iden
 
 - **Observability** — every run writes `events.jsonl` (append-only, redacted, size-capped). `cav web --run <dir>` serves a read-only local dashboard: what each agent is doing right now, what changed this round, what is already agreed, what still differs, and the exact gates blocking finalization.
 - **Convergence** — `convergence: "strict"` keeps the old rule. `"functional"` accepts when both structured reviews are valid, there are zero *blocking* `MUST_FIX` findings, both agents approve **both** candidates, no behavioural disagreement is open, and every check passes. Refusing approval requires a `MUST_FIX` finding of kind `behavioral` with a real path and line — taste does not block.
-- **Shared baseline** — both agents start each round from one whole candidate (the only checks-passing one, otherwise `canonical_agent`), instead of merging each other's divergent histories.
+- **Equal standing** — neither candidate is a default. Each agent starts each round from its own previous candidate, receives the other candidate's full diff, and reviews both with the same scrutiny. Nothing depends on which agent is listed first.
 - **Structured reviews** — `reviews/rN/<agent>-review.json` is authoritative and the markdown is rendered from it; the schema is in the prompt. Legacy markdown-only reviews still work, under `strict` only.
-- **Carry-forward ledger** — changes from the non-baseline candidate that are not in the baseline are listed, and the baseline owner must dispose of each one, so work is not dropped silently.
-- **Finalization** — canonical tree → safe normalisation (line endings and trailing whitespace only, never `strict_paths`) → full checks on a clean worktree of that exact commit → both agents confirm that exact diff → signoffs, `WAIVED.md`, `REPORT.md`. Publishing still requires `--push`.
+- **Carry-forward ledgers** — one per agent, uncapped: every change in the other candidate that the agent's tree lacks is listed, and the agent must take it or keep its own version with a reason, so work is not dropped silently.
+- **Finalization** — when both agents approve both candidates, the one that changed least from its own original branch (lines, then files) is published → safe normalisation (line endings and trailing whitespace only, never `strict_paths`) → full checks on a clean worktree of that exact commit → both agents confirm that exact diff → signoffs, `WAIVED.md`, `REPORT.md`. Publishing still requires `--push`.
 - **Before spending agent time** — `cav check --case <file>` validates the case; `cav diff --run <dir>` shows what the two candidates disagree about from a plain terminal.
 
 ```
@@ -36,7 +36,7 @@ On Windows use `py` rather than `python`: the bare `python` on PATH is the Micro
 ## What it actually does
 
 1. **Bootstrap** — snapshot both starting candidates into a local bare repo (`exchange.git`). Nothing touches GitHub.
-2. **Prepare** — for each agent, create a git worktree from *its own* previous candidate and merge the other candidate into it. Conflicts are handed to the agent to resolve.
+2. **Prepare** — for each agent, create a git worktree from *its own* previous candidate, write the other candidate's diff against it, and list every change the other has that it lacks.
 3. **Drive** — send the same round prompt to both agents in parallel. Each reviews both implementations, edits its worktree to keep the best of each, and writes a review file with a `MUST_FIX: <n>` line.
 4. **Monitor** — poll both agents every few seconds: elapsed time, idle time, message count, current tool. Warn on a stalled agent, report when one finishes and the other lags, abort on a human-blocking interaction or the round timeout.
 5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN` to the exchange. Agents never run `git commit` or `git push`.

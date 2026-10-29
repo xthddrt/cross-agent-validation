@@ -174,7 +174,7 @@ class Dashboard:
                     body = dashboard.artifact("reviews", f"r{round_no}", "divergence.json")
                     return self._send(200, body or "{}")
                 if name == "carry-forward":
-                    body = dashboard.artifact("reviews", f"r{round_no}", "carry-forward.json")
+                    body = dashboard.artifact("reviews", f"r{round_no}", f"{agent}-carry-forward.json")
                     return self._send(200, body or '{"items": []}')
                 if name == "review":
                     for suffix in ("-review.json", "-review.md"):

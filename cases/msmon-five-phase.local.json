@@ -27,10 +27,8 @@
     "{python} tools\\check_sensor_map.py"
   ],
   "convergence": "functional",
-  "canonical_agent": "deepseek",
   "strict_paths": ["driver/**", "compat/**", "**/*.h"],
   "formatter": null,
-  "carry_forward_limit": 20,
   "max_rounds": 3,
   "round_seconds": 5400,
   "stall_seconds": 1200,

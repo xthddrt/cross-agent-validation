@@ -200,8 +200,9 @@ def compare_trees(git_dir, tree_a, tree_b, strict_paths=()):
     }
 
 
-def carry_forward(git_dir, source_tree, baseline_tree, strict_paths=(), limit=50):
-    """Prior-candidate paths whose content is not present in the shared baseline."""
+def carry_forward(git_dir, source_tree, baseline_tree, strict_paths=(), limit=None):
+    """Paths whose content in `source_tree` (the other candidate) is not in `baseline_tree` (the
+    agent's own tree). Uncapped unless `limit` is given: every difference gets a decision."""
     diff = compare_trees(git_dir, source_tree, baseline_tree, strict_paths)
     paths = [p for p in diff["files"]["substantive"] + diff["files"]["binary"]]
     paths.sort(key=lambda p: -(diff["stats"].get(p, {}).get("added", 0)

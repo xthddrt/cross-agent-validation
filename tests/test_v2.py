@@ -23,6 +23,7 @@ ROUND_RE = re.compile(r"Round (\d+)")
 REVIEW_MD_RE = re.compile(r"review to this exact path: (.+)")
 REVIEW_JSON_RE = re.compile(r"structured review \(authoritative\) to: (.+)")
 CONFIRM_MARK = "is being finalised"
+LEDGER_RE = re.compile(r"^- (CF-\d+)\s", re.M)
 
 
 def make_repo(root):
@@ -38,7 +39,11 @@ def make_repo(root):
 
 
 class StructuredFake:
-    """Writes a valid JSON review and the files it claims to have changed."""
+    """Writes a valid JSON review and the files it claims to have changed.
+
+    Unless `dispositions` is given, it keeps every ledger item its prompt lists, as an agent
+    that decides on each one would.
+    """
 
     def __init__(self, name, files, approve=True, findings=None, dispositions=None):
         self.name = name
@@ -79,7 +84,10 @@ class StructuredFake:
             "areas": [],
             "changes": [{"path": name, "why": "test"} for name in files],
             "incorporated_from_other": [],
-            "carry_forward_dispositions": self.dispositions or [],
+            "carry_forward_dispositions": (
+                self.dispositions if self.dispositions is not None else
+                [{"item_id": item, "status": "retained", "why": "test"}
+                 for item in ([] if confirming else LEDGER_RE.findall(prompt))]),
             "remaining_disagreements": [],
         }
         js.parent.mkdir(parents=True, exist_ok=True)
@@ -129,7 +137,6 @@ class Base(unittest.TestCase):
                     "kimi": config.AgentSpec("kimi", "kimi", bootstrap_ref=self.base)},
             checks=[], max_rounds=2, round_seconds=30, stall_seconds=5,
             poll_seconds=0.05, retries=0, version=2, convergence="functional",
-            canonical_agent="deepseek",
         )
         values.update(overrides)
         return config.Case(**values)
@@ -416,10 +423,32 @@ class AcceptanceTest(Base):
         self.assertIsNotNone((orchestrator.run_dir / "WAIVED.md").exists())
         self.assertEqual(state["final"]["confirmation"], "skipped (approved tree)")
         self.assertTrue((orchestrator.run_dir / "signoff" / "deepseek.json").exists())
-        final_tree = state["final"]["tree"]
-        canonical_tree = state["history"][-1]["results"]["deepseek"]["tree"]
-        self.assertEqual(final_tree, canonical_tree, "functional acceptance publishes canonical")
+        published = state["final"]["published_from"]["agent"]
+        self.assertEqual(state["final"]["tree"], state["history"][-1]["results"][published]["tree"],
+                         "functional acceptance publishes one of the two approved trees unchanged")
         self.assertIn("shared.txt", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+
+    def test_publication_prefers_the_candidate_closest_to_its_original(self):
+        """Neither agent is a default: the one that needed fewer changes is published, whichever
+        is listed first."""
+        for first in ("deepseek", "kimi"):
+            with self.subTest(listed_first=first):
+                self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-v2-"))
+                self.repo, self.base = make_repo(self.tmp)
+                fakes = {
+                    "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "a\nb\nc\n",
+                                                                       "more.txt": "x\n"}),
+                    "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "a\n"}),
+                }
+                case = self.case(max_rounds=1)
+                order = [first] + [name for name in case.agents if name != first]
+                case.agents = {name: case.agents[name] for name in order}
+                _, state = self.run_with(case, fakes)
+                published = state["final"]["published_from"]
+                self.assertEqual(published["agent"], "kimi")
+                self.assertEqual(published["changes"]["kimi"], {"lines_changed": 1, "files_changed": 1})
+                self.assertEqual(published["changes"]["deepseek"], {"lines_changed": 4, "files_changed": 2})
+                self.assertIn("fewest changes", published["reason"])
 
     def test_unchanged_acceptance_skips_confirmation(self):
         """Both agents already approved that exact tree; asking again is pure overhead."""
@@ -519,11 +548,26 @@ class AcceptanceTest(Base):
         deepseek = StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
                                   dispositions=[{"item_id": "CF-01", "status": "retained", "why": "kept"}])
         kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
-        case = self.case(max_rounds=1, carry_forward_limit=5)
+        case = self.case(max_rounds=1)
         case.agents["kimi"].bootstrap_ref = kimi_ref
         orchestrator, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
         self.assertEqual(state["phase"], "converged")
-        self.assertNotIn("not retained", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+        self.assertNotIn("did not take", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+
+    def test_dropped_items_are_reported_for_each_agent(self):
+        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
+        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        drop = [{"item_id": "CF-01", "status": "intentionally_dropped", "why": "mine is better"}]
+        deepseek = StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}, dispositions=drop)
+        kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}, dispositions=drop)
+        case = self.case(max_rounds=1)
+        case.agents["kimi"].bootstrap_ref = kimi_ref
+        orchestrator, _ = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
+        waived = (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8")
+        self.assertIn("kimi's changes deepseek did not take", waived)
+        self.assertIn("deepseek's changes kimi did not take", waived)
 
     def test_solve_bootstraps_both_agents_from_base(self):
         fakes = {
@@ -549,7 +593,7 @@ class AcceptanceTest(Base):
             "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}, approve=False,
                                    findings=[finding]),
         }
-        case = self.case(max_rounds=1, carry_forward_limit=5)
+        case = self.case(max_rounds=1)
         case.agents["kimi"].bootstrap_ref = kimi_ref
         with self.assertRaises(RuntimeError):
             self.run_with(case, fakes)
@@ -562,7 +606,7 @@ class AcceptanceTest(Base):
         # The baseline owner (deepseek) is the one that must dispose of the other candidate's work.
         deepseek = DispositionRetryFake("deepseek", lambda r: {"shared.txt": "deepseek\n"})
         kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
-        case = self.case(max_rounds=1, carry_forward_limit=5, retries=1)
+        case = self.case(max_rounds=1, retries=1)
         case.agents["kimi"].bootstrap_ref = kimi_ref
         _, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
         self.assertEqual(state["phase"], "converged")
@@ -612,23 +656,30 @@ class IsolationTest(Base):
         self.assertTrue(first.exchange.sha("candidate/probe/r1"))
         self.assertIsNone(second.exchange.sha("candidate/probe/r1"))
 
-    def test_non_baseline_candidate_patch_is_not_empty(self):
-        (self.repo / "extra.txt").write_bytes(b"kimi work\n")
+    def test_each_agent_receives_the_other_candidate_as_a_patch(self):
+        (self.repo / "kimi.txt").write_bytes(b"kimi work\n")
         git("add", "-A", cwd=self.repo)
         git("commit", "-q", "-m", "kimi work", cwd=self.repo)
         kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        git("checkout", "-q", "-b", "deepseek-start", self.base, cwd=self.repo)
+        (self.repo / "deepseek.txt").write_bytes(b"deepseek work\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "deepseek work", cwd=self.repo)
+        deepseek_ref = git("rev-parse", "HEAD", cwd=self.repo)
         case = self.case(max_rounds=1)
+        case.agents["deepseek"].bootstrap_ref = deepseek_ref
         case.agents["kimi"].bootstrap_ref = kimi_ref
         fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
-                                       dispositions=[{"item_id": "CF-01", "status": "reoffered",
-                                                      "why": "test"}]),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}),
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
         }
         orchestrator, _ = self.run_with(case, fakes)
-        patch = orchestrator.run_dir / "rounds" / "r1" / "other-kimi.patch"
-        self.assertTrue(patch.exists())
-        self.assertIn("extra.txt", patch.read_text(encoding="utf-8"))
+        rounds = orchestrator.run_dir / "rounds" / "r1"
+        self.assertIn("kimi.txt", (rounds / "deepseek-other.patch").read_text(encoding="utf-8"))
+        self.assertIn("deepseek.txt", (rounds / "kimi-other.patch").read_text(encoding="utf-8"))
+        prompt = (rounds / "deepseek-context.md").read_text(encoding="utf-8")
+        self.assertIn("equal standing", prompt)
+        self.assertNotIn("baseline", prompt.lower())
 
 
 class UnitTest(Base):
@@ -643,16 +694,35 @@ class UnitTest(Base):
             {"round": 3, "results": {"deepseek": {"tree": "a"}, "kimi": {"tree": "b"}}})
         self.assertTrue(orchestrator.oscillating(3))
 
-    def test_baseline_prefers_the_only_passing_candidate(self):
-        orchestrator = Orchestrator(self.case(), self.tmp / "base")
-        previous = {
-            "deepseek": {"commit": "aaa", "tree": "t1", "checks_ok": False},
-            "kimi": {"commit": "bbb", "tree": "t2", "checks_ok": True},
+    def test_each_agent_starts_from_its_own_candidate_with_its_own_ledger(self):
+        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
+        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        case = self.case(max_rounds=1)
+        case.agents["kimi"].bootstrap_ref = kimi_ref
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "same\n"}),
         }
-        commit, reason, owner = orchestrator.choose_baseline(previous)
-        self.assertEqual(commit, "bbb")
-        self.assertEqual(owner, "kimi")
-        self.assertIn("passed", reason)
+        orchestrator, state = self.run_with(case, fakes)
+        self.assertEqual(state["history"][0]["starts"], {"deepseek": self.base, "kimi": kimi_ref})
+        for name in ("deepseek", "kimi"):
+            ledger = json.loads((orchestrator.run_dir / "reviews" / "r1" / f"{name}-carry-forward.json")
+                                .read_text(encoding="utf-8"))
+            self.assertEqual([item["path"] for item in ledger["items"]], ["shared.txt"], name)
+            self.assertEqual(ledger["omitted"], 0, "the ledger is uncapped")
+
+    def test_removed_settings_are_rejected(self):
+        for key, value in (("canonical_agent", "deepseek"), ("carry_forward_limit", 20)):
+            path = self.tmp / f"{key}.json"
+            path.write_text(json.dumps({
+                "name": "x", "repo": {"host": str(self.repo), "base": self.base},
+                "agents": {"deepseek": {"kind": "opencode", "bootstrap_ref": self.base},
+                           "kimi": {"kind": "kimi", "bootstrap_ref": self.base}},
+                key: value}), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, key):
+                config.load(path)
 
     def test_blank_task_basis(self):
         orchestrator = Orchestrator(self.case(), self.tmp / "basis")

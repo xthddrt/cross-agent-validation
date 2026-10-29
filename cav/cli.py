@@ -35,7 +35,7 @@ def cmd_run(args):
     print(f"case        {case.name} (schema v{case.version})")
     print(f"host        {case.host_repo}")
     print(f"exchange    {orchestrator.exchange.path}")
-    print(f"convergence {case.convergence}   canonical {case.canonical()}")
+    print(f"convergence {case.convergence}   (both candidates weighed equally)")
     print(f"push        {'yes' if args.push else 'no (use --push)'}")
     if args.dashboard:
         _start_dashboard(orchestrator.run_dir, args.port, open_browser=True)
@@ -79,7 +79,7 @@ def cmd_solve(args):
     case = config.Case(
         name=args.name or f"solve-{repo.name}",
         host_repo=repo, base=commit, agents=specs, checks=args.checks,
-        version=2, convergence=args.convergence, canonical_agent=next(iter(specs)),
+        version=2, convergence=args.convergence,
         bootstrap="base", max_rounds=args.max_rounds,
         round_seconds=args.round_seconds, strict_paths=args.strict_path or [],
         task={"prompt": prompt, "acceptance": [], "context_files": [],
