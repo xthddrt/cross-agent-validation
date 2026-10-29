@@ -15,7 +15,8 @@
     "kimi": {
       "kind": "kimi",
       "model": "kimi-code/k3.1-pro",
-      "thinking": "high"
+      "thinking": "high",
+      "bootstrap_exclude": ["runs"]
     }
   },
   "checks": [
