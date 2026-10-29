@@ -1,0 +1,213 @@
+"""Mechanical comparison of candidate trees: textual classes, divergence, settlement."""
+
+import fnmatch
+import pathlib
+import subprocess
+
+from .gitops import GIT, git
+
+C_FAMILY = {".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".js", ".ts", ".java", ".mjs", ".cjs"}
+HASH_FAMILY = {".py", ".ps1", ".sh", ".cmd", ".bat", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
+BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".sys", ".exe",
+                   ".dll", ".obj", ".lib", ".pdb", ".bin", ".woff", ".woff2", ".ttf"}
+
+
+def matches(path, patterns):
+    for pattern in patterns:
+        if fnmatch.fnmatch(path, pattern):
+            return True
+        # Git's `**/` matches zero or more directories; fnmatch requires at least one.
+        if pattern.startswith("**/") and fnmatch.fnmatch(path, pattern[3:]):
+            return True
+    return False
+
+
+def normalize_eol(data):
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
+def normalize_ws(data):
+    """Line endings and trailing whitespace only. Blank lines and indentation are left alone:
+    they are semantic in Makefiles, YAML and macro continuations."""
+    lines = [line.rstrip(b" \t") for line in normalize_eol(data).split(b"\n")]
+    return b"\n".join(lines).strip(b"\n") + b"\n"
+
+
+def strip_comments(text, suffix):
+    if suffix in C_FAMILY:
+        line_marks, block = ("//",), ("/*", "*/")
+    elif suffix in HASH_FAMILY:
+        line_marks, block = ("#",), None
+    else:
+        return text
+    out = []
+    index = 0
+    length = len(text)
+    while index < length:
+        if block and text.startswith(block[0], index):
+            end = text.find(block[1], index + len(block[0]))
+            if end < 0:
+                break
+            index = end + len(block[1])
+            continue
+        if any(text.startswith(mark, index) for mark in line_marks):
+            end = text.find("\n", index)
+            if end < 0:
+                break
+            index = end
+            continue
+        char = text[index]
+        if char in "\"'":
+            quote = char
+            out.append(char)
+            index += 1
+            while index < length:
+                if text[index] == "\\":
+                    out.append(text[index:index + 2])
+                    index += 2
+                    continue
+                out.append(text[index])
+                index += 1
+                if out[-1] == quote:
+                    break
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def classify(name, ours, theirs, strict_paths):
+    """identical | formatting_candidate | comments_candidate | substantive | binary"""
+    if ours == theirs:
+        return "identical"
+    suffix = pathlib.PurePosixPath(name).suffix.lower()
+    if suffix in BINARY_SUFFIXES or b"\0" in ours or b"\0" in theirs:
+        return "binary"
+    if matches(name, strict_paths):
+        return "substantive"
+    if normalize_ws(ours) == normalize_ws(theirs):
+        return "formatting_candidate"
+    left = strip_comments(normalize_eol(ours).decode("utf-8", "replace"), suffix)
+    right = strip_comments(normalize_eol(theirs).decode("utf-8", "replace"), suffix)
+    if normalize_ws(left.encode()) == normalize_ws(right.encode()):
+        return "comments_candidate"
+    return "substantive"
+
+
+def _entries(git_dir, tree):
+    result = subprocess.run([GIT, "--git-dir", str(git_dir), "ls-tree", "-r", "-z", "--full-tree", tree],
+                            capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"ls-tree {tree} failed: {result.stderr.decode('utf-8', 'replace')[:200]}")
+    entries = {}
+    for record in result.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, _, path = record.partition(b"\t")
+        parts = meta.split()
+        if len(parts) >= 3:
+            entries[path.decode("utf-8", "replace")] = parts[2].decode()
+    return entries
+
+
+def _read_blobs(git_dir, shas):
+    shas = list(dict.fromkeys(shas))
+    if not shas:
+        return {}
+    proc = subprocess.Popen([GIT, "--git-dir", str(git_dir), "cat-file", "--batch"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    payload, _ = proc.communicate("".join(sha + "\n" for sha in shas).encode())
+    blobs = {}
+    offset = 0
+    for sha in shas:
+        newline = payload.find(b"\n", offset)
+        if newline < 0:
+            break
+        header = payload[offset:newline].split()
+        if len(header) < 3 or header[1] != b"blob":
+            offset = newline + 1
+            continue
+        size = int(header[2])
+        blobs[sha] = payload[newline + 1:newline + 1 + size]
+        offset = newline + 1 + size + 1
+    return blobs
+
+
+def compare_trees(git_dir, tree_a, tree_b, strict_paths=()):
+    """Classify every path between two trees. Returns the divergence artifact."""
+    entries_a = _entries(git_dir, tree_a)
+    entries_b = _entries(git_dir, tree_b)
+    paths = sorted(set(entries_a) | set(entries_b))
+    differing = [p for p in paths if entries_a.get(p) != entries_b.get(p)]
+    blobs = _read_blobs(git_dir, [s for p in differing for s in (entries_a.get(p), entries_b.get(p)) if s])
+
+    files = {key: [] for key in
+             ("identical", "formatting_candidate", "comments_candidate", "substantive", "binary")}
+    for path in paths:
+        ours, theirs = entries_a.get(path), entries_b.get(path)
+        if ours == theirs:
+            files["identical"].append(path)
+            continue
+        kind = classify(path, blobs.get(ours, b""), blobs.get(theirs, b""), strict_paths)
+        files[kind].append(path)
+
+    stats = {}
+    if differing:
+        out = git("--git-dir", str(git_dir), "diff", "--numstat", tree_a, tree_b, check=False)
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 3:
+                added = int(parts[0]) if parts[0].isdigit() else 0
+                removed = int(parts[1]) if parts[1].isdigit() else 0
+                stats[parts[2]] = {"added": added, "removed": removed}
+
+    return {
+        "trees": {"a": tree_a, "b": tree_b},
+        "files": files,
+        "stats": stats,
+        "totals": {key: len(value) for key, value in files.items()},
+    }
+
+
+def carry_forward(git_dir, source_tree, baseline_tree, strict_paths=(), limit=50):
+    """Prior-candidate paths whose content is not present in the shared baseline."""
+    diff = compare_trees(git_dir, source_tree, baseline_tree, strict_paths)
+    paths = [p for p in diff["files"]["substantive"] + diff["files"]["binary"]]
+    paths.sort(key=lambda p: -(diff["stats"].get(p, {}).get("added", 0)
+                               + diff["stats"].get(p, {}).get("removed", 0)))
+    items = [{"id": f"CF-{index + 1:02d}", "path": path,
+              "added": diff["stats"].get(path, {}).get("added", 0),
+              "removed": diff["stats"].get(path, {}).get("removed", 0)}
+             for index, path in enumerate(paths[:limit])]
+    return {"items": items, "total": len(paths), "omitted": max(0, len(paths) - len(items))}
+
+
+def apply_safe_normalization(worktree, strict_paths=(), paths=None):
+    """Line endings and trailing whitespace on files that are not `strict_paths`.
+
+    `paths` restricts the pass to the files that actually differ cosmetically between the two
+    candidates; without it every file in the worktree is rewritten, which would make the final
+    commit differ from the candidate the agents reviewed.
+    """
+    worktree = pathlib.Path(worktree)
+    changed = []
+    targets = [worktree / item for item in paths] if paths is not None else sorted(worktree.rglob("*"))
+    for path in targets:
+        if not path.is_file() or ".git" in path.parts:
+            continue
+        relative = path.relative_to(worktree).as_posix()
+        if relative.startswith(".git/") or matches(relative, strict_paths):
+            continue
+        if path.suffix.lower() in BINARY_SUFFIXES:
+            continue
+        try:
+            original = path.read_bytes()
+        except OSError:
+            continue
+        if b"\0" in original:
+            continue
+        normalized = normalize_ws(original)
+        if normalized != original:
+            path.write_bytes(normalized)
+            changed.append(relative)
+    return changed

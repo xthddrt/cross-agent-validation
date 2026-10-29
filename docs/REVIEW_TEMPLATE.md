@@ -12,7 +12,7 @@
 |---|---|---|---|---|---|
 | F-01 | MUST_FIX / SHOULD_FIX / NIT | | | | |
 
-MUST_FIX: 0
+MUST_FIX: <number>
 SHOULD_FIX: 0
 NIT: 0
 

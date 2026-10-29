@@ -1,4 +1,4 @@
-"""Round loop: prepare worktrees, drive both agents, monitor, commit, check, converge."""
+"""Round loop: baseline, context, agents, checks, divergence, verdict, finalization."""
 
 import json
 import os
@@ -10,11 +10,16 @@ import threading
 import time
 
 from . import agents as agent_mod
+from . import compare
+from . import review as review_mod
+from .events import EventWriter
 from .gitops import IDENTITY, Exchange, Repo, git, git_ok
-from .prompts import retry_note, round_prompt
+from .prompts import confirm_prompt, retry_note, round_prompt
 
-MUST_FIX_RE = re.compile(r"(?m)^MUST_FIX\s*:\s*(\d+)\s*$")
+MUST_FIX_RE = review_mod.MUST_FIX_RE
+parse_must_fix = review_mod.parse_must_fix
 TEMPLATE = pathlib.Path(__file__).resolve().parent.parent / "docs" / "REVIEW_TEMPLATE.md"
+MAX_PATCH_BYTES = 2_000_000
 
 
 def clock(seconds):
@@ -22,23 +27,19 @@ def clock(seconds):
     return f"{seconds // 60:02d}:{seconds % 60:02d}"
 
 
-def parse_must_fix(path):
-    path = pathlib.Path(path)
-    if not path.exists():
-        return None
-    found = MUST_FIX_RE.findall(path.read_text(encoding="utf-8", errors="replace"))
-    return int(found[0]) if len(found) == 1 else None
-
-
 class Orchestrator:
-    def __init__(self, case, run_dir, push=False):
+    def __init__(self, case, run_dir, push=False, thinking=False, strict=None, resume=False):
         self.case = case
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.push = push
+        self.thinking = thinking
+        self.strict = (case.convergence == "strict") if strict is None else bool(strict)
+        self.resume = resume
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.exchange = Exchange(self.run_dir / "exchange.git").ensure()
         self.repo = Repo(case.host_repo).attach(self.exchange)
         self.log_path = self.run_dir / "run.log"
+        self.events = EventWriter(self.run_dir / "events.jsonl", self.run_dir.name)
         self.state = {
             "case": case.name,
             "run_id": self.run_dir.name,
@@ -47,6 +48,10 @@ class Orchestrator:
             "agents": {},
             "history": [],
         }
+        self._pairs = {}
+        self._divergence_files = {}
+        self._last_ledger = {"items": [], "total": 0, "omitted": 0}
+        self.agents = {}
 
     # ---------------------------------------------------------------- plumbing
 
@@ -67,11 +72,47 @@ class Orchestrator:
         except ValueError:
             return str(path)
 
+    def emit(self, type_, round_no=None, agent=None, data=None):
+        return self.events.emit(type_, round_no, agent, data)
+
+    def prepare_worktree(self, path, rev):
+        path = pathlib.Path(path)
+        if path.exists():
+            self.repo.worktree_remove(path)
+        self.repo.worktree_add(path, rev)
+        return path
+
     # --------------------------------------------------------------- bootstrap
+
+    def write_task(self):
+        """Immutable task snapshot: written once, never rewritten by a later round or edit."""
+        target = self.run_dir / "TASK.md"
+        if target.exists():
+            return target
+        case = self.case
+        lines = ["# Task", "", "## Original objective", "",
+                 (case.task_prompt or "").strip() or "(blank - no original prompt was configured)", ""]
+        if case.task_acceptance:
+            lines += ["## Acceptance criteria", ""]
+            lines += [f"- {item}" for item in case.task_acceptance]
+            lines.append("")
+        if case.base_invariants:
+            lines += ["## Base behaviour invariants", ""]
+            lines += [f"- {item}" for item in case.base_invariants]
+            lines.append("")
+        for path in (case.task or {}).get("context_files") or []:
+            try:
+                text = pathlib.Path(path).read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            lines += [f"## Context: {pathlib.Path(path).name}", "", text[:20000], ""]
+        target.write_text("\n".join(lines), encoding="utf-8")
+        return target
 
     def bootstrap(self):
         self.state["phase"] = "bootstrap"
         self.save()
+        self.write_task()
         if self.case.base and not git_ok("rev-parse", "--verify", "--quiet", self.case.base,
                                          cwd=self.repo.path):
             raise RuntimeError(f"base commit {self.case.base} not found in {self.repo.path}")
@@ -81,10 +122,17 @@ class Orchestrator:
             if self.exchange.sha(branch):
                 self.log(f"{name}: r0 already published at {self.exchange.sha(branch)[:12]}")
                 continue
+            if self.case.bootstrap == "base":
+                sha = self.repo.sha(self.case.base)
+                self.repo.push(sha, branch)
+                self.log(f"{name}: r0 = {sha[:12]} (base commit)")
+                self.emit("candidate.commit", 0, name, {"commit": sha, "branch": branch})
+                continue
             if spec.bootstrap_ref:
                 sha = self.repo.sha(spec.bootstrap_ref)
                 self.repo.push(sha, branch)
                 self.log(f"{name}: r0 = {sha[:12]} ({spec.bootstrap_ref})")
+                self.emit("candidate.commit", 0, name, {"commit": sha, "branch": branch})
                 continue
             if not self.case.secondary_repo:
                 raise RuntimeError(f"{name}: no bootstrap_ref and no secondary repo to snapshot")
@@ -95,6 +143,9 @@ class Orchestrator:
             secondary.push(sha, branch)
             self.log(f"{name}: r0 = {sha[:12]} snapshotted from {secondary.path}")
         self.repo.fetch()
+        self.emit("run.start", 0, data={"case": self.case.name, "convergence": self.case.convergence,
+                                        "canonical": self.case.canonical(),
+                                        "task_present": bool(self.case.task_prompt.strip())})
 
     def snapshot(self, repo, spec):
         """Commit a dirty working tree without touching its index, branch or checkout.
@@ -128,106 +179,192 @@ class Orchestrator:
         finally:
             index.unlink(missing_ok=True)
 
-    # ------------------------------------------------------------------- round
+    # ------------------------------------------------------------------- run
 
     def run(self):
+        start = 1
+        if self.resume and (self.run_dir / "state.json").exists():
+            self.state = json.loads((self.run_dir / "state.json").read_text(encoding="utf-8"))
+            rounds = [item["round"] for item in self.state.get("history", [])]
+            start = (max(rounds) + 1) if rounds else 1
+            self.log(f"resuming at round {start}")
+            self.emit("run.resume", start, data={"history": len(rounds)})
         self.bootstrap()
-        self.log(f"exchange ready: {self.run_dir / 'exchange.git'}")
-        for round_no in range(1, self.case.max_rounds + 1):
-            converged = self.round(round_no)
-            if converged:
-                self.finalize(round_no)
+        for round_no in range(start, self.case.max_rounds + 1):
+            outcome = self.round(round_no)
+            if outcome == "accepted":
                 return self.state
-        self.log(f"rounds exhausted without agreement after {self.case.max_rounds}", "ERROR")
-        self.state["phase"] = "disagreement"
-        self.save()
+            if outcome == "stop":
+                break
+        if self.state.get("phase") != "converged":
+            self.log(f"rounds exhausted without agreement after {self.case.max_rounds}", "ERROR")
+            self.state["phase"] = "disagreement"
+            self.save()
+            self.emit("run.end", self.case.max_rounds, data={"phase": "disagreement"})
         return self.state
+
+    # ------------------------------------------------------------------- round
+
+    def previous_results(self, round_no):
+        if round_no == 1 or not self.state.get("history"):
+            out = {}
+            for name in self.case.agents:
+                sha = self.exchange.sha(f"candidate/{name}/r0")
+                if not sha:
+                    raise RuntimeError(f"missing candidate/{name}/r0")
+                out[name] = {"commit": sha, "tree": self.exchange.tree_of(sha), "checks_ok": None}
+            return out
+        return json.loads(json.dumps(self.state["history"][-1].get("results") or {}))
+
+    def choose_baseline(self, previous):
+        """One whole candidate, never a per-file mixture: cross-file consistency depends on it.
+
+        `checks_ok` is only known from round 2 on, so round 1 uses the canonical candidate.
+        """
+        names = list(self.case.agents)
+        passing = [name for name in names if previous.get(name, {}).get("checks_ok") is True]
+        if len(passing) == 1:
+            return previous[passing[0]]["commit"], f"only {passing[0]} passed every check", passing[0]
+        owner = self.case.canonical()
+        return previous[owner]["commit"], f"canonical candidate {owner}", owner
 
     def round(self, round_no):
         case = self.case
-        previous = round_no - 1
-        primary = next(iter(case.agents))
-        own_refs = {name: f"candidate/{name}/r{previous}" for name in case.agents}
-        for name, branch in own_refs.items():
-            if not self.exchange.sha(branch):
-                raise RuntimeError(f"missing input {branch}")
-
         self.state["phase"] = f"r{round_no}-prepare"
         self.state["round"] = round_no
         self.save()
         self.repo.fetch()
+        previous = self.previous_results(round_no)
+        baseline, reason, owner = self.choose_baseline(previous)
+        phase = "implement" if (case.bootstrap == "base" and round_no == 1) else "reconcile"
+        self.emit("baseline.selected", round_no,
+                  data={"commit": baseline, "reason": reason, "owner": owner})
+        self.log(f"r{round_no}: baseline {baseline[:12]} ({reason})")
 
         worktrees = {}
         for name in case.agents:
-            other = case.other(name)
-            path = self.run_dir / "wt" / f"r{round_no}" / name
-            self.repo.worktree_add(path, self.repo.ref(own_refs[name]))
-            merged, conflicts, message = self.repo.merge(path, self.repo.ref(own_refs[other]))
-            if not merged and not conflicts:
-                raise RuntimeError(f"r{round_no} {name}: cannot merge {own_refs[other]} "
-                                   f"into {own_refs[name]}: {message}")
-            worktrees[name] = {"path": path, "merged": merged, "conflicts": conflicts}
-            note = "clean" if merged else f"{len(conflicts)} conflicts"
-            self.log(f"r{round_no} {name}: worktree {self.rel(path)} merged {other} ({note})")
+            path = self.prepare_worktree(self.run_dir / "wt" / f"r{round_no}" / name, baseline)
+            worktrees[name] = {"path": path}
 
-        reviews = {name: self.run_dir / "reviews" / f"r{round_no}" / f"{name}-review.md"
-                   for name in case.agents}
+        ledger = {"items": [], "total": 0, "omitted": 0}
+        at_risk = next((name for name in case.agents if name != owner), None)
+        if phase == "reconcile" and case.carry_forward_limit > 0 and at_risk:
+            ledger = compare.carry_forward(self.exchange.path, previous[at_risk]["tree"],
+                                           self.repo.tree(baseline), case.strict_paths,
+                                           case.carry_forward_limit)
+        ledger_ids = [item["id"] for item in ledger["items"]]
+        self._last_ledger = ledger
+        self.emit("carry_forward.computed", round_no,
+                  data={"items": len(ledger_ids), "total": ledger.get("total", 0),
+                        "omitted": ledger.get("omitted", 0), "owner": owner})
+
         reviews_dir = self.run_dir / "reviews" / f"r{round_no}"
         reviews_dir.mkdir(parents=True, exist_ok=True)
+        context_dir = self.run_dir / "rounds" / f"r{round_no}"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        (reviews_dir / "carry-forward.json").write_text(json.dumps(ledger, indent=2), encoding="utf-8")
+        paths = {name: {"md": reviews_dir / f"{name}-review.md",
+                        "json": reviews_dir / f"{name}-review.json"} for name in case.agents}
+
+        agreed = self.agreed_paths(previous)
+        prompts = {}
+        for name in case.agents:
+            other = case.other(name)
+            patch = None
+            if phase == "reconcile" and other in previous:
+                patch = self.write_patch(round_no, other, previous[other]["commit"], baseline)
+            context = {
+                "phase": phase,
+                "baseline": baseline,
+                "baseline_reason": reason,
+                "other_ref": f"candidate/{other}/r{round_no - 1}",
+                "other_sha": previous.get(other, {}).get("commit", "?"),
+                "other_patch": str(patch) if patch else "(none)",
+                "other_review": self.previous_review_path(round_no, other),
+                "own_review": self.previous_review_path(round_no, name),
+                "ledger": ledger if name == owner else None,
+                "ledger_ids": ledger_ids if name == owner else [],
+                "agreed": agreed,
+                "history": self.history_line(),
+            }
+            prompts[name] = round_prompt(name, other, round_no, case, worktrees[name]["path"],
+                                         paths[name]["md"], paths[name]["json"], TEMPLATE,
+                                         case.checks, context)
+            (context_dir / f"{name}-context.md").write_text(prompts[name], encoding="utf-8")
+            self.emit("round.context", round_no, name,
+                      {"prompt_chars": len(prompts[name]), "worktree": str(worktrees[name]["path"])})
 
         runs = {}
         for name, spec in case.agents.items():
             agent = agent_mod.build(spec, self.run_dir / "logs" / f"r{round_no}" / f"{name}.log",
                                     title_prefix=f"cav {case.name} r{round_no}")
+            agent.emit = lambda type_, agent_name, data, _r=round_no: self.emit(type_, _r, agent_name, data)
+            agent.thinking = self.thinking
             agent.session_id = None
             runs[name] = agent
         self.agents = runs
 
-        prompts = {}
-        for name in case.agents:
-            other = case.other(name)
-            prompts[name] = round_prompt(
-                agent=name, other=other, round_no=round_no, case=case,
-                worktree=worktrees[name]["path"], review_path=reviews[name],
-                other_review_path=reviews[other], template_path=TEMPLATE,
-                own_ref=own_refs[name], own_sha=self.exchange.sha(own_refs[name]),
-                other_ref=own_refs[other], other_sha=self.exchange.sha(own_refs[other]),
-                conflicts=worktrees[name]["conflicts"], checks=case.checks,
-            )
-
-        self.drive(round_no, runs, prompts, worktrees, reviews)
+        self.state["phase"] = f"r{round_no}-agents"
+        self.save()
+        self.emit("round.start", round_no, data={"phase": phase, "baseline": baseline})
+        self.drive(round_no, runs, prompts, worktrees, paths)
 
         results = {}
         failed = []
         for name in case.agents:
-            must_fix = parse_must_fix(reviews[name])
-            review_ok = must_fix is not None
-            agent_result = getattr(runs[name], "result", {"ok": False, "reason": "no result"})
-            if not review_ok:
-                failed.append(f"{name}: no usable review file at {self.rel(reviews[name])}")
+            required = ledger_ids if (name == owner and ledger_ids) else ()
+            rev = review_mod.load(paths[name]["json"], paths[name]["md"], name, round_no,
+                                  worktrees[name]["path"], required)
+            if rev is None:
+                failed.append(f"{name}: no usable review")
+                self.emit("review.rejected", round_no, name, {"reason": "missing"})
                 continue
-            if runs[name].state.error or not agent_result.get("ok"):
-                failed.append(f"{name}: agent failed ({runs[name].state.error or agent_result.get('reason')})")
+            if not rev.valid:
+                failed.append(f"{name}: invalid review: {rev.errors[0]}")
+                self.emit("review.rejected", round_no, name, {"errors": rev.errors[:5]})
                 continue
-            path = worktrees[name]["path"]
+            if paths[name]["json"].exists():
+                review_mod.write_markdown(paths[name]["json"])
+            self.emit("review.validated", round_no, name,
+                      {"summary": rev.summary(), "fallback": rev.fallback})
             sha, problem = self.repo.commit_all(
-                path,
+                worktrees[name]["path"],
                 f"Reconcile round {round_no}: {name} recommendation\n\n"
-                f"Inputs: {own_refs[name]} + {own_refs[case.other(name)]}\n"
-                f"Base: {case.base}")
+                f"Baseline: {baseline}\nBase: {case.base}")
             if problem:
                 failed.append(f"{name}: {problem}")
                 continue
             self.repo.push(sha, f"candidate/{name}/r{round_no}")
+            diffstat = git("--git-dir", str(self.exchange.path), "diff", "--stat", baseline, sha,
+                           check=False)
+            (context_dir / f"{name}-changes.md").write_text(
+                f"# {name} changes in round {round_no}\n\n```\n{diffstat}\n```\n", encoding="utf-8")
+            (context_dir / f"{name}.patch").write_text(
+                git("--git-dir", str(self.exchange.path), "diff", baseline, sha,
+                    check=False)[:MAX_PATCH_BYTES], encoding="utf-8")
+            changed_paths = set(git("--git-dir", str(self.exchange.path), "diff", "--name-only",
+                                    baseline, sha, check=False).splitlines())
+            declared = {item.get("path") for item in (rev.data.get("changes") or [])}
+            unexplained = sorted((changed_paths & set(agreed)) - declared)
+            if unexplained:
+                self.emit("agent.unexplained_change", round_no, name, {"paths": unexplained[:40]})
+                self.log(f"r{round_no} {name}: {len(unexplained)} unexplained change(s) to agreed "
+                         f"files: {', '.join(unexplained[:4])}", "WARN")
             results[name] = {
                 "commit": sha,
                 "tree": self.repo.tree(sha),
-                "review": self.rel(reviews[name]),
-                "must_fix": must_fix,
-                "conflicts": worktrees[name]["conflicts"],
+                "review": self.rel(rev.path),
+                "valid": rev.valid,
+                "fallback": rev.fallback,
+                "blocking": rev.blocking,
+                "counts": rev.counts,
+                "approved": rev.behavior_approved,
+                "other_approved": rev.other_approved,
+                "open_behavioural": rev.open_behavioural,
+                "unexplained": unexplained,
             }
-            self.log(f"r{round_no} {name}: pushed candidate/{name}/r{round_no} {sha[:12]} "
-                     f"tree {results[name]['tree'][:12]} MUST_FIX={must_fix}")
+            self.emit("candidate.commit", round_no, name,
+                      {"commit": sha, "tree": results[name]["tree"]})
 
         if failed:
             self.state["phase"] = f"r{round_no}-failed"
@@ -237,46 +374,150 @@ class Orchestrator:
             raise RuntimeError(f"round {round_no} failed: " + "; ".join(failed))
 
         checks = self.run_checks(round_no, results, worktrees)
+        for name in case.agents:
+            results[name]["checks_ok"] = checks[name]["ok"]
 
-        trees_equal = results[primary]["tree"] == results[case.other(primary)]["tree"]
-        reviews_clean = all(results[name]["must_fix"] == 0 for name in case.agents)
-        checks_ok = all(item["ok"] for item in checks.values())
-        converged = trees_equal and reviews_clean and checks_ok
+        names = list(case.agents)
+        divergence = compare.compare_trees(self.exchange.path, results[names[0]]["tree"],
+                                           results[names[1]]["tree"], case.strict_paths)
+        self.write_divergence(round_no, results, divergence)
+        self._divergence_files = divergence["files"]
+        self.emit("divergence.computed", round_no,
+                  data={"totals": divergence["totals"],
+                        "substantive": divergence["files"]["substantive"][:20]})
+        if divergence["totals"]["substantive"] and self.evaluate(results, checks, divergence) != "diverged":
+            # Accepted as behaviourally equivalent: a fact worth surfacing, not an error.
+            self.emit("class_claim_mismatch", round_no,
+                      data={"substantive": divergence["files"]["substantive"][:20],
+                            "note": "accepted as behaviourally equivalent by both reviews"})
 
+        verdict = self.evaluate(results, checks, divergence)
+        blockers = self.blockers(results, checks, divergence, verdict)
         self.state["history"].append({
             "round": round_no,
+            "phase": phase,
+            "baseline": baseline,
+            "baseline_owner": owner,
             "results": results,
             "checks": checks,
-            "trees_equal": trees_equal,
-            "reviews_clean": reviews_clean,
-            "checks_ok": checks_ok,
-            "converged": converged,
+            "divergence": divergence["totals"],
+            "carry_forward": {"items": len(ledger_ids), "total": ledger.get("total", 0)},
+            "verdict": verdict,
+            "blockers": blockers,
+            "trees_equal": results[names[0]]["tree"] == results[names[1]]["tree"],
+            "reviews_clean": all(results[name]["valid"] and results[name]["blocking"] == 0
+                                 for name in names),
+            "checks_ok": all(item["ok"] for item in checks.values()),
+            "converged": verdict in ("strict", "functional"),
         })
-        for name in case.agents:
-            self.state["agents"][name] = {
-                "commit": results[name]["commit"],
-                "tree": results[name]["tree"],
-                "must_fix": results[name]["must_fix"],
-            }
+        self.state["agents"] = {name: {"commit": results[name]["commit"],
+                                       "tree": results[name]["tree"],
+                                       "blocking": results[name]["blocking"],
+                                       "approved": results[name]["approved"]}
+                                for name in case.agents}
+        self.state["blockers"] = blockers
         self.state["phase"] = f"r{round_no}-review"
         self.save()
-        self.log(f"r{round_no}: trees_equal={trees_equal} reviews_clean={reviews_clean} "
-                 f"checks_ok={checks_ok} -> {'CONVERGED' if converged else 'next round'}")
-        return converged
+        self.emit("convergence.evaluated", round_no,
+                  data={"verdict": verdict, "blockers": blockers})
+        self.log(f"r{round_no}: verdict={verdict} blockers={blockers}")
+
+        if verdict in ("strict", "functional"):
+            return self.finalize(round_no, verdict)
+        if self.oscillating(round_no):
+            self.emit("oscillation.detected", round_no)
+            self.log(f"r{round_no}: candidate pair repeated; stopping as oscillation", "ERROR")
+            self.state["phase"] = "disagreement"
+            self.save()
+            return "stop"
+        return "next"
+
+    def write_patch(self, round_no, other, commit, baseline):
+        target = self.run_dir / "rounds" / f"r{round_no}" / f"other-{other}.patch"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        text = git("--git-dir", str(self.exchange.path), "diff", baseline, commit, check=False)
+        target.write_text(text[:MAX_PATCH_BYTES], encoding="utf-8")
+        return target
+
+    def previous_review_path(self, round_no, name):
+        if round_no <= 1:
+            return "(none)"
+        folder = self.run_dir / "reviews" / f"r{round_no - 1}"
+        for suffix in ("-review.json", "-review.md"):
+            path = folder / f"{name}{suffix}"
+            if path.exists():
+                return str(path)
+        return "(none)"
+
+    def agreed_paths(self, previous):
+        """Paths already identical in both candidates: free, and the prompt asks agents to leave them alone."""
+        names = list(self.case.agents)
+        if len(previous) < 2:
+            return []
+        try:
+            diff = compare.compare_trees(self.exchange.path, previous[names[0]]["tree"],
+                                         previous[names[1]]["tree"], self.case.strict_paths)
+        except RuntimeError:
+            return []
+        return diff["files"]["identical"][:400]
+
+    def history_line(self):
+        parts = []
+        for item in self.state.get("history", []):
+            totals = item.get("divergence") or {}
+            if totals:
+                parts.append(f"r{item['round']}: {sum(totals.values()) - totals.get('identical', 0)} "
+                             f"differing / {totals.get('substantive', 0)} substantive")
+            elif item.get("failed"):
+                parts.append(f"r{item['round']}: failed")
+        return " -> ".join(parts)
+
+    def write_divergence(self, round_no, results, divergence):
+        names = list(self.case.agents)
+        payload = {
+            "round": round_no,
+            names[0]: results[names[0]]["commit"],
+            names[1]: results[names[1]]["commit"],
+            "trees": divergence["trees"],
+            "totals": divergence["totals"],
+            "files": divergence["files"],
+            "stats": divergence["stats"],
+        }
+        folder = self.run_dir / "reviews" / f"r{round_no}"
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / "divergence.json").write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        lines = [f"# Divergence round {round_no}", "",
+                 f"- {names[0]}: `{results[names[0]]['commit'][:12]}`",
+                 f"- {names[1]}: `{results[names[1]]['commit'][:12]}`", "",
+                 "| Class | Files |", "|---|---|"]
+        lines += [f"| {key} | {value} |" for key, value in divergence["totals"].items()]
+        for key in ("substantive", "comments_candidate", "formatting_candidate", "binary"):
+            paths = divergence["files"][key]
+            if not paths:
+                continue
+            lines += ["", f"## {key}", ""]
+            lines += [f"- `{path}`" for path in paths[:200]]
+        (folder / "divergence.md").write_text("\n".join(lines), encoding="utf-8")
 
     # --------------------------------------------------------------- drive/monitor
 
     def drive(self, round_no, runs, prompts, worktrees, reviews):
         case = self.case
-        self.state["phase"] = f"r{round_no}-agents"
-        self.save()
+
+        def artifact_ok(name):
+            worktree = worktrees[name]["path"]
+            rev = review_mod.load(reviews[name]["json"], reviews[name]["md"], name, round_no,
+                                  worktree)
+            return (not runs[name].state.error and runs[name].state.finished
+                    and rev is not None and rev.valid)
 
         for attempt in range(case.retries + 1):
-            pending = [name for name in runs if not self.artifact_ok(runs[name], reviews[name])]
+            pending = [name for name in runs if not artifact_ok(name)]
             if not pending:
                 return
             if attempt:
                 self.log(f"r{round_no} retry {attempt} for: {', '.join(pending)}", "WARN")
+                self.emit("agent.retry", round_no, None, {"agents": pending, "attempt": attempt})
             threads = []
             for name in pending:
                 agent = runs[name]
@@ -291,11 +532,10 @@ class Orchestrator:
             for thread in threads:
                 thread.join(timeout=30)
             for name in pending:
-                agent = runs[name]
-                if parse_must_fix(reviews[name]) is None:
-                    agent.state.error = agent.state.error or "no review file"
-            if all(self.artifact_ok(runs[name], reviews[name]) for name in runs):
-                return
+                if not artifact_ok(name):
+                    runs[name].state.error = runs[name].state.error or "no usable review"
+        if all(artifact_ok(name) for name in runs):
+            return
         self.log(f"r{round_no}: agents did not produce usable artifacts", "ERROR")
 
     def _worker(self, agent, prompt, worktree):
@@ -306,10 +546,6 @@ class Orchestrator:
             agent.state.finished = True
             agent.state.touch("failed")
             agent.result = {"ok": False, "reason": str(error)}
-
-    def artifact_ok(self, agent, review_path):
-        return (not agent.state.error and agent.state.finished
-                and parse_must_fix(review_path) is not None)
 
     def monitor(self, round_no, runs, pending):
         case = self.case
@@ -342,8 +578,8 @@ class Orchestrator:
                     continue
                 if state.detail.startswith("waiting:"):
                     self.log(f"r{round_no} {name}: blocked on a human interaction ({state.detail}); aborting", "ERROR")
-                    # Set the reason before aborting: the run thread sets "aborted" if it wins the race.
                     state.error = f"blocked: {state.detail}"
+                    self.emit("agent.blocked", round_no, name, {"detail": state.detail})
                     runs[name].abort()
                 if state.idle > case.stall_seconds and name not in warned:
                     warned.add(name)
@@ -413,6 +649,7 @@ class Orchestrator:
             rendered = command.replace("{python}", f'"{sys.executable}"')
             started = time.time()
             self.log(f"checks {name}: {command}")
+            self.emit("check.start", self.state.get("round"), name, {"command": command})
             proc = subprocess.run(rendered, shell=True, cwd=str(worktree),
                                   capture_output=True, text=True,
                                   encoding="utf-8", errors="replace")
@@ -423,6 +660,8 @@ class Orchestrator:
                 "tail": (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:],
             }
             commands.append(entry)
+            self.emit("check.result", self.state.get("round"), name,
+                      {"command": command, "exit": proc.returncode, "seconds": entry["seconds"]})
             if proc.returncode != 0:
                 self.log(f"checks {name}: FAILED ({proc.returncode}) {command}", "ERROR")
                 break
@@ -435,45 +674,247 @@ class Orchestrator:
     def write_check(self, path, result):
         pathlib.Path(path).write_text(json.dumps(result, indent=2)[:200000], encoding="utf-8")
 
-    # --------------------------------------------------------------- finalize
+    # ----------------------------------------------------------------- verdict
 
-    def finalize(self, round_no):
+    def evaluate(self, results, checks, divergence):
+        names = list(self.case.agents)
+        equal = results[names[0]]["tree"] == results[names[1]]["tree"]
+        checks_ok = all(item["ok"] for item in checks.values())
+        valid = all(results[name]["valid"] for name in names)
+        blocking = sum(results[name]["blocking"] for name in names)
+        if self.strict:
+            ok = equal and checks_ok and valid and blocking == 0
+            return "strict" if ok else "diverged"
+        approved = all(results[name]["approved"] and results[name]["other_approved"] for name in names)
+        open_behaviour = any(results[name]["open_behavioural"] for name in names)
+        # Structured reviews are required for functional acceptance: a markdown-only verdict
+        # says nothing about behaviour and would make the policy agent-asserted again.
+        fallback = any(results[name]["fallback"] for name in names)
+        ok = checks_ok and valid and blocking == 0 and approved and not open_behaviour and not fallback
+        return "functional" if ok else "diverged"
+
+    def blockers(self, results, checks, divergence, verdict):
+        names = list(self.case.agents)
+        return {
+            "checks": all(item["ok"] for item in checks.values()),
+            "blocking_must_fix": sum(results[name]["blocking"] for name in names),
+            "behaviour_approved": [results[name]["approved"] for name in names],
+            "other_approved": [results[name]["other_approved"] for name in names],
+            "open_behavioural": any(results[name]["open_behavioural"] for name in names),
+            "unexplained_changes": sum(len(results[name].get("unexplained") or []) for name in names),
+            "reviews_valid": all(results[name]["valid"] for name in names),
+            "markdown_fallback": any(results[name]["fallback"] for name in names),
+            "trees_equal": results[names[0]]["tree"] == results[names[1]]["tree"],
+            "divergence": divergence["totals"],
+            "verdict": verdict,
+            "eligible": verdict in ("strict", "functional"),
+        }
+
+    def oscillating(self, round_no):
+        """The pair repeated after at least one intervening round: A/B/A/B, not A/B/A."""
+        seen = {}
+        for item in self.state["history"]:
+            results = item.get("results") or {}
+            if len(results) != len(self.case.agents):
+                continue
+            pair = tuple(results[name]["tree"] for name in self.case.agents)
+            seen.setdefault(pair, []).append(item["round"])
+        current = self.state["history"][-1]["results"]
+        pair = tuple(current[name]["tree"] for name in self.case.agents)
+        return any(item <= round_no - 2 for item in seen.get(pair, []))
+
+    # ------------------------------------------------------------- finalization
+
+    def finalize(self, round_no, verdict):
         case = self.case
+        names = list(case.agents)
         history = next(item for item in self.state["history"] if item["round"] == round_no)
         results = history["results"]
-        primary = next(iter(case.agents))
-        commit = results[primary]["commit"]
-        tree = results[primary]["tree"]
+        canonical = case.canonical()
+        commit = results[canonical]["commit"]
 
+        final_wt = self.run_dir / "final"
+        self.prepare_worktree(final_wt, commit)
+        cosmetic = self._divergence_files.get("formatting_candidate") or []
+        changed = compare.apply_safe_normalization(final_wt, case.strict_paths, cosmetic)
+        if case.formatter:
+            self.log(f"format: {case.formatter}")
+            subprocess.run(case.formatter, shell=True, cwd=str(final_wt),
+                           capture_output=True, text=True)
+        self.emit("settle.commit", round_no,
+                  data={"commit": commit, "normalised": changed[:50], "count": len(changed)})
+        if self.repo.dirty(final_wt):
+            settled, problem = self.repo.commit_all(final_wt, f"Settlement round {round_no}")
+            if problem:
+                raise RuntimeError(f"settlement failed: {problem}")
+            commit = settled
+        final_tree = self.repo.tree(commit)
+        self.log(f"r{round_no}: final commit {commit[:12]} tree {final_tree[:12]} "
+                 f"({len(changed)} normalised files)")
+
+        self.emit("final.start", round_no, data={"commit": commit})
+        self.state["phase"] = f"r{round_no}-final"
+        self.save()
+        final_checks = self.execute_checks("final", final_wt, self.run_dir / "final" / "checks.json")
+        self.emit("final.checks", round_no, data={"ok": final_checks["ok"]})
+        if not final_checks["ok"]:
+            return self.refuse(round_no, "final checks failed", final_checks)
+
+        if verdict == "strict" and commit == results[canonical]["commit"]:
+            confirmed = True
+        else:
+            confirmed = self.confirm(round_no, commit, history)
+        if not confirmed:
+            return self.refuse(round_no, "final confirmation refused", final_checks)
+
+        waived = self.waived_list(history)
         for name in case.agents:
-            signoff = {
-                "agent": name,
-                "decision": "approve",
-                "round": round_no,
-                "commit": commit,
-                "tree": tree,
-                "review": results[name]["review"],
-                "checks": f"checks/r{round_no}/{name}.json",
-                "derived_from": "review MUST_FIX=0, identical trees, checks passed",
-                "signed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            }
-            path = self.run_dir / "signoff"
-            path.mkdir(exist_ok=True)
-            (path / f"{name}.json").write_text(json.dumps(signoff, indent=2), encoding="utf-8")
-
+            entry = self.state["agents"].setdefault(name, {})
+            entry.update({"state": "done", "detail": "finished", "error": None})
+        self.write_signoffs(round_no, commit, final_tree, verdict, waived)
+        self.write_waived(round_no, history, waived)
         self.state["phase"] = "converged"
-        self.state["final"] = {"round": round_no, "commit": commit, "tree": tree, "pushed": False}
+        self.state["final"] = {"round": round_no, "commit": commit, "tree": final_tree,
+                               "verdict": verdict, "pushed": False,
+                               "accepted": waived["accepted"][:200],
+                               "checks": final_checks["commands"],
+                               "basis": self.assurance_basis()}
         self.save()
         self.write_report(round_no)
-        self.log(f"CONVERGED in round {round_no}: {commit} tree {tree}")
+        self.log(f"ACCEPTED in round {round_no} ({verdict}): {commit} tree {final_tree}")
+        self.emit("final.complete", round_no,
+                  data={"commit": commit, "tree": final_tree, "verdict": verdict})
 
         if self.push:
             self.push_origin(commit)
             self.state["final"]["pushed"] = True
             self.save()
             self.write_report(round_no)
+            self.emit("push.result", round_no, data={"ok": True, "branch": case.branch})
         else:
             self.log("not pushed to origin; rerun with --push to publish")
+        self.emit("run.end", round_no, data={"phase": "converged", "verdict": verdict})
+        return "accepted"
+
+    def refuse(self, round_no, reason, final_checks):
+        self.log(f"r{round_no}: {reason}; not publishing", "ERROR")
+        self.emit("final.confirmation", round_no, data={"ok": False, "reason": reason})
+        if self.state.get("history"):
+            self.state["history"][-1]["finalization"] = {"ok": False, "reason": reason,
+                                                         "checks": final_checks.get("ok")}
+        self.state["phase"] = f"r{round_no}-diverged"
+        self.save()
+        if round_no >= self.case.max_rounds:
+            self.state["phase"] = "disagreement"
+            self.save()
+            return "stop"
+        return "next"
+
+    def confirm(self, round_no, commit, history):
+        case = self.case
+        names = list(case.agents)
+        folder = self.run_dir / "reviews" / f"r{round_no}-confirm"
+        folder.mkdir(parents=True, exist_ok=True)
+        results = history["results"]
+        final_diff = self.run_dir / "final" / "diff-other.patch"
+        final_diff.write_text(git("--git-dir", str(self.exchange.path), "diff",
+                                  results[names[0]]["commit"], commit, check=False)[:MAX_PATCH_BYTES],
+                              encoding="utf-8")
+        worktrees, runs, prompts, reviews = {}, {}, {}, {}
+        for name in names:
+            worktrees[name] = {"path": self.prepare_worktree(
+                self.run_dir / "wt" / f"r{round_no}-confirm" / name, commit)}
+            agent = agent_mod.build(case.agents[name],
+                                    self.run_dir / "logs" / f"r{round_no}-confirm" / f"{name}.log",
+                                    title_prefix=f"cav {case.name} confirm")
+            agent.emit = lambda type_, agent_name, data, _r=round_no: self.emit(type_, _r, agent_name, data)
+            agent.thinking = self.thinking
+            runs[name] = agent
+            reviews[name] = {"md": folder / f"{name}-review.md",
+                             "json": folder / f"{name}-review.json"}
+            own_diff = self.run_dir / "final" / f"diff-{name}.patch"
+            own_diff.write_text(git("--git-dir", str(self.exchange.path), "diff",
+                                    results[name]["commit"], commit, check=False)[:MAX_PATCH_BYTES],
+                                encoding="utf-8")
+            waived = self.waived_list(history)["accepted"]
+            prompts[name] = confirm_prompt(
+                name, round_no, case, worktrees[name]["path"],
+                reviews[name]["md"], reviews[name]["json"], TEMPLATE,
+                {"final_commit": commit, "final_diff": str(final_diff), "own_diff": str(own_diff),
+                 "waived": ", ".join(waived[:40]) or "(none)",
+                 "checks": "pass" if (self.run_dir / "final" / "checks.json").exists() else "unknown",
+                 "ledger": None, "ledger_ids": []})
+
+        self.state["phase"] = f"r{round_no}-confirm"
+        self.save()
+        self.drive(round_no, runs, prompts, worktrees, reviews)
+
+        expected = round_no
+        ok = True
+        for name in names:
+            rev = review_mod.load(reviews[name]["json"], reviews[name]["md"], name, expected,
+                                  worktrees[name]["path"])
+            if rev is None or not rev.valid or rev.blocking or not rev.behavior_approved:
+                ok = False
+                reason = "missing" if rev is None else (rev.errors[0] if rev.errors else "refused")
+                self.log(f"r{round_no} {name}: confirmation not given ({reason})", "ERROR")
+                self.emit("final.confirmation", round_no, name, {"ok": False, "reason": reason})
+            else:
+                self.emit("final.confirmation", round_no, name, {"ok": True})
+        return ok
+
+    def waived_list(self, history):
+        """Candidate-to-candidate differences that remained at acceptance."""
+        files = self._divergence_files or {}
+        accepted = [path for key in ("formatting_candidate", "comments_candidate",
+                                     "substantive", "binary")
+                    for path in (files.get(key) or [])]
+        return {"accepted": accepted, "totals": history.get("divergence") or {}}
+
+    def write_signoffs(self, round_no, commit, tree, verdict, waived):
+        path = self.run_dir / "signoff"
+        path.mkdir(exist_ok=True)
+        for name in self.case.agents:
+            signoff = {
+                "agent": name,
+                "decision": "approve",
+                "round": round_no,
+                "verdict": verdict,
+                "commit": commit,
+                "tree": tree,
+                "checks": (f"checks/r{round_no}/{name}.json" if self.case.checks
+                           else "final/checks.json"),
+                "final_checks": "final/checks.json",
+                "accepted_differences": waived["accepted"],
+                "basis": self.assurance_basis(),
+                "derived_from": ("mechanical evidence: valid reviews, zero blocking findings, "
+                                 "passing checks, final confirmation on this commit"),
+                "signed_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            }
+            (path / f"{name}.json").write_text(json.dumps(signoff, indent=2), encoding="utf-8")
+
+    def assurance_basis(self):
+        if self.case.task_prompt.strip():
+            return "task + acceptance criteria + checks + mutual review"
+        if self.case.base_invariants:
+            return "checks + declared base-behaviour invariants + mutual review"
+        return "checks + mutual review (no task prompt)"
+
+    def write_waived(self, round_no, history, waived):
+        lines = [f"# Accepted differences: round {round_no}", "",
+                 f"- Verdict: `{history['verdict']}`",
+                 f"- Basis: {self.assurance_basis()}", ""]
+        if waived["accepted"]:
+            lines += ["## Candidate differences accepted", ""]
+            lines += [f"- `{path}`" for path in waived["accepted"][:200]]
+        else:
+            lines += ["No candidate-to-candidate differences remained at acceptance."]
+        ledger = self._last_ledger if hasattr(self, "_last_ledger") else {}
+        dropped = [item for item in (ledger.get("items") or [])]
+        if dropped:
+            lines += ["", "## Unretained changes at finalization", ""]
+            lines += [f"- `{item['path']}` (+{item['added']}/-{item['removed']})" for item in dropped[:200]]
+        (self.run_dir / "WAIVED.md").write_text("\n".join(lines), encoding="utf-8")
 
     def push_origin(self, commit):
         branch = self.case.branch
@@ -486,49 +927,43 @@ class Orchestrator:
 
     def write_report(self, round_no):
         case = self.case
-        history = next(item for item in self.state["history"] if item["round"] == round_no)
-        results = history["results"]
-        primary = next(iter(case.agents))
+        final = self.state.get("final") or {}
         lines = [
             f"# Reconciliation report: {case.name}",
             "",
             f"- Run: `{self.run_dir.name}`",
-            f"- Base: `{case.base or 'none (independent implementations)'}`",
-            f"- Converged in round {round_no} of at most {case.max_rounds}",
-            f"- Final commit: `{results[primary]['commit']}`",
-            f"- Final tree: `{results[primary]['tree']}`",
-            f"- Pushed to origin: {'yes' if self.push else 'no'}",
+            f"- Base: `{case.base or 'none'}`",
+            f"- Convergence: `{case.convergence}`   canonical agent: `{case.canonical()}`",
+            f"- Acceptance basis: {self.assurance_basis()}",
+            f"- Accepted in round {round_no} of at most {case.max_rounds}",
+            f"- Final commit: `{final.get('commit', '?')}`",
+            f"- Final tree: `{final.get('tree', '?')}`",
+            f"- Pushed to origin: {'yes' if final.get('pushed') else 'no'}",
             "",
             "## Rounds",
             "",
-            "| Round | Trees equal | Reviews clean | Checks | Converged |",
-            "|---|---|---|---|---|",
+            "| Round | Verdict | Trees equal | Blocking | Checks | Divergence |",
+            "|---|---|---|---|---|---|",
         ]
         for item in self.state["history"]:
-            lines.append(f"| {item['round']} | {item['trees_equal']} | {item['reviews_clean']} "
-                         f"| {item['checks_ok']} | {item['converged']} |")
-
-        lines += ["", "## Agent results (final round)", "",
-                  "| Agent | Commit | Tree | MUST_FIX | Review |", "|---|---|---|---|---|"]
+            totals = item.get("divergence") or {}
+            lines.append(f"| {item['round']} | {item.get('verdict', 'failed')} "
+                         f"| {item.get('trees_equal')} "
+                         f"| {item.get('blockers', {}).get('blocking_must_fix', '?')} "
+                         f"| {'pass' if item.get('blockers', {}).get('checks') else 'fail'} "
+                         f"| {totals.get('substantive', '?')} substantive |")
+        lines += ["", "## Final round", ""]
+        last = next((item for item in self.state["history"] if item["round"] == round_no), {})
         for name in case.agents:
-            entry = results[name]
-            lines.append(f"| {name} | `{entry['commit'][:12]}` | `{entry['tree'][:12]}` "
-                         f"| {entry['must_fix']} | `{entry['review']}` |")
-
-        lines += ["", "## Checks (final round)", ""]
-        for name in case.agents:
-            check = history["checks"][name]
-            lines.append(f"### {name}: {'PASS' if check['ok'] else 'FAIL'}")
-            lines.append("")
-            for command in check["commands"]:
-                lines.append(f"- `{command['command']}` exit {command['exit']} in {command['seconds']}s")
-            lines.append("")
-
-        conflicts = results[primary].get("conflicts") or []
-        lines += ["## Merge conflicts", ""]
-        lines += [f"- `{c}`" for c in conflicts] if conflicts else ["- none"]
-        lines.append("")
-        lines += ["## Signoff", "",
-                  "Both signoffs are derived from each agent's own review file, the identical tree hash, "
-                  "and the recorded check results. They are not independent human approvals.", ""]
+            result = (last.get("results") or {}).get(name) or {}
+            lines.append(f"- {name}: `{str(result.get('commit', '?'))[:12]}` "
+                         f"MUST_FIX={result.get('blocking', '?')} "
+                         f"approved={result.get('approved')}/{result.get('other_approved')}")
+        lines += ["", "## Checks (final commit)", ""]
+        for command in (final.get("checks") or []):
+            lines.append(f"- `{command['command']}` exit {command['exit']} in {command['seconds']}s")
+        lines += ["", "## Signoff", "",
+                  "Signoffs are mechanical evidence of agent agreement and passing checks on the exact",
+                  "final commit. They are not independent human approval, and a green check matrix",
+                  "means it builds, not that it works on hardware.", ""]
         (self.run_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")

@@ -1,0 +1,251 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>CAV run</title>
+<style>
+  :root { --bg:#101214; --panel:#171a1d; --line:#272c31; --fg:#e6e9ec; --dim:#8b949e;
+          --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; }
+  header { padding:12px 18px; border-bottom:1px solid var(--line); display:flex;
+           gap:18px; align-items:baseline; flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  .tag { color:var(--dim); }
+  .badge { padding:1px 7px; border-radius:9px; border:1px solid var(--line); font-size:11px; }
+  .b-ok { color:var(--ok); border-color:var(--ok); }
+  .b-bad { color:var(--bad); border-color:var(--bad); }
+  .b-warn { color:var(--warn); border-color:var(--warn); }
+  main { display:grid; grid-template-columns: 1fr 1fr; gap:14px; padding:14px 18px 40px; }
+  .full { grid-column: 1 / -1; }
+  section { background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:12px 14px; }
+  h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim);
+       margin:0 0 10px; font-weight:600; }
+  table { width:100%; border-collapse:collapse; }
+  th, td { text-align:left; padding:3px 8px 3px 0; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; font-size:11px; }
+  .gates div { display:flex; justify-content:space-between; padding:2px 0; }
+  .gates span:last-child { font-variant-numeric: tabular-nums; }
+  .agent { display:flex; flex-direction:column; gap:6px; }
+  .agent .row { display:flex; justify-content:space-between; }
+  .agent .detail { color:var(--accent); }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
+  .tabs button { background:transparent; color:var(--dim); border:1px solid var(--line);
+                 border-radius:4px; padding:2px 9px; cursor:pointer; font:inherit; font-size:11px; }
+  .tabs button.on { color:var(--fg); border-color:var(--accent); }
+  ul.files { list-style:none; margin:0; padding:0; max-height:220px; overflow:auto; }
+  ul.files li { padding:2px 0; cursor:pointer; color:var(--dim); }
+  ul.files li:hover { color:var(--accent); }
+  pre { background:#0d0f11; border:1px solid var(--line); border-radius:4px; padding:10px;
+        overflow:auto; max-height:420px; margin:10px 0 0; white-space:pre-wrap; }
+  #feed { max-height:300px; overflow:auto; }
+  #feed div { padding:1px 0; color:var(--dim); }
+  #feed b { color:var(--fg); font-weight:500; }
+  .muted { color:var(--dim); }
+</style>
+</head>
+<body>
+<header>
+  <h1 id="title">CAV run</h1>
+  <span class="tag" id="phase"></span>
+  <span class="badge" id="verdict"></span>
+  <span class="tag" id="elapsed"></span>
+  <span class="tag" id="basis"></span>
+</header>
+
+<main>
+  <section class="full">
+    <h2>Finalization gates</h2>
+    <div class="gates" id="gates"><span class="muted">waiting for state.json…</span></div>
+  </section>
+
+  <section>
+    <h2 id="a1">agent</h2>
+    <div class="agent" id="agent1"><span class="muted">idle</span></div>
+  </section>
+  <section>
+    <h2 id="a2">agent</h2>
+    <div class="agent" id="agent2"><span class="muted">idle</span></div>
+  </section>
+
+  <section class="full">
+    <h2>Convergence history</h2>
+    <table><thead><tr><th>Round</th><th>Verdict</th><th>Identical</th><th>Formatting</th>
+      <th>Comments</th><th>Substantive</th><th>Blocking</th><th>Checks</th></tr></thead>
+      <tbody id="history"></tbody></table>
+  </section>
+
+  <section class="full">
+    <h2>Candidate differences <span class="tag" id="round-label"></span></h2>
+    <div class="tabs" id="tabs"></div>
+    <ul class="files" id="files"></ul>
+    <pre id="diff" hidden></pre>
+  </section>
+
+  <section class="full">
+    <h2>Finalization</h2>
+    <div id="final" class="muted">not finalized</div>
+  </section>
+
+  <section class="full">
+    <h2>Activity</h2>
+    <div id="feed"></div>
+  </section>
+</main>
+
+<script>
+const TOKEN = location.pathname.split('/').filter(Boolean)[0];
+const enc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+let lastSeq = 0, state = {}, currentRound = 0, currentClass = 'substantive';
+
+const badge = (v) => v === 'ok' ? 'b-ok' : v === 'bad' ? 'b-bad' : 'b-warn';
+
+async function getJSON(url) {
+  try { const r = await fetch(url, {cache: 'no-store'}); return await r.json(); }
+  catch (e) { return null; }
+}
+
+function renderGates() {
+  const b = state.blockers || {};
+  const ok = (v) => v ? '<span class="b-ok">pass</span>' : '<span class="b-bad">no</span>';
+  const yes = (v) => v ? '<span class="b-ok">yes</span>' : '<span class="b-warn">no</span>';
+  const d = b.divergence || {};
+  const rows = [
+    ['Checks (both candidates)', ok(b.checks)],
+    ['Reviews valid', ok(b.reviews_valid)],
+    ['Blocking MUST_FIX', `<span class="${b.blocking_must_fix ? 'b-bad' : 'b-ok'}">${b.blocking_must_fix ?? '?'}</span>`],
+    ['Behaviour approved (own)', (b.behaviour_approved || []).map(yes).join(' ') || '—'],
+    ['Behaviour approved (other)', (b.other_approved || []).map(yes).join(' ') || '—'],
+    ['Open behavioural disagreement', b.open_behavioural ? '<span class="b-bad">yes</span>' : '<span class="b-ok">no</span>'],
+    ['Unexplained changes to agreed files', b.unexplained_changes ? `<span class="b-warn">${b.unexplained_changes}</span>` : '<span class="b-ok">0</span>'],
+    ['Trees identical', yes(b.trees_equal)],
+    ['Remaining differences', `${d.substantive ?? 0} substantive, ${d.comments_candidate ?? 0} comments, ${d.formatting_candidate ?? 0} formatting`],
+    ['Markdown fallback', b.markdown_fallback ? '<span class="b-warn">yes (strict only)</span>' : '<span class="b-ok">no</span>'],
+    ['Eligible to finalize', b.eligible ? '<span class="b-ok">yes</span>' : '<span class="b-warn">not yet</span>'],
+  ];
+  document.getElementById('gates').innerHTML =
+    rows.map(([k, v]) => `<div><span>${enc(k)}</span><span>${v}</span></div>`).join('');
+}
+
+function renderAgent(name, el) {
+  const a = (state.agents || {})[name] || {};
+  const last = (state.history || []).slice(-1)[0] || {};
+  const r = (last.results || {})[name] || {};
+  el.innerHTML = `
+    <div class="row"><span>state</span><span class="${a.state === 'done' ? 'b-ok' : 'b-warn'}">${enc(a.state || '—')}</span></div>
+    <div class="row"><span>doing</span><span class="detail">${enc(a.detail || '—')}</span></div>
+    <div class="row"><span>elapsed / idle</span><span>${enc(a.elapsed ?? 0)}s / ${enc(a.idle ?? 0)}s</span></div>
+    <div class="row"><span>messages</span><span>${enc(a.messages ?? 0)}</span></div>
+    <div class="row"><span>commit</span><span>${r.commit ? enc(String(r.commit).slice(0,10)) : '—'}</span></div>
+    <div class="row"><span>blocking MUST_FIX</span><span>${r.blocking ?? '—'}</span></div>
+    <div class="row"><span>approved own / other</span><span>${r.approved ?? '—'} / ${r.other_approved ?? '—'}</span></div>
+    ${a.error ? `<div class="row"><span class="b-bad">error</span><span>${enc(a.error)}</span></div>` : ''}`;
+}
+
+function renderHistory() {
+  const rows = (state.history || []).map(h => {
+    const d = h.divergence || {};
+    const b = h.blockers || {};
+    return `<tr><td>${h.round}</td><td>${enc(h.verdict || 'failed')}</td>
+      <td>${d.identical ?? '—'}</td><td>${d.formatting_candidate ?? 0}</td>
+      <td>${d.comments_candidate ?? 0}</td><td>${d.substantive ?? 0}</td>
+      <td>${b.blocking_must_fix ?? '—'}</td><td>${b.checks === undefined ? '—' : (b.checks ? 'pass' : 'fail')}</td></tr>`;
+  });
+  document.getElementById('history').innerHTML = rows.join('') ||
+    '<tr><td colspan="8" class="muted">no completed rounds</td></tr>';
+}
+
+function renderFinal() {
+  const f = state.final;
+  const el = document.getElementById('final');
+  if (!f) { el.className = 'muted'; el.textContent = 'not finalized'; return; }
+  el.className = '';
+  el.innerHTML = `<div class="gates">
+    <div><span>verdict</span><span>${enc(f.verdict || '')}</span></div>
+    <div><span>commit</span><span>${enc(f.commit || '')}</span></div>
+    <div><span>tree</span><span>${enc(f.tree || '')}</span></div>
+    <div><span>pushed</span><span>${f.pushed ? 'yes' : 'no'}</span></div>
+    <div><span>basis</span><span>${enc(f.basis || '')}</span></div>
+    <div><span>accepted differences</span><span>${(f.accepted || []).length}</span></div></div>`;
+}
+
+async function loadDivergence() {
+  const rounds = (state.history || []).map(h => h.round).filter(r => r);
+  if (!rounds.length) return;
+  if (!currentRound || !rounds.includes(currentRound)) currentRound = rounds[rounds.length - 1];
+  document.getElementById('round-label').textContent = `round ${currentRound}`;
+  const d = await getJSON(`/${TOKEN}/api/divergence?round=${currentRound}`);
+  const files = (d && d.files) || {};
+  const classes = ['substantive', 'comments_candidate', 'formatting_candidate', 'identical', 'binary'];
+  document.getElementById('tabs').innerHTML = classes.map(c =>
+    `<button class="${c === currentClass ? 'on' : ''}" data-c="${c}">${c} (${(files[c] || []).length})</button>`).join('');
+  document.querySelectorAll('#tabs button').forEach(b => b.onclick = () => {
+    currentClass = b.dataset.c; loadDivergence();
+  });
+  const list = files[currentClass] || [];
+  document.getElementById('files').innerHTML = list.length
+    ? list.map(p => `<li data-p="${enc(p)}">${enc(p)}</li>`).join('')
+    : `<li class="muted">none</li>`;
+  document.querySelectorAll('#files li[data-p]').forEach(li => li.onclick = async () => {
+    const body = await getJSON(`/${TOKEN}/api/diff?round=${currentRound}&path=${encodeURIComponent(li.dataset.p)}`);
+    const pre = document.getElementById('diff');
+    pre.hidden = false;
+    pre.textContent = (body && body.diff) || '(no diff)';
+  });
+}
+
+function addEvent(e) {
+  const feed = document.getElementById('feed');
+  const row = document.createElement('div');
+  const who = e.agent ? `<b>${enc(e.agent)}</b> ` : '';
+  const detail = e.data && (e.data.command || e.data.tool || e.data.path || e.data.text || '');
+  row.innerHTML = `${enc(e.ts.slice(11,19))} ${who}<b>${enc(e.type)}</b> ` +
+    `<span class="muted">${enc(String(detail).slice(0, 160))}</span>`;
+  feed.prepend(row);
+  while (feed.childElementCount > 120) feed.lastChild.remove();
+}
+
+function connectEvents() {
+  if (!window.EventSource) return;
+  const es = new EventSource(`/${TOKEN}/events?after=${lastSeq}`);
+  es.onmessage = (msg) => {
+    try {
+      const e = JSON.parse(msg.data);
+      lastSeq = Math.max(lastSeq, e.seq || 0);
+      addEvent(e);
+    } catch (err) {}
+  };
+  es.onerror = () => { es.close(); setTimeout(connectEvents, 3000); };
+}
+
+async function refresh() {
+  const next = await getJSON(`/${TOKEN}/api/state`);
+  if (!next) return;
+  const changedRound = (next.history || []).length !== (state.history || []).length;
+  state = next;
+  document.getElementById('title').textContent = state.case || 'CAV run';
+  document.getElementById('phase').textContent =
+    `${state.phase || '?'} · round ${state.round ?? '?'}`;
+  const v = (state.blockers || {}).verdict;
+  const badgeEl = document.getElementById('verdict');
+  badgeEl.textContent = v || 'pending';
+  badgeEl.className = 'badge ' + (v === 'strict' || v === 'functional' ? 'b-ok'
+    : v === 'diverged' ? 'b-warn' : '');
+  document.getElementById('basis').textContent = state.final ? state.final.basis : '';
+  const names = Object.keys(state.agents || {});
+  const all = names.length ? names : ['agent 1', 'agent 2'];
+  document.getElementById('a1').textContent = all[0] || 'agent 1';
+  document.getElementById('a2').textContent = all[1] || 'agent 2';
+  renderAgent(all[0], document.getElementById('agent1'));
+  renderAgent(all[1], document.getElementById('agent2'));
+  renderGates(); renderHistory(); renderFinal();
+  if (changedRound || !document.getElementById('files').childElementCount) loadDivergence();
+}
+
+refresh();
+setInterval(refresh, 2000);
+connectEvents();
+</script>
+</body>
+</html>

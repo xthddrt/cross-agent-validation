@@ -1,0 +1,39 @@
+{
+  "name": "msmon-five-phase",
+  "version": 2,
+  "description": "Reconcile the two independent five-phase logging/coverage implementations for msc-outside-monitor (paths for this PC).",
+  "repo": {
+    "host": "C:\\Users\\richa\\Documents\\Default Project\\msc-outside-monitor",
+    "base": "816163d",
+    "branch": "main"
+  },
+  "agents": {
+    "deepseek": {
+      "kind": "opencode",
+      "model": "deepseek/deepseek-flash#high",
+      "bootstrap_ref": "origin/candidate/deepseek-phase-1-5"
+    },
+    "kimi": {
+      "kind": "kimi",
+      "model": "kimi-code/k3.1-pro",
+      "thinking": "high",
+      "bootstrap_ref": "origin/candidate/kimi-phase-1-5"
+    }
+  },
+  "checks": [
+    "build.cmd",
+    "build.cmd --with-compat",
+    "build.cmd --with-fixtures",
+    "{python} tools\\check_sensor_map.py"
+  ],
+  "convergence": "functional",
+  "canonical_agent": "deepseek",
+  "strict_paths": ["driver/**", "compat/**", "**/*.h"],
+  "formatter": null,
+  "carry_forward_limit": 20,
+  "max_rounds": 3,
+  "round_seconds": 5400,
+  "stall_seconds": 1200,
+  "poll_seconds": 15,
+  "retries": 1
+}
