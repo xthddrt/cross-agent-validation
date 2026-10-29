@@ -50,7 +50,6 @@ class Orchestrator:
         }
         self._pairs = {}
         self._divergence_files = {}
-        self._last_ledger = {"items": [], "total": 0, "omitted": 0}
         self.agents = {}
 
     # ---------------------------------------------------------------- plumbing
@@ -65,6 +64,14 @@ class Orchestrator:
     def save(self):
         self.state["updated"] = time.strftime("%Y-%m-%dT%H:%M:%S")
         (self.run_dir / "state.json").write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def read_json(path):
+        try:
+            data = json.loads(pathlib.Path(path).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data if isinstance(data, dict) else {}
 
     def rel(self, path):
         try:
@@ -276,7 +283,6 @@ class Orchestrator:
                                            self.repo.tree(baseline), case.strict_paths,
                                            case.carry_forward_limit)
         ledger_ids = [item["id"] for item in ledger["items"]]
-        self._last_ledger = ledger
         self.emit("carry_forward.computed", round_no,
                   data={"items": len(ledger_ids), "total": ledger.get("total", 0),
                         "omitted": ledger.get("omitted", 0), "owner": owner})
@@ -288,6 +294,7 @@ class Orchestrator:
         (reviews_dir / "carry-forward.json").write_text(json.dumps(ledger, indent=2), encoding="utf-8")
         paths = {name: {"md": reviews_dir / f"{name}-review.md",
                         "json": reviews_dir / f"{name}-review.json"} for name in case.agents}
+        self.clear_reviews(paths)
 
         agreed = self.agreed_paths(previous)
         non_baseline = next((name for name in case.agents if name != owner), None) if owner else None
@@ -353,7 +360,7 @@ class Orchestrator:
                 self.emit("review.rejected", round_no, name, {"errors": rev.errors[:5]})
                 continue
             if paths[name]["json"].exists():
-                review_mod.write_markdown(paths[name]["json"])
+                review_mod.write_markdown(paths[name]["json"], rev.data)
             self.emit("review.validated", round_no, name,
                       {"summary": rev.summary(), "fallback": rev.fallback})
             sha, problem = self.repo.commit_all(
@@ -460,6 +467,13 @@ class Orchestrator:
             self.save()
             return "stop"
         return "next"
+
+    def clear_reviews(self, paths):
+        """A run re-started into the same run directory must not accept last run's review for
+        an agent that this time writes none: the review file is how an agent is judged done."""
+        for files in paths.values():
+            for path in files.values():
+                path.unlink(missing_ok=True)
 
     def write_patch(self, round_no, other, commit, baseline):
         target = self.run_dir / "rounds" / f"r{round_no}" / f"other-{other}.patch"
@@ -597,6 +611,7 @@ class Orchestrator:
         case = self.case
         deadline = time.time() + case.round_seconds
         warned = set()
+        blocked = set()
         lag_reported = False
         last_print = 0.0
         while any(not runs[name].state.finished for name in pending):
@@ -622,7 +637,9 @@ class Orchestrator:
                 state = runs[name].state
                 if state.finished:
                     continue
-                if state.detail.startswith("waiting:"):
+                # once: the agent thread can take a poll or two to notice the abort
+                if state.detail.startswith("waiting:") and name not in blocked:
+                    blocked.add(name)
                     self.log(f"r{round_no} {name}: blocked on a human interaction ({state.detail}); aborting", "ERROR")
                     state.error = f"blocked: {state.detail}"
                     self.emit("agent.blocked", round_no, name, {"detail": state.detail})
@@ -916,6 +933,7 @@ class Orchestrator:
 
         self.state["phase"] = f"r{round_no}-confirm"
         self.save()
+        self.clear_reviews(reviews)
         self.drive(round_no, runs, prompts, worktrees, reviews)
 
         expected = round_no
@@ -979,11 +997,22 @@ class Orchestrator:
             lines += [f"- `{path}`" for path in waived["accepted"][:200]]
         else:
             lines += ["No candidate-to-candidate differences remained at acceptance."]
-        ledger = self._last_ledger if hasattr(self, "_last_ledger") else {}
-        dropped = [item for item in (ledger.get("items") or [])]
+        # The ledger is what the baseline lacked when the round started; the owner's review says
+        # what became of each item. Only items it did not keep were dropped. Read from disk so a
+        # resumed run reports the same thing.
+        folder = self.run_dir / "reviews" / f"r{round_no}"
+        ledger = self.read_json(folder / "carry-forward.json")
+        owner = history.get("baseline_owner")
+        owner_review = self.read_json(folder / f"{owner}-review.json") if owner else {}
+        status = {entry.get("item_id"): entry.get("status")
+                  for entry in (owner_review.get("carry_forward_dispositions") or [])
+                  if isinstance(entry, dict)}
+        dropped = [item for item in (ledger.get("items") or [])
+                   if status.get(item["id"]) not in ("retained", "reoffered")]
         if dropped:
-            lines += ["", "## Unretained changes at finalization", ""]
-            lines += [f"- `{item['path']}` (+{item['added']}/-{item['removed']})" for item in dropped[:200]]
+            lines += ["", "## Carry-forward items not retained", ""]
+            lines += [f"- `{item['path']}` (+{item['added']}/-{item['removed']}): "
+                      f"{status.get(item['id']) or 'no disposition'}" for item in dropped[:200]]
         (self.run_dir / "WAIVED.md").write_text("\n".join(lines), encoding="utf-8")
 
     def push_origin(self, commit):

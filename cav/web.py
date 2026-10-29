@@ -3,6 +3,7 @@
 import collections
 import json
 import pathlib
+import re
 import secrets
 import threading
 import time
@@ -15,6 +16,7 @@ from .gitops import git
 
 HERE = pathlib.Path(__file__).resolve().parent
 INDEX = HERE / "web" / "index.html"
+REV_RE = re.compile(r"[0-9a-fA-F]{4,64}")
 
 
 class Dashboard:
@@ -194,7 +196,8 @@ class Dashboard:
                     return self._send(200, json.dumps({"diff": dashboard.diff(round_no, path)}))
                 if name == "file":
                     rev = (query.get("rev") or [""])[0]
-                    if ".." in path or path.startswith("-") or not rev:
+                    # `rev` leads the `git show` argument: a value like `--output=...` would be an option
+                    if ".." in path or path.startswith("-") or not REV_RE.fullmatch(rev):
                         return self._send(400, '{"error": "bad request"}')
                     return self._send(200, json.dumps({"content": dashboard.file_at(rev, path)}))
                 self._send(404, "{}")
@@ -208,8 +211,12 @@ class Dashboard:
                 self.end_headers()
                 deadline = time.time() + 1800
                 last = after
+                offset = 0
                 while time.time() < deadline:
-                    for event in events_mod.read(dashboard.run_dir / "events.jsonl", last):
+                    found, offset = events_mod.tail(dashboard.run_dir / "events.jsonl", offset)
+                    for event in found:
+                        if event.get("seq", 0) <= last:
+                            continue
                         last = event["seq"]
                         self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
                     self.wfile.flush()

@@ -9,7 +9,8 @@ import tokenize
 from .gitops import GIT, git
 
 C_FAMILY = {".c", ".h", ".cpp", ".hpp", ".cc", ".cs", ".js", ".ts", ".java", ".mjs", ".cjs"}
-HASH_FAMILY = {".ps1", ".sh", ".cmd", ".bat", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
+# .cmd/.bat are not here: `#` is not a comment in batch files.
+HASH_FAMILY = {".ps1", ".sh", ".yml", ".yaml", ".toml", ".ini", ".cfg"}
 BINARY_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".ico", ".pdf", ".zip", ".gz", ".sys", ".exe",
                    ".dll", ".obj", ".lib", ".pdb", ".bin", ".woff", ".woff2", ".ttf"}
 
@@ -64,7 +65,9 @@ def strip_comments(text, suffix):
                 break
             index = end + len(block[1])
             continue
-        if any(text.startswith(mark, index) for mark in line_marks):
+        # A hash-family `#` starts a comment only at a word boundary: `${#arr}` or `url#frag` is content.
+        if any(text.startswith(mark, index) for mark in line_marks) and (
+                block or index == 0 or text[index - 1].isspace()):
             end = text.find("\n", index)
             if end < 0:
                 break
@@ -101,11 +104,22 @@ def classify(name, ours, theirs, strict_paths):
         return "substantive"
     if normalize_ws(ours) == normalize_ws(theirs):
         return "formatting_candidate"
-    left = strip_comments(normalize_eol(ours).decode("utf-8", "replace"), suffix)
-    right = strip_comments(normalize_eol(theirs).decode("utf-8", "replace"), suffix)
+    ours_text = normalize_eol(ours).decode("utf-8", "replace")
+    theirs_text = normalize_eol(theirs).decode("utf-8", "replace")
+    left = strip_comments(ours_text, suffix)
+    right = strip_comments(theirs_text, suffix)
     if normalize_ws(left.encode()) == normalize_ws(right.encode()):
         return "comments_candidate"
+    # A removed comment-only line leaves a blank line behind, so an added or deleted comment
+    # line would otherwise look substantive. Blank lines are ignored only when the files really
+    # differ in comments, never for a blank-line-only change.
+    if _code_lines(left) == _code_lines(right) and _code_lines(ours_text) != _code_lines(theirs_text):
+        return "comments_candidate"
     return "substantive"
+
+
+def _code_lines(text):
+    return [line.rstrip() for line in text.split("\n") if line.strip()]
 
 
 def _entries(git_dir, tree):
@@ -167,9 +181,12 @@ def compare_trees(git_dir, tree_a, tree_b, strict_paths=()):
 
     stats = {}
     if differing:
-        out = git("--git-dir", str(git_dir), "diff", "--numstat", tree_a, tree_b, check=False)
-        for line in out.splitlines():
-            parts = line.split("\t")
+        # --no-renames: git's rename detection reports "old => new" and the stats miss both paths.
+        # -z: paths are not quoted, so non-ASCII names match the ls-tree entries.
+        out = git("--git-dir", str(git_dir), "diff", "--numstat", "--no-renames", "-z",
+                  tree_a, tree_b, check=False)
+        for record in out.split("\0"):
+            parts = record.split("\t")
             if len(parts) >= 3:
                 added = int(parts[0]) if parts[0].isdigit() else 0
                 removed = int(parts[1]) if parts[1].isdigit() else 0

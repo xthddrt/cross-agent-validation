@@ -98,6 +98,7 @@ def _shape_errors(data):
 
 def validate(data, agent, round_no, worktree, required_dispositions=()):
     errors = []
+    line_counts = {}
     worktree = pathlib.Path(worktree)
     if not isinstance(data, dict):
         return ["review is not an object"]
@@ -144,7 +145,9 @@ def validate(data, agent, round_no, worktree, required_dispositions=()):
             # A finding, and especially a refusal to approve, needs a citation the reader can open.
             errors.append(f"{label}: no line")
             continue
-        count = _line_count(target)
+        if target not in line_counts:  # many findings cite the same file; read it once
+            line_counts[target] = _line_count(target)
+        count = line_counts[target]
         try:
             line = int(line)
         except (TypeError, ValueError):
@@ -268,10 +271,15 @@ def render(data):
     return "\n".join(lines)
 
 
-def write_markdown(json_path):
-    """Render the human-readable review next to the authoritative JSON."""
+def write_markdown(json_path, data=None):
+    """Render the human-readable review next to the authoritative JSON.
+
+    Pass the validated data: it carries the counts recomputed from the findings, while the file
+    on disk still has whatever counts the agent wrote.
+    """
     json_path = pathlib.Path(json_path)
-    data = json.loads(json_path.read_text(encoding="utf-8"))
+    if data is None:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
     md_path = json_path.with_name(json_path.name.replace("-review.json", "-review.md"))
     md_path.write_text(render(data), encoding="utf-8")
     return md_path

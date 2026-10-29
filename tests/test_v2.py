@@ -196,6 +196,49 @@ class ClassificationTest(Base):
         diff = compare.compare_trees(self.repo / ".git", tree_a, tree_b)
         self.assertEqual(diff["files"]["substantive"], ["f.py"])
 
+    def test_adding_a_comment_line_is_cosmetic(self):
+        """Stripping a comment-only line leaves a blank line; that alone must not look substantive."""
+        left = self.commit("m.py", "x = 1\ny = 2\n", "left")
+        right = self.commit("m.py", "x = 1\n# explain y\ny = 2\n", "py comment line")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["comments_candidate"], ["m.py"])
+
+        left = self.commit("a.c", "int a;\nint b;\n", "c left")
+        right = self.commit("a.c", "int a;\n/* why b */\n// and more\nint b;\n", "c comment lines")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["comments_candidate"], ["a.c"])
+
+    def test_a_blank_line_only_change_stays_substantive(self):
+        left = self.commit("m.py", "x = 1\ny = 2\n", "left")
+        right = self.commit("m.py", "x = 1\n\ny = 2\n", "blank line")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["substantive"], ["m.py"])
+
+    def test_hash_is_a_comment_only_at_a_word_boundary(self):
+        left = self.commit("run.sh", "echo ${#items[@]}  # count\n", "sh left")
+        right = self.commit("run.sh", "echo ${#items[*]}  # count\n", "sh right")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["substantive"], ["run.sh"], "`${#` is not a comment")
+
+        left = self.commit("run.sh", "x=1  # old\n", "sh comment a")
+        right = self.commit("run.sh", "x=1  # new\n", "sh comment b")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["comments_candidate"], ["run.sh"])
+
+        left = self.commit("build.cmd", "echo # 1\n", "cmd left")
+        right = self.commit("build.cmd", "echo # 2\n", "cmd right")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["files"]["substantive"], ["build.cmd"], "`#` is not a batch comment")
+
+    def test_stats_cover_renamed_and_non_ascii_paths(self):
+        left = self.commit("old_name.txt", "same line\n" * 5, "left")
+        git("mv", "old_name.txt", "new_name.txt", cwd=self.repo)
+        right = self.commit("café.txt", "x\n", "rename and add")
+        diff = compare.compare_trees(self.repo / ".git", *self.trees(left, right))
+        self.assertEqual(diff["stats"]["old_name.txt"], {"added": 0, "removed": 5})
+        self.assertEqual(diff["stats"]["new_name.txt"], {"added": 5, "removed": 0})
+        self.assertEqual(diff["stats"]["café.txt"], {"added": 1, "removed": 0})
+
     def test_strict_paths_are_never_cosmetic(self):
         left = self.commit("x.h", "#define A 1\n", "left")
         right = self.commit("x.h", "#define  A 1   \n", "formatting")
@@ -453,6 +496,35 @@ class AcceptanceTest(Base):
         self.assertEqual(state["phase"], "converged")
         self.assertEqual(state["final"]["verdict"], "functional")
 
+    def test_a_review_left_by_an_interrupted_run_is_not_accepted(self):
+        """Resuming after a run died mid-round restarts that round: an old review is not a result."""
+        stale = self.tmp / "run" / "reviews" / "r1" / "kimi-review.json"
+        stale.parent.mkdir(parents=True)
+        stale.write_text(json.dumps({
+            "round": 1, "agent": "kimi", "behavior_approved": True, "other_behavior_approved": True,
+            "counts": {"must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
+            "findings": []}), encoding="utf-8")
+        fakes = {
+            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
+            "kimi": FlakyFake("kimi", lambda r: {"shared.txt": "same\n"}, skip_rounds={1}),
+        }
+        with self.assertRaises(RuntimeError):
+            self.run_with(self.case(max_rounds=1), fakes)
+
+    def test_retained_carry_forward_items_are_not_reported_as_dropped(self):
+        (self.repo / "shared.txt").write_bytes(b"kimi candidate\n")
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", "kimi candidate", cwd=self.repo)
+        kimi_ref = git("rev-parse", "HEAD", cwd=self.repo)
+        deepseek = StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"},
+                                  dispositions=[{"item_id": "CF-01", "status": "retained", "why": "kept"}])
+        kimi = StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"})
+        case = self.case(max_rounds=1, carry_forward_limit=5)
+        case.agents["kimi"].bootstrap_ref = kimi_ref
+        orchestrator, state = self.run_with(case, {"deepseek": deepseek, "kimi": kimi})
+        self.assertEqual(state["phase"], "converged")
+        self.assertNotIn("not retained", (orchestrator.run_dir / "WAIVED.md").read_text(encoding="utf-8"))
+
     def test_solve_bootstraps_both_agents_from_base(self):
         fakes = {
             "deepseek": StructuredFake("deepseek", lambda r: {"task.txt": "impl\n"}),
@@ -640,6 +712,27 @@ class EventsTest(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+    def test_tail_reads_only_new_complete_lines(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-events-"))
+        try:
+            path = tmp / "events.jsonl"
+            events.EventWriter(path, "run").emit("one", 1, None, {})
+            found, offset = events.tail(path)
+            self.assertEqual([item["type"] for item in found], ["one"])
+            with open(path, "a", encoding="utf-8", newline="\n") as handle:
+                handle.write('{"seq": 2, "type": "half')
+            found, after = events.tail(path, offset)
+            self.assertEqual((found, after), ([], offset), "a partial line waits for the next call")
+            with open(path, "a", encoding="utf-8", newline="\n") as handle:
+                handle.write('"}\n')
+            found, after = events.tail(path, offset)
+            self.assertEqual([item["type"] for item in found], ["half"])
+            path.write_text("", encoding="utf-8")
+            self.assertEqual(events.tail(path, after), ([], 0), "a rotated log starts over")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class KimiBlockingTest(unittest.TestCase):
     def agent(self):
         return agent_mod.KimiAgent(config.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro"),
@@ -727,6 +820,9 @@ class DashboardTest(unittest.TestCase):
                     self.assertEqual(len(json.loads(response.read())), 1)
                 with self.assertRaises(urllib.error.HTTPError):
                     urllib.request.urlopen(f"http://127.0.0.1:{port}/wrong/api/state", timeout=5)
+                with self.assertRaises(urllib.error.HTTPError) as caught:
+                    urllib.request.urlopen(base + "/api/file?rev=--output=x&path=a.txt", timeout=5)
+                self.assertEqual(caught.exception.code, 400, "an option-shaped rev is refused")
             finally:
                 server.shutdown()
                 server.server_close()
