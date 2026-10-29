@@ -6,134 +6,135 @@
 <style>
   :root { --bg:#0e1013; --panel:#16191d; --line:#262b31; --fg:#e9edf1; --dim:#8b949e;
           --ok:#3fb950; --warn:#d29922; --bad:#f85149; --accent:#58a6ff; }
-  * { box-sizing: border-box; }
-  html, body { height: 100%; }
+  * { box-sizing:border-box; }
+  html, body { height:100%; }
   body { margin:0; background:var(--bg); color:var(--fg); display:flex; flex-direction:column;
-         font:16px/1.55 -apple-system, "Segoe UI", Roboto, sans-serif; }
-  header { padding:16px 22px 10px; border-bottom:1px solid var(--line); }
+         font:16px/1.6 -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding:14px 22px 8px; border-bottom:1px solid var(--line); }
   .top { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; }
-  h1 { font-size:22px; margin:0; font-weight:650; letter-spacing:-0.01em; }
+  h1 { font-size:21px; margin:0; font-weight:650; }
   .meta { color:var(--dim); font-size:15px; }
-  .pills { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
-  .pill { font-size:14px; padding:3px 11px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
+  .pills { display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }
+  .pill { font-size:14px; padding:2px 11px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
   .pill b { color:var(--fg); font-weight:600; }
   .pill.ok { border-color:var(--ok); color:var(--ok); }
   .pill.bad { border-color:var(--bad); color:var(--bad); }
   .pill.warn { border-color:var(--warn); color:var(--warn); }
 
-  nav { display:flex; gap:8px; padding:12px 22px; border-bottom:1px solid var(--line); overflow-x:auto; }
-  nav button { font:inherit; font-size:15px; padding:6px 14px; border-radius:8px; cursor:pointer;
+  nav { display:flex; gap:8px; padding:10px 22px; border-bottom:1px solid var(--line); overflow-x:auto; }
+  nav button { font:inherit; font-size:15px; padding:5px 14px; border-radius:8px; cursor:pointer;
                background:transparent; color:var(--dim); border:1px solid var(--line); white-space:nowrap; }
-  nav button:hover { color:var(--fg); }
   nav button.on { background:#1d242c; color:var(--fg); border-color:var(--accent); }
 
-  main { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:16px 22px 22px; min-height:0; }
+  main { flex:1; display:grid; grid-template-columns:1fr 1fr; gap:16px; padding:14px 22px; min-height:0; }
   .agent { background:var(--panel); border:1px solid var(--line); border-radius:10px;
            display:flex; flex-direction:column; min-height:0; }
-  .ahead { display:flex; align-items:center; justify-content:space-between; padding:12px 16px 8px; }
+  .ahead { padding:12px 16px 6px; }
+  .arow { display:flex; align-items:center; justify-content:space-between; gap:10px; }
   .ahead h2 { font-size:18px; margin:0; font-weight:650; }
-  .state { font-size:14px; padding:2px 10px; border-radius:999px; border:1px solid var(--line); }
+  .state { font-size:14px; padding:1px 10px; border-radius:999px; border:1px solid var(--line); color:var(--dim); }
   .state.run { color:var(--warn); border-color:var(--warn); }
   .state.done { color:var(--ok); border-color:var(--ok); }
   .state.err { color:var(--bad); border-color:var(--bad); }
-  .act { padding:0 16px 10px; color:var(--dim); font-size:14px; min-height:21px; }
+  .act { color:var(--dim); font-size:14px; margin-top:4px; min-height:22px; }
   .act b { color:var(--accent); font-weight:600; }
-  .msgs { flex:1; overflow-y:auto; padding:6px 16px 16px; display:flex; flex-direction:column; gap:10px; }
-  .msg { background:#11151a; border:1px solid #1f252c; border-radius:8px; padding:9px 12px;
-         white-space:pre-wrap; word-break:break-word; font-size:15px; line-height:1.55; }
-  .msg .t { display:block; color:#5c6773; font-size:12px; margin-bottom:3px; letter-spacing:.02em; }
+
+  .log { flex:1; overflow-y:auto; padding:10px 16px 18px; display:flex; flex-direction:column; gap:10px; }
+  .turn { border-radius:10px; padding:10px 13px; white-space:pre-wrap; word-break:break-word; font-size:15.5px; }
+  .turn .who { display:block; font-size:12px; letter-spacing:.04em; text-transform:uppercase;
+               color:#67707a; margin-bottom:4px; }
+  .agent-turn { background:#11151a; border:1px solid #202730; }
+  .prompt-turn { background:#0f1318; border:1px dashed #2b333c; }
+  .prompt-turn pre { margin:8px 0 0; font-size:13.5px; line-height:1.55; color:#c3cbd3;
+                     white-space:pre-wrap; max-height:340px; overflow:auto; }
+  .prompt-turn summary { cursor:pointer; color:var(--dim); font-size:14px; }
+  .tool { color:#6d7783; font-size:13.5px; padding-left:12px; border-left:2px solid #232a32;
+          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .empty { color:var(--dim); font-size:14px; font-style:italic; }
 
-  .wide { grid-column:1 / -1; background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px 16px; }
-  .wide h2 { font-size:14px; text-transform:uppercase; letter-spacing:.08em; color:var(--dim); margin:0 0 10px; }
-  .totals { font-size:15px; color:var(--dim); margin-bottom:10px; }
-  .totals b { color:var(--fg); }
-  .files { list-style:none; margin:0; padding:0; max-height:170px; overflow:auto; }
-  .files li { padding:4px 0; cursor:pointer; font-size:14px; display:flex; gap:10px; align-items:baseline; }
+  footer { border-top:1px solid var(--line); padding:10px 22px 14px; }
+  #diffbar { width:100%; text-align:left; font:inherit; font-size:15px; color:var(--dim);
+             background:transparent; border:0; cursor:pointer; padding:4px 0; }
+  #diffbar b { color:var(--fg); }
+  #diffbar .chev { float:right; color:var(--dim); }
+  #diffbody { margin-top:8px; }
+  .files { list-style:none; margin:0; padding:0; max-height:150px; overflow:auto; }
+  .files li { padding:3px 0; cursor:pointer; font-size:14px; display:flex; gap:10px; align-items:baseline; }
   .files li:hover .path { color:var(--accent); }
-  .cls { font-size:12px; padding:1px 7px; border-radius:5px; border:1px solid var(--line); color:var(--dim); min-width:78px; text-align:center; }
+  .cls { font-size:12px; padding:1px 7px; border-radius:5px; border:1px solid var(--line);
+         color:var(--dim); min-width:76px; text-align:center; }
   .cls.substantive { color:var(--bad); border-color:var(--bad); }
-  .cls.comments_candidate { color:var(--warn); border-color:var(--warn); }
-  pre { background:#0b0e11; border:1px solid var(--line); border-radius:8px; padding:12px;
-        overflow:auto; max-height:340px; margin:12px 0 0; font-size:13px; line-height:1.5; }
+  .cls.comments { color:var(--warn); border-color:var(--warn); }
+  pre.diff { background:#0b0e11; border:1px solid var(--line); border-radius:8px; padding:12px;
+             overflow:auto; max-height:320px; margin:10px 0 0; font-size:13px; line-height:1.5; }
 </style>
 </head>
 <body>
 <header>
-  <div class="top">
-    <h1 id="case">CAV</h1>
-    <span class="meta" id="meta"></span>
-  </div>
+  <div class="top"><h1 id="case">CAV</h1><span class="meta" id="meta"></span></div>
   <div class="pills" id="pills"></div>
 </header>
 <nav id="rounds"></nav>
 <main>
-  <section class="agent" id="agent0">
-    <div class="ahead"><h2 id="name0">—</h2><span class="state" id="state0"></span></div>
-    <div class="act" id="act0"></div>
-    <div class="msgs" id="msgs0"></div>
+  <section class="agent">
+    <div class="ahead"><div class="arow"><h2 id="name0">—</h2><span class="state" id="state0"></span></div>
+      <div class="act" id="act0"></div></div>
+    <div class="log" id="log0"></div>
   </section>
-  <section class="agent" id="agent1">
-    <div class="ahead"><h2 id="name1">—</h2><span class="state" id="state1"></span></div>
-    <div class="act" id="act1"></div>
-    <div class="msgs" id="msgs1"></div>
-  </section>
-  <section class="wide">
-    <h2>What they disagree on <span class="meta" id="diffround"></span></h2>
-    <div class="totals" id="totals"></div>
-    <ul class="files" id="files"></ul>
-    <pre id="diff" hidden></pre>
+  <section class="agent">
+    <div class="ahead"><div class="arow"><h2 id="name1">—</h2><span class="state" id="state1"></span></div>
+      <div class="act" id="act1"></div></div>
+    <div class="log" id="log1"></div>
   </section>
 </main>
+<footer>
+  <button id="diffbar" aria-expanded="false">loading differences…<span class="chev">▾</span></button>
+  <div id="diffbody" hidden>
+    <ul class="files" id="files"></ul>
+    <pre class="diff" id="diff" hidden></pre>
+  </div>
+</footer>
 
 <script>
 const TOKEN = location.pathname.split('/').filter(Boolean)[0];
 const esc = (s) => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const clone = (o) => JSON.parse(JSON.stringify(o || {}));
-
-let state = {};
-let selected = null;          // selected round number
-let agents = [];
-let lastSeq = 0;
-const seen = {};              // agent -> highest message seq rendered
+let state = {}, selected = null, agents = [], lastSeq = 0, lastHistory = -1;
+const seen = {};
 
 const getJSON = async (url) => {
   try { const r = await fetch(url, {cache:'no-store'}); return await r.json(); }
   catch (e) { return null; }
 };
+const atBottom = (el) => el.scrollHeight - el.scrollTop - el.clientHeight < 60;
 
-function roundData(n) {
-  return (state.history || []).find(h => h.round === n) || null;
-}
+function roundData(n) { return (state.history || []).find(h => h.round === n) || null; }
 
 function pills() {
-  const b = state.blockers || {};
-  const out = [];
+  const b = state.blockers || {}, out = [];
   const v = b.verdict || state.phase;
   out.push(`<span class="pill ${v === 'functional' || v === 'strict' ? 'ok' : 'warn'}"><b>${esc(v || '—')}</b></span>`);
   if (b.checks !== undefined)
     out.push(`<span class="pill ${b.checks ? 'ok' : 'bad'}">checks <b>${b.checks ? 'pass' : 'fail'}</b></span>`);
   if (b.blocking_must_fix !== undefined)
     out.push(`<span class="pill ${b.blocking_must_fix ? 'bad' : 'ok'}">blocking <b>${b.blocking_must_fix}</b></span>`);
-  const appr = (b.behaviour_approved || []);
-  if (appr.length)
-    out.push(`<span class="pill ${appr.every(Boolean) ? 'ok' : 'warn'}">approved <b>${appr.filter(Boolean).length}/${appr.length}</b></span>`);
+  const a = b.behaviour_approved || [];
+  if (a.length)
+    out.push(`<span class="pill ${a.every(Boolean) ? 'ok' : 'warn'}">approved <b>${a.filter(Boolean).length}/${a.length}</b></span>`);
   document.getElementById('pills').innerHTML = out.join('');
 }
 
 function rounds() {
   const nav = document.getElementById('rounds');
-  const numbers = (state.history || []).map(h => h.round);
-  if (state.round && !numbers.includes(state.round)) numbers.push(state.round);
-  if (!numbers.length) { nav.innerHTML = ''; return; }
-  if (selected === null || !numbers.includes(selected))
-    selected = state.round && numbers.includes(state.round) ? state.round : numbers[numbers.length - 1];
-  nav.innerHTML = numbers.map(n => {
+  const nums = (state.history || []).map(h => h.round);
+  if (state.round && !nums.includes(state.round)) nums.push(state.round);
+  if (!nums.length) { nav.innerHTML = ''; return; }
+  if (selected === null || !nums.includes(selected))
+    selected = (state.round && nums.includes(state.round)) ? state.round : nums[nums.length - 1];
+  nav.innerHTML = nums.map(n => {
     const d = roundData(n);
-    const v = d ? (d.verdict || 'failed') : 'running';
     const live = n === state.round && state.phase !== 'converged';
-    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}">Round ${n}` +
-           `<span class="meta"> · ${esc(live ? 'running' : v)}</span></button>`;
+    const label = live ? 'running' : (d ? (d.verdict || 'failed') : '—');
+    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}">Round ${n}<span class="meta"> · ${esc(label)}</span></button>`;
   }).join('');
   nav.querySelectorAll('button').forEach(b => b.onclick = () => selectRound(+b.dataset.r));
 }
@@ -141,100 +142,114 @@ function rounds() {
 function selectRound(n) {
   if (n === selected) return;
   selected = n;
-  for (const a of agents) { seen[a] = 0; document.getElementById('msgs' + agents.indexOf(a)).innerHTML = ''; }
+  for (const a of agents) seen[a] = 0;
   document.getElementById('diff').hidden = true;
-  document.getElementById('files').innerHTML = '';
-  rounds(); renderAgents(); loadDiff(); loadMessages();
-}
-
-function agentCard(i, name) {
-  const live = selected === state.round && state.phase !== 'converged';
-  const hist = roundData(selected);
-  const res = hist && hist.results ? hist.results[name] : null;
-  const a = live ? (state.agents || {})[name] : null;
-  document.getElementById('name' + i).textContent = name;
-  const st = document.getElementById('state' + i);
-  if (a) {
-    st.textContent = a.state || '—';
-    st.className = 'state ' + (a.state === 'done' ? 'done' : a.error ? 'err' : 'run');
-    const act = [a.detail, a.elapsed !== undefined ? `${a.elapsed}s` : ''].filter(Boolean).join(' · ');
-    document.getElementById('act' + i).innerHTML = `<b>${esc(a.detail || '')}</b> ${a.elapsed !== undefined ? esc(a.elapsed + 's elapsed') : ''}`
-      + (a.error ? ` — <span style="color:var(--bad)">${esc(a.error)}</span>` : '');
-  } else if (res) {
-    st.textContent = 'finished';
-    st.className = 'state done';
-    document.getElementById('act' + i).innerHTML =
-      `commit <b>${esc(String(res.commit || '').slice(0, 10))}</b> · blocking ${res.blocking} · approved ${res.approved}/${res.other_approved}`;
-  } else {
-    st.textContent = '—'; st.className = 'state';
-    document.getElementById('act' + i).textContent = '';
-  }
+  rounds(); renderAgents(); loadTranscript(); loadDiff();
 }
 
 function renderAgents() {
   agents = Object.keys(state.agents || {});
-  if (!agents.length) {
-    const h = roundData(selected);
-    if (h && h.results) agents = Object.keys(h.results);
-  }
+  if (!agents.length) { const h = roundData(selected); if (h && h.results) agents = Object.keys(h.results); }
   while (agents.length < 2) agents.push(agents.length ? 'agent 2' : 'agent 1');
-  agentCard(0, agents[0]); agentCard(1, agents[1]);
-}
-
-function addMessage(i, msg) {
-  const box = document.getElementById('msgs' + i);
-  const nearBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-  const div = document.createElement('div');
-  div.className = 'msg';
-  div.innerHTML = `<span class="t">${esc((msg.ts || '').slice(11, 19))}</span>${esc(msg.text)}`;
-  box.appendChild(div);
-  while (box.childElementCount > 400) box.firstChild.remove();
-  if (nearBottom) box.scrollTop = box.scrollHeight;
-}
-
-async function loadMessages() {
   for (let i = 0; i < 2; i++) {
     const name = agents[i];
-    const box = document.getElementById('msgs' + i);
-    box.innerHTML = '';
-    const list = await getJSON(`/${TOKEN}/api/messages?round=${selected}&agent=${encodeURIComponent(name)}`);
-    if (!Array.isArray(list) || !list.length) {
-      box.innerHTML = '<div class="empty">no messages yet</div>';
-      seen[name] = 0;
-      continue;
+    const live = selected === state.round && state.phase !== 'converged';
+    const hist = roundData(selected);
+    const res = hist && hist.results ? hist.results[name] : null;
+    const a = live ? (state.agents || {})[name] : null;
+    document.getElementById('name' + i).textContent = name;
+    const st = document.getElementById('state' + i);
+    if (a) {
+      st.textContent = a.state || '—';
+      st.className = 'state ' + (a.state === 'done' ? 'done' : a.error ? 'err' : 'run');
+      document.getElementById('act' + i).innerHTML =
+        `<b>${esc(a.detail || '')}</b>${a.elapsed !== undefined ? ' · ' + esc(a.elapsed + 's') : ''}` +
+        (a.error ? ` — <span style="color:var(--bad)">${esc(a.error)}</span>` : '');
+    } else if (res) {
+      st.textContent = 'finished'; st.className = 'state done';
+      document.getElementById('act' + i).innerHTML =
+        `commit <b>${esc(String(res.commit || '').slice(0, 10))}</b> · blocking ${res.blocking} · ` +
+        `approved ${res.approved ? 'yes' : 'no'}/${res.other_approved ? 'yes' : 'no'}`;
+    } else {
+      st.textContent = '—'; st.className = 'state';
+      document.getElementById('act' + i).textContent = '';
     }
-    box.innerHTML = '';
+  }
+}
+
+function addText(i, name, item) {
+  const log = document.getElementById('log' + i);
+  const near = atBottom(log);
+  const div = document.createElement('div');
+  div.className = 'turn agent-turn';
+  const stamp = (item.ts || '').slice(11, 19);
+  div.innerHTML = `<span class="who">${esc(name)}${stamp ? ' · ' + esc(stamp) : ''}</span>${esc(item.text)}`;
+  log.appendChild(div);
+  if (near) log.scrollTop = log.scrollHeight;
+}
+
+function addTool(i, item) {
+  const log = document.getElementById('log' + i);
+  const near = atBottom(log);
+  const div = document.createElement('div');
+  div.className = 'tool';
+  div.textContent = '↳ ' + item.text;
+  log.appendChild(div);
+  if (near) log.scrollTop = log.scrollHeight;
+}
+
+async function loadTranscript() {
+  for (let i = 0; i < 2; i++) {
+    const name = agents[i];
+    const log = document.getElementById('log' + i);
+    log.innerHTML = '';
+    const [prompt, items] = await Promise.all([
+      getJSON(`/${TOKEN}/api/prompt?round=${selected}&agent=${encodeURIComponent(name)}`),
+      getJSON(`/${TOKEN}/api/messages?round=${selected}&agent=${encodeURIComponent(name)}`),
+    ]);
+    if (prompt && prompt.prompt) {
+      const box = document.createElement('details');
+      box.className = 'turn prompt-turn';
+      box.innerHTML = `<summary>Prompt sent to ${esc(name)} · round ${selected}</summary>` +
+                      `<pre>${esc(prompt.prompt)}</pre>`;
+      log.appendChild(box);
+    }
     let max = 0;
-    for (const m of list) { addMessage(i, m); max = Math.max(max, m.seq || 0); }
+    for (const item of (Array.isArray(items) ? items : [])) {
+      if (item.kind === 'tool') addTool(i, item); else addText(i, name, item);
+      max = Math.max(max, item.seq || 0);
+    }
     seen[name] = max;
-    box.scrollTop = box.scrollHeight;
+    if (!log.querySelector('.turn, .tool')) log.innerHTML = '<div class="empty">no messages yet</div>';
+    log.scrollTop = log.scrollHeight;
   }
 }
 
 async function loadDiff() {
   const d = await getJSON(`/${TOKEN}/api/divergence?round=${selected}`);
-  const files = (d && d.files) || {};
-  const t = (d && d.totals) || {};
-  document.getElementById('diffround').textContent = `round ${selected}`;
+  const f = (d && d.files) || {}, t = (d && d.totals) || {};
+  const bar = document.getElementById('diffbar');
   if (!t.identical && !t.substantive && !t.comments_candidate && !t.formatting_candidate) {
-    document.getElementById('totals').textContent = 'not computed yet for this round';
+    bar.innerHTML = `Round ${selected}: differences not computed yet<span class="chev">▾</span>`;
     document.getElementById('files').innerHTML = '';
     return;
   }
-  document.getElementById('totals').innerHTML =
-    `<b>${t.substantive || 0}</b> substantive · ${t.comments_candidate || 0} comment-only · ` +
-    `${t.formatting_candidate || 0} formatting-only · <b>${t.identical || 0}</b> identical`;
-  const order = ['substantive', 'binary', 'comments_candidate', 'formatting_candidate'];
+  const differing = (t.substantive || 0) + (t.comments_candidate || 0) + (t.formatting_candidate || 0) + (t.binary || 0);
+  bar.innerHTML = `<b>${t.substantive || 0}</b> substantive · ${differing} differing · ` +
+                  `<b>${t.identical || 0}</b> identical in round ${selected}<span class="chev">▾</span>`;
   const rows = [];
-  for (const cls of order) for (const p of (files[cls] || [])) rows.push({cls, p});
+  for (const cls of ['substantive', 'binary', 'comments_candidate', 'formatting_candidate'])
+    for (const p of (f[cls] || [])) rows.push({cls, p});
   document.getElementById('files').innerHTML = rows.length ? rows.map(r =>
-    `<li data-p="${esc(r.p)}"><span class="cls ${r.cls}">${esc(r.cls.replace('_candidate',''))}</span><span class="path">${esc(r.p)}</span></li>`
-  ).join('') : '<li class="empty">the two candidates are identical</li>';
+    `<li data-p="${esc(r.p)}"><span class="cls ${esc(r.cls.split('_')[0])}">${esc(r.cls.replace('_candidate',''))}</span>` +
+    `<span class="path">${esc(r.p)}</span></li>`).join('')
+    : '<li class="empty">the two candidates are identical</li>';
   document.querySelectorAll('#files li[data-p]').forEach(li => li.onclick = async () => {
     const body = await getJSON(`/${TOKEN}/api/diff?round=${selected}&path=${encodeURIComponent(li.dataset.p)}`);
     const pre = document.getElementById('diff');
-    pre.hidden = false;
-    pre.textContent = (body && body.diff) || '(no diff)';
+    pre.hidden = false; pre.textContent = (body && body.diff) || '(no diff)';
+    document.getElementById('diffbody').hidden = false;
+    bar.setAttribute('aria-expanded', 'true');
   });
 }
 
@@ -244,21 +259,26 @@ function connect() {
   es.onmessage = (m) => {
     let e; try { e = JSON.parse(m.data); } catch (x) { return; }
     lastSeq = Math.max(lastSeq, e.seq || 0);
-    const text = (e.data && e.data.text) || '';
-    if (e.type === 'agent.text' && e.round === selected && e.agent && text.trim()) {
-      const i = agents.indexOf(e.agent);
-      if (i >= 0 && (e.seq || 0) > (seen[e.agent] || 0)) {
-        seen[e.agent] = e.seq;
-        const box = document.getElementById('msgs' + i);
-        if (box.querySelector('.empty')) box.innerHTML = '';
-        addMessage(i, {ts: e.ts, text});
-      }
+    if (e.round !== selected || !e.agent) return;
+    const i = agents.indexOf(e.agent);
+    if (i < 0 || (e.seq || 0) <= (seen[e.agent] || 0)) return;
+    const data = e.data || {};
+    if (e.type === 'agent.text' && (data.text || '').trim()) {
+      seen[e.agent] = e.seq;
+      addText(i, e.agent, {ts: e.ts, text: data.text});
+    } else if (e.type === 'agent.tool.start') {
+      seen[e.agent] = e.seq;
+      const given = data.input || {};
+      let target = '';
+      if (typeof given === 'object')
+        for (const k of ['command', 'filePath', 'path', 'pattern', 'description', 'query'])
+          if (given[k]) { target = String(given[k]); break; }
+      addTool(i, {text: `${data.tool || 'tool'} ${target}`.slice(0, 160)});
     }
   };
   es.onerror = () => { es.close(); setTimeout(connect, 3000); };
 }
 
-let lastHistory = -1;
 async function refresh() {
   const next = await getJSON(`/${TOKEN}/api/state`);
   if (!next) return;
@@ -267,22 +287,26 @@ async function refresh() {
   state = next;
   document.getElementById('case').textContent = state.case || 'CAV';
   document.getElementById('meta').textContent =
-    `round ${state.round ?? '—'} of ${(state.history || []).length || '—'} · ${state.phase || ''}` +
+    `round ${state.round ?? '—'} · ${state.phase || ''}` +
     (state.final ? ` · final ${String(state.final.commit).slice(0, 10)}` : '');
-  const movedRound = followLive && prevRound !== undefined && state.round !== prevRound;
-  if (movedRound) selected = state.round;
+  const moved = followLive && prevRound !== undefined && state.round !== prevRound;
+  if (moved) selected = state.round;
   pills(); rounds(); renderAgents();
-  const historyLen = (state.history || []).length;
-  if (movedRound) { loadMessages(); loadDiff(); }
-  else if (historyLen !== lastHistory) loadDiff();
-  lastHistory = historyLen;
+  const len = (state.history || []).length;
+  if (moved) { loadTranscript(); loadDiff(); }
+  else if (len !== lastHistory) loadDiff();
+  lastHistory = len;
 }
+
+document.getElementById('diffbar').onclick = () => {
+  const body = document.getElementById('diffbody');
+  body.hidden = !body.hidden;
+  document.getElementById('diffbar').setAttribute('aria-expanded', String(!body.hidden));
+};
 
 (async function start() {
   await refresh();
-  loadDiff();
-  loadMessages();
-  connect();
+  loadTranscript(); loadDiff(); connect();
   setInterval(refresh, 2000);
 })();
 </script>

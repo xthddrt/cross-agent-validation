@@ -603,6 +603,16 @@ class EventsTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_agent_messages_are_not_truncated(self):
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-events-"))
+        try:
+            writer = events.EventWriter(tmp / "events.jsonl", "run")
+            writer.emit("agent.text", 1, "kimi", {"text": "x" * 9000})
+            payload = events.read(tmp / "events.jsonl", 0)
+            self.assertEqual(len(payload[0]["data"]["text"]), 9000)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class KimiBlockingTest(unittest.TestCase):
     def agent(self):
@@ -659,12 +669,14 @@ class DashboardTest(unittest.TestCase):
                 {"seq": 3, "ts": "t", "round": 2, "agent": "deepseek", "type": "agent.text",
                  "data": {"text": "three"}},
                 {"seq": 4, "ts": "t", "round": 1, "agent": "deepseek", "type": "agent.tool.start",
-                 "data": {}},
+                 "data": {"tool": "Bash", "input": {"command": "git status"}}},
             ]
             (tmp / "events.jsonl").write_text(
                 "\n".join(json.dumps(row) for row in rows), encoding="utf-8")
             dashboard = Dashboard(tmp, port=0)
-            self.assertEqual([m["text"] for m in dashboard.messages(1, "deepseek")], ["one"])
+            items = dashboard.messages(1, "deepseek")
+            self.assertEqual([(m["kind"], m["text"]) for m in items],
+                             [("text", "one"), ("tool", "Bash git status")])
             self.assertEqual([m["text"] for m in dashboard.messages(2, "deepseek")], ["three"])
             self.assertEqual([m["text"] for m in dashboard.messages(1, "kimi")], ["two"])
         finally:

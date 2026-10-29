@@ -7,6 +7,8 @@ import threading
 import time
 
 MAX_FIELD = 4096
+MAX_TEXT_FIELD = 200_000  # agent messages are read whole by a human; do not truncate them
+TEXT_TYPES = ("agent.text", "agent.thinking")
 ROTATE_BYTES = 64 * 1024 * 1024
 _BEARER = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._\-]{8,}")
 _SECRET = re.compile(
@@ -83,7 +85,7 @@ class EventWriter:
                 "round": round,
                 "agent": agent,
                 "type": type_,
-                "data": clip(data or {}),
+                "data": clip(data or {}, MAX_TEXT_FIELD if type_ in TEXT_TYPES else MAX_FIELD),
             }
             with open(self.path, "a", encoding="utf-8") as handle:
                 handle.write(json.dumps(event, sort_keys=False) + "\n")

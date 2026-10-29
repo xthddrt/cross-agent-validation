@@ -64,8 +64,8 @@ class Dashboard:
         exchange = self.run_dir / "exchange.git"
         return git("--git-dir", str(exchange), "show", f"{rev}:{file_path}", check=False)[:400000]
 
-    def messages(self, round_no, agent, limit=300):
-        """The agents' own messages for one round: the most useful live signal there is.
+    def messages(self, round_no, agent, limit=400):
+        """One agent's round as a transcript: what it said, plus one line per tool call.
 
         Scanned from the event log rather than held in memory, so a dashboard can attach to a
         finished run without the orchestrator still being alive.
@@ -76,20 +76,37 @@ class Dashboard:
             return []
         with open(path, encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                if '"agent.text"' not in line:
+                if '"agent.text"' not in line and '"agent.tool.start"' not in line:
                     continue
                 try:
                     event = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                if event.get("type") != "agent.text":
-                    continue
                 if event.get("round") != round_no or event.get("agent") != agent:
                     continue
-                text = (event.get("data") or {}).get("text") or ""
-                if text.strip():
-                    out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""), "text": text})
+                kind = event.get("type")
+                data = event.get("data") or {}
+                if kind == "agent.text":
+                    text = data.get("text") or ""
+                    if text.strip():
+                        out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""),
+                                    "kind": "text", "text": text})
+                elif kind == "agent.tool.start":
+                    tool = data.get("tool") or "tool"
+                    given = data.get("input") or {}
+                    target = ""
+                    if isinstance(given, dict):
+                        for key in ("command", "filePath", "path", "pattern", "description", "query"):
+                            if given.get(key):
+                                target = str(given[key])
+                                break
+                    line_text = f"{tool} {target}".strip()
+                    out.append({"seq": event.get("seq", 0), "ts": event.get("ts", ""),
+                                "kind": "tool", "text": line_text[:160]})
         return list(out)
+
+    def prompt(self, round_no, agent):
+        return self.artifact("rounds", f"r{round_no}", f"{agent}-context.md") or ""
 
     # ----------------------------------------------------------------- server
 
@@ -167,8 +184,10 @@ class Dashboard:
                     body = dashboard.artifact("checks", f"r{round_no}", f"{agent}.json")
                     return self._send(200, body or "{}")
                 if name == "messages":
-                    limit = int((query.get("limit") or ["300"])[0])
+                    limit = int((query.get("limit") or ["400"])[0])
                     return self._send(200, json.dumps(dashboard.messages(round_no, agent, limit)))
+                if name == "prompt":
+                    return self._send(200, json.dumps({"prompt": dashboard.prompt(round_no, agent)}))
                 if name == "diff":
                     if ".." in path or path.startswith("-"):
                         return self._send(400, '{"error": "bad path"}')
