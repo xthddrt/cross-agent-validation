@@ -4,9 +4,9 @@ Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) turn one task, o
 
 ```
 judge   both, blind and separately: approve or reject each of the two candidates (a rejection needs a
-        defect), name the one they would keep, and write a plan (≤400 words) whose first line names
+        defect), name the one they would keep, and write a plan (≤500 words) whose first line names
         the candidate to build on. A candidate both approve, with passing checks, is the result.
-plan    with no candidates yet (a task on a repo): both write a plan (≤400 words), separately
+plan    with no candidates yet (a task on a repo): both write a plan (≤500 words), separately
 agree   both approve or reject each of the two plans (a rejection needs a missed acceptance criterion
         or a reason it would not work, ≤100 words). A plan both approve is the plan; otherwise the
         plan both would keep, else a coin flip.
@@ -18,7 +18,7 @@ publish a candidate both approve; after 3 builds, the one both would keep (a spl
 
 Approval moves things forward, not preference: a candidate or plan both agents approve wins, even if each would rather keep the other one. Preference only breaks a deadlock.
 
-**No bias toward either side.** No prompt names an agent or says whose anything is. Candidates are **Candidate X** and **Candidate Y**, relabelled at random every round and read from plain folders exported without `.git` (so no branch name, author or commit message); plans and reviews are numbered at random; candidates are listed in random order; and every step runs in a **fresh session**, so no agent remembers what it wrote. Nobody keeps a tree of their own: both builds start from the one agreed base. Plans are Pareto: the few changes that deliver most of the result, meeting the acceptance criteria and nothing beyond.
+**No bias toward either side.** No prompt names an agent or says whose anything is. Candidates are **Candidate X** and **Candidate Y**, relabelled at random every round and read from plain folders exported without `.git` (so no branch name, author or commit message); plans and reviews are numbered at random; candidates are listed in random order; and every step runs in a **fresh session**, so no agent remembers what it wrote. Nobody keeps a tree of their own: both builds start from the one agreed base. Everything an agent reads or writes sits in a **blind area** outside every git repo (`%LOCALAPPDATA%\cav-blind\<random>`, or `CAV_BLIND_ROOT`): plain folders only, so `git log` there finds nothing, and none of the run's bookkeeping (`state.json`, which records who wrote what). Builds are plain copies too; CAV commits them itself. Plans are Pareto: the few changes that deliver most of the result, meeting the acceptance criteria and nothing beyond.
 
 **Two branches to reconcile** (`--branch A --branch B`, or the two fields on the dashboard form) start at judge, since one may already be acceptable to both.
 

@@ -258,6 +258,11 @@ class Home(Server):
         return path if RUN_ID.match(run_id) and not run_id.startswith("_") and path.is_dir() else None
 
     @staticmethod
+    def legacy(run_dir):
+        """An old two-stage pipeline (plan/, code/), not a flow run with its own state.json."""
+        return (run_dir / "pipeline.json").exists() and not read_json(run_dir / "state.json").get("flow")
+
+    @staticmethod
     def current_stage(run_dir):
         return "code" if (run_dir / "code" / "state.json").exists() else "plan"
 
@@ -280,19 +285,23 @@ class Home(Server):
         for path in self.runs_dir.iterdir():
             if not path.is_dir() or not self.run_path(path.name):
                 continue
-            files = [path / "pipeline.json", path / "state.json"] + [path / stage / "state.json" for stage in STAGES]
+            files = [path / "pipeline.json", path / "state.json", path / "prompt.md"] + [
+                path / stage / "state.json" for stage in STAGES]
             stamps = [item.stat().st_mtime for item in files if item.exists()]
             if not stamps:
                 continue
-            if (path / "pipeline.json").exists():
+            if self.legacy(path):
                 info = self.pipeline_info(path)
                 item = {"kind": "pipeline", "repo": info.get("repo") or info.get("repo_input"),
                         "prompt": info["prompt"][:400], **{key: info.get(key) for key in
                         ("stage", "outcome", "detail", "stopped", "stages", "branch", "labels")}}
             else:
                 state = read_json(path / "state.json")
+                prompt = path / "prompt.md"
                 item = {"kind": "run", "case": state.get("case"), "phase": state.get("phase"),
-                        "round": state.get("round"), "agreed": bool(state.get("final"))}
+                        "round": state.get("round"), "agreed": bool(state.get("final")),
+                        "outcome": state.get("outcome"), "detail": state.get("detail"),
+                        "prompt": prompt.read_text(encoding="utf-8", errors="replace")[:400] if prompt.exists() else ""}
             out.append(dict(item, id=path.name, updated=max(stamps)))
         return sorted(out, key=lambda item: item["updated"], reverse=True)
 
@@ -319,9 +328,6 @@ class Home(Server):
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True)
         (run_dir / "prompt.md").write_text(prompt + "\n", encoding="utf-8")
-        (run_dir / "pipeline.json").write_text(json.dumps(
-            {"id": run_id, "repo_input": repo, "stage": "starting",
-             "started": time.strftime("%Y-%m-%dT%H:%M:%S")}, indent=2), encoding="utf-8")
         # python.exe, not pythonw.exe: the agents' console children then share one hidden console
         python = pathlib.Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and (python.parent / "python.exe").exists():
@@ -353,7 +359,7 @@ class Home(Server):
         if parts[0] != "run" or len(parts) < 2 or not self.run_path(parts[1]):
             return handler.send(404, "not found", "text/plain")
         run_dir, rest = self.run_path(parts[1]), parts[2:]
-        if not (run_dir / "pipeline.json").exists():
+        if not self.legacy(run_dir):
             if rest == ["api", "pipeline"]:
                 return handler.send(200, "{}")  # a plain run: the page shows only the link home
             return Dashboard(run_dir, token=self.token).serve_run(handler, rest, query)
