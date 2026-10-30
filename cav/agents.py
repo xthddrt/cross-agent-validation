@@ -21,6 +21,19 @@ KIMI_POLL_SECONDS = 3
 # environment; Kimi keeps no level, so each Kimi session activates the skill with it.
 PONYTAIL_LEVEL = "ultra"
 PONYTAIL_SKILL = "ponytail:ponytail"
+# agent name -> (kind, model)
+DEFAULT_MODELS = {
+    "deepseek": ("opencode", "deepseek/deepseek-flash#high"),
+    "kimi": ("kimi", "kimi-code/k3.1-pro"),
+}
+
+
+@dataclass
+class AgentSpec:
+    name: str
+    kind: str
+    model: str | None = None
+    thinking: str | None = None
 
 
 def _noop(*args, **kwargs):

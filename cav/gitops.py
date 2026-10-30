@@ -1,23 +1,23 @@
-"""All git work in one place. CAV owns commits and branches; agents only edit files."""
+"""Git, run without a console window and with a fixed identity for the commits CAV makes."""
 
 import os
 import pathlib
+import re
 import shutil
 import subprocess
 
 GIT = os.environ.get("CAV_GIT") or shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
-EXCHANGE_REMOTE = "cav-exchange"
+GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
+CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 # A console program started from a process without a console (the dashboard runs under pythonw)
 # gets a window of its own that flashes up and closes; start them all without one.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-# Commits the tool creates must not depend on the machine's git identity being configured.
 IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@localhost")
 
 
 def git(*args, cwd=None, check=True, env=None):
-    result = subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
-                            capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", env=env, creationflags=NO_WINDOW)
+    result = subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None, capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", env=env, creationflags=NO_WINDOW)
     if check and result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip() or result.stdout.strip()}")
     return result.stdout.strip()
@@ -28,74 +28,32 @@ def git_ok(*args, cwd=None):
                           capture_output=True, text=True, creationflags=NO_WINDOW).returncode == 0
 
 
-class Exchange:
-    """Bare repo used as the only channel between the two agents."""
+def resolve_repo(spec, clone_root=None):
+    """A local git repo as given, or a GitHub repo cloned to (or reused, and fetched, from) the clone root."""
+    text = (spec or "").strip().strip('"')
+    match = GITHUB.match(text)
+    if not match:
+        path = pathlib.Path(text).expanduser()
+        if not text or not path.is_dir() or not git_ok("rev-parse", "--git-dir", cwd=path):
+            raise ValueError(f"not a git repository or GitHub URL: {spec!r}")
+        return path.resolve()
+    url = f"https://github.com/{match.group(1)}/{match.group(2)}.git"
+    target = pathlib.Path(clone_root or CLONE_ROOT) / match.group(2)
+    if target.exists():
+        origin = git("remote", "get-url", "origin", cwd=target, check=False)
+        if GITHUB.sub(r"\1/\2", origin).lower() != f"{match.group(1)}/{match.group(2)}".lower():
+            raise ValueError(f"{target} already exists with origin {origin or '(none)'}, not {url}")
+        git("fetch", "-q", "origin", cwd=target)
+    else:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        git("clone", "-q", url, str(target))
+    return target.resolve()
 
-    def __init__(self, path):
-        self.path = pathlib.Path(path)
 
-    def ensure(self):
-        if not (self.path / "HEAD").exists():
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            git("init", "--bare", str(self.path))
-        return self
-
-    def sha(self, branch):
-        return git("--git-dir", str(self.path), "rev-parse", "--verify", f"refs/heads/{branch}",
-                   check=False) or None
-
-    def tree_of(self, sha):
-        return git("--git-dir", str(self.path), "rev-parse", f"{sha}^{{tree}}")
-
-
-class Repo:
-    """The working repo that hosts worktrees and pushes candidates to the exchange.
-
-    Push and fetch address the exchange by path, never through a named remote: a remote is
-    repo-global state, so a second run (or another tool run) would silently repoint it and
-    this run's commits would land in the wrong exchange.
-    """
-
-    def __init__(self, path):
-        self.path = pathlib.Path(path)
-        self.exchange_path = None
-        self.namespace = "refs/cav/run"
-
-    def attach(self, exchange, run_id=None):
-        self.exchange_path = str(exchange.path)
-        self.namespace = f"refs/cav/{run_id or 'run'}"
-        if git("remote", "get-url", EXCHANGE_REMOTE, cwd=self.path, check=False):
-            git("remote", "remove", EXCHANGE_REMOTE, cwd=self.path, check=False)
-        return self
-
-    def fetch(self):
-        git("fetch", self.exchange_path, "--prune",
-            f"+refs/heads/*:{self.namespace}/*", cwd=self.path)
-        return self
-
-    def sha(self, rev):
-        return git("rev-parse", "--verify", f"{rev}^{{commit}}", cwd=self.path)
-
-    def tree(self, rev):
-        return git("rev-parse", f"{rev}^{{tree}}", cwd=self.path)
-
-    def push(self, sha, branch):
-        git("push", self.exchange_path, f"{sha}:refs/heads/{branch}", cwd=self.path)
-        return sha
-
-    def worktree_add(self, dest, rev):
-        dest = pathlib.Path(dest)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        git("worktree", "add", "--detach", str(dest), rev, cwd=self.path)
-        return dest
-
-    def worktree_remove(self, dest):
-        git("worktree", "remove", "--force", str(dest), cwd=self.path, check=False)
-        git("worktree", "prune", cwd=self.path, check=False)
-
-    def commit_all(self, worktree, message):
-        """Commit everything the agent changed; an unchanged worktree keeps its HEAD."""
-        git("add", "-A", cwd=worktree)
-        if git("status", "--porcelain", cwd=worktree):
-            git(*IDENTITY, "commit", "-m", message, cwd=worktree)
-        return git("rev-parse", "HEAD", cwd=worktree)
+def resolve_ref(repo, ref):
+    """A branch's commit, as given or as fetched from origin."""
+    for name in (ref, f"origin/{ref}"):
+        sha = git("rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", cwd=repo, check=False)
+        if sha:
+            return sha
+    raise ValueError(f"branch {ref!r} not found in {repo}")
