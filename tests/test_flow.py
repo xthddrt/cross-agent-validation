@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from cav.agents import RunState
+from cav import prompts
 from cav.flow import Flow
 from cav.gitops import git, git_ok
 from tests.test_agents import with_origin
@@ -241,6 +242,10 @@ class FlowTest(unittest.TestCase):
         plan.write_text("no base", encoding="utf-8")
         self.assertEqual(Flow.plan_problem(plan, True), 'the plan must start with "Base: X" or "Base: Y"')
         self.assertIsNone(Flow.plan_problem(plan, False))
+        fix = prompts.revise({1: ["no"]}, plan, fixes=True)
+        for rule in ("fixes every agreed blocker", "keeps to the agreed plans", "least work", "what the other candidate does better", "Base: X"):
+            self.assertIn(rule, fix, "a revised fix plan is held to the same rules as the first")
+        self.assertNotIn("least work", prompts.revise({1: ["no"]}, plan))
 
 
 if __name__ == "__main__":
