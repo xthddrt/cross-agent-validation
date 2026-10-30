@@ -445,7 +445,7 @@ const roundNumbers = () => {
   if (state.round) set.add(state.round);
   return [...set].filter(Boolean).sort((a, b) => a - b);
 };
-const FLOW_CLS = {planned:'ok', agreed:'ok', built:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
+const FLOW_CLS = {planned:'ok', revised:'ok', agreed:'ok', built:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
 function roundStatus(n) {
   const h = hist(n), r = rounds[n];
   if (state.flow) return h && h.verdict ? [FLOW_CLS[h.verdict] || '', h.verdict] : isLive(n) ? ['run', 'running'] : ['', '…'];

@@ -46,6 +46,10 @@ class Fake:
                                                        "prefer": self.prefer(folders)}), encoding="utf-8")
             self.write_plan(re.search(r"Write a plan to (\S+), at most", prompt).group(1),
                             f"Base: Candidate {self.base(folders)}\n")
+        elif "Write a revised plan to" in prompt:
+            folders = dict(re.findall(r"^- Candidate ([XY]): (\S+)$", prompt, re.M))
+            self.write_plan(re.search(r"Write a revised plan to (\S+), at most", prompt).group(1),
+                            f"Base: Candidate {self.base(folders)}\n" if folders else "")
         elif "PLANS (authors not shown)" in prompt:
             plans = {int(n): pathlib.Path(path).read_text(encoding="utf-8")
                      for n, path in re.findall(r"- Plan (\d): (\S+)", prompt)}
@@ -124,12 +128,12 @@ class FlowTest(unittest.TestCase):
         fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
         code, flow = self.run_flow(fakes)
         self.assertEqual(code, 0, flow.state)
-        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "agreed"), ("build", "built"),
-                                            ("judge", "accepted")])
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("revise", "revised"), ("agree", "agreed"),
+                                            ("build", "built"), ("judge", "accepted")])
         self.assertTrue(flow.state["outcome"].startswith("merged and pushed"))
         self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
         self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build")
-        self.assertEqual([fake.sessions for fake in fakes.values()], [4, 4], "a fresh session for every step")
+        self.assertEqual([fake.sessions for fake in fakes.values()], [5, 5], "a fresh session for every step")
         self.assert_blind(fakes, flow)
 
     def test_a_branch_both_approve_is_the_result_at_once(self):
@@ -161,14 +165,22 @@ class FlowTest(unittest.TestCase):
                  "kimi": Fake("kimi", approve=lambda f: has("feature.txt")(f) or has("feat-b.txt")(f), base=on_a)}
         code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
         self.assertEqual(code, 0, flow.state)
-        self.assertEqual(self.steps(flow), [("judge", "rejected"), ("agree", "agreed"), ("build", "built"),
-                                            ("judge", "accepted")])
-        build = flow.state["history"][2]
+        self.assertEqual(self.steps(flow), [("judge", "rejected"), ("revise", "revised"), ("agree", "agreed"),
+                                            ("build", "built"), ("judge", "accepted")])
+        build = flow.state["history"][3]
         self.assertEqual(build["start"], shas["feat-a"], "both builds start from the agreed base")
         for commit in build["commits"].values():
             self.assertEqual(git("merge-base", commit, shas["feat-a"], cwd=self.work), shas["feat-a"])
         agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
         self.assertIn("Defects found in the base", agreed, "the judges' defects against the base go to the builders")
+        for fake in fakes.values():
+            revise = next(p for p in fake.prompts if "Write a revised plan to" in p)
+            self.assertEqual(len(re.findall(r"^- Plan \d: ", revise, re.M)), 2, "each reviser reads both plans")
+            self.assertIn("REVIEWS OF THE CANDIDATES", revise)
+            vote = next(p for p in fake.prompts if "Approve each plan" in p)
+            ballots = [pathlib.Path(path) for path in re.findall(r"^- Plan \d: (\S+)$", vote, re.M)]
+            self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
+                            "the voters see each plan as the builders will get it")
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
     def test_plans_without_both_approvals_go_to_the_plan_both_would_keep(self):
@@ -198,7 +210,7 @@ class FlowTest(unittest.TestCase):
         code, flow = self.run_flow(fakes, push=False, max_builds=2)
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)],
-                         ["plan", "agree", "build", "judge", "agree", "build", "judge"])
+                         ["plan", "revise", "agree", "build", "judge", "revise", "agree", "build", "judge"])
         self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
         self.assertEqual(git("show", f"{flow.state['final']['commit']}:feature.txt", cwd=self.work), "built by kimi")
         self.assertEqual(len(flow.state["final"]["open_defects"]), 2, "each judge's defect against it stays open")
