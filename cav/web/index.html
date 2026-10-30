@@ -1072,8 +1072,9 @@ async function poll() {
   const next = parse(await api('state'));
   if (!next) return;
   state = next;
-  // agent order normally comes from the events; fall back to state.json before any event arrives
-  for (const name of Object.keys(state.agents || {})) if (!names.includes(name) && names.length < 2) names.push(name);
+  // agent order normally comes from the events; a flow run names its builder and reviewer instead
+  const known = state.flow && state.builder ? [state.builder, state.reviewer] : Object.keys(state.agents || {});
+  for (const name of known) if (!names.includes(name) && names.length < 2) names.push(name);
   schedule();
 }
 
