@@ -34,10 +34,11 @@ class Fake:
     def run(self, prompt, cwd):
         if not self.session_id:
             self.session_id, self.sessions = f"s-{self.name}-{self.sessions + 1}", self.sessions + 1
+            self.folders = {}  # what this session has seen: a later prompt in the cycle does not repeat it
         self.prompts.append(prompt)
         reply = re.search(r"Write to (\S+):", prompt)
         if "Approve each candidate" in prompt:
-            folders = dict(re.findall(r"^- ([XY]): (\S+) \(checks", prompt, re.M))
+            folders = self.folders = dict(re.findall(r"^- ([XY]): (\S+) \(checks", prompt, re.M))
             approve = {label: self.approve(pathlib.Path(folder)) for label, folder in folders.items()}
             defects = [{"candidate": label, "file": "base.txt", "line": 1, "problem": "wrong"}
                        for label, ok in approve.items() if not ok]
@@ -53,15 +54,15 @@ class Fake:
             pathlib.Path(reply.group(1)).write_text(json.dumps(
                 {"approve": approve, "why": {n: f"plan {n} misses a criterion" for n, ok in approve.items() if not ok}}),
                 encoding="utf-8")
-        elif "Write one revised plan to" in prompt:
-            folders = dict(re.findall(r"^- ([XY]): (\S+)$", prompt, re.M))
-            self.write_plan(re.search(r"Write one revised plan to (\S+) \(", prompt).group(1),
-                            f"Base: {self.base(folders)}\nrevised " if folders else "revised ")
+        elif "Write one plan from those two" in prompt:
+            self.write_plan(re.search(r"can approve, to (\S+) \(", prompt).group(1),
+                            f"Base: {self.base(self.folders)}\nrevised " if self.folders else "revised ")
         elif "Write a plan to" in prompt:
             self.write_plan(re.search(r"Write a plan to (\S+) \(", prompt).group(1), "")
         elif prompt.startswith("Implement "):
             self.builds += 1
-            work = pathlib.Path(re.search(r"^Implement \S+ in (\S+?)(?:, a copy of [XY])?\.$", prompt, re.M).group(1))
+            work = pathlib.Path(re.search(r"^Implement the agreed plan, \S+, in (\S+?)(?:, a copy of [XY])?\.$",
+                                          prompt, re.M).group(1))
             (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
             (work / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
             pathlib.Path(re.search(r"what you did to (\S+)\.$", prompt, re.M).group(1)).write_text("built", encoding="utf-8")
@@ -168,6 +169,10 @@ class FlowTest(unittest.TestCase):
         ballots = [pathlib.Path(path) for path in re.findall(r"^- \d: (\S+)$", vote, re.M)]
         self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
                         "the voters see each plan as the builders will get it")
+        self.assertIn("REVIEWS", vote, "the first vote lists both reviews; each judge has written only one")
+        for fake in fakes.values():
+            self.assertEqual(sum(p.startswith("TASK") for p in fake.prompts), fake.sessions,
+                             "the task is given once per session, in the cycle's first prompt")
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
     def test_rejected_plans_are_revised_until_both_approve(self):
@@ -176,7 +181,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(code, 0, flow.state)
         self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "rejected"), ("revise", "revised"),
                                             ("agree", "agreed"), ("build", "built"), ("judge", "accepted")])
-        revise = next(p for p in fakes["deepseek"].prompts if "Write one revised plan" in p)
+        revise = next(p for p in fakes["deepseek"].prompts if "Write one plan from those two" in p)
         self.assertIn("OBJECTIONS", revise)
         self.assertIn("misses a criterion", revise, "the revisers read why each plan was rejected")
         self.assertIn("round 2", flow.state["plan"]["how"])

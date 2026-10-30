@@ -366,16 +366,16 @@ class Flow:
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
         return paths
 
-    def revise(self, cycle, number, ballots, objections, candidates, reviews):
-        """Round `number`: both read the last two plans, the reasons they were rejected and the reviews,
-        and each writes one revised plan."""
+    def revise(self, cycle, number, objections, candidates):
+        """Round `number`: each agent, still in the session where it just voted, turns the two plans and
+        the reasons they were rejected into one revised plan."""
         folder = self.blind / "plans"
         numbers = _numbered(self.names)
         paths = {name: folder / f"c{cycle}-r{number}-revised-{numbers[name]}.md" for name in self.names}
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
         entry = self.begin("revise", cycle=cycle, plan_round=number)
-        self.ask({name: (prompts.revise(self.task, self.listing(candidates), reviews, ballots, objections, paths[name]),
-                         self.blind) for name in self.names}, "revise",
+        self.ask({name: (prompts.revise(objections, paths[name], base=bool(candidates)), self.blind)
+                  for name in self.names}, "revise",
                  lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
                                                 if paths[name].exists() else None, candidates))
         self.end(entry, "revised", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
@@ -392,7 +392,7 @@ class Flow:
         ballots, objections, how = [], {}, None
         for number in range(1, self.max_plan_rounds + 1):
             if number > 1:
-                plans = self.revise(cycle, number, ballots, objections, candidates, reviews)
+                plans = self.revise(cycle, number, objections, candidates)
             texts = {name: plans[name].read_text(encoding="utf-8") for name in self.names}
             order = random.sample(self.names, 2)  # plan 1 and plan 2, at random
             ballots = []
@@ -406,8 +406,9 @@ class Flow:
             replies = {name: folder / f"c{cycle}-r{number}-reply-{n}.json" for name, n in _numbered(self.names).items()}
             self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
             entry = self.begin("agree", cycle=cycle, plan_round=number)
-            self.ask({name: (prompts.agree(self.task, self.listing(candidates), reviews, ballots, replies[name]),
-                             self.blind) for name in self.names}, "agree", lambda name: self.agree_problem(replies[name]))
+            attached = any("## Defects found in the base" in path.read_text(encoding="utf-8") for _, path in ballots)
+            self.ask({name: (prompts.agree(ballots, replies[name], reviews if number == 1 else (), attached), self.blind)
+                      for name in self.names}, "agree", lambda name: self.agree_problem(replies[name]))
             data = {name: _json(replies[name]) for name in self.names}
             approvals = {name: data[name]["approve"] for name in self.names}
             both = [n for n in (1, 2) if all(approvals[name][str(n)] for name in self.names)]
@@ -536,10 +537,6 @@ class Flow:
         label = random.choice(LABELS)
         return label, f"no candidate had both approvals and they would keep different ones; coin flip chose Candidate {label}"
 
-    @staticmethod
-    def listing(candidates):
-        """The candidates' folders for a prompt, in random order; none without candidates."""
-        return [(label, candidates[label]["folder"], None) for label in random.sample(LABELS, 2)] if candidates else []
 
     @staticmethod
     def ballot(text, candidates, reviews):
