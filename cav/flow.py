@@ -549,7 +549,7 @@ class Flow:
         found = [item for path in reviews for item in (_json(path) or {}).get("defects") or []
                  if item.get("candidate") == label]
         if found:
-            body += ("\n## Defects found in the base (fix every one)\n\n"
+            body += ("\n## Defects found in the base (fix each, unless the plan shows it is not real)\n\n"
                      + "\n".join(f"- {item.get('file', '')}:{item.get('line', '')} {item['problem']}"
                                  + (f" (fix: {item['fix']})" if item.get("fix") else "") for item in found) + "\n")
         return body

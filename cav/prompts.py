@@ -60,10 +60,10 @@ def agree(plans, reply, reviews=(), attached=False):
     lines += ["PLANS" + (" (each ends with the defects found in its base; the builders get it as shown)"
                          if attached else "")]
     lines += [f"- {number}: {path}" for number, path in plans] + [""]
-    unfixed = " leaves a listed defect unfixed," if attached else ""
+    unfixed = ", leaves a real listed defect unfixed, or fixes one that is not real" if attached else ""
     lines += [
         "Read the code each plan changes and check its claims against it. Approve each plan unless it misses the "
-        f"task,{unfixed} or would not work; preferring one plan is not a reason to reject the other. "
+        f"task, would not work{unfixed}; preferring one plan is not a reason to reject the other. "
         f"Write to {reply}:",
         f'{{"approve": {{"1": true|false, "2": true|false}}, "why": {{"<rejected plan>": "<at most {WHY_WORDS} words>"}}}}',
     ]
@@ -74,7 +74,7 @@ def revise(objections, path, base=False):
     """After a vote with no plan approved by both. `objections`: plan number -> the reasons."""
     lines = ["OBJECTIONS"] + [f"- Plan {number}: {text}" for number, texts in sorted(objections.items())
                               for text in texts] + [""]
-    fixes = " It fixes every defect listed with the plans." if base else ""
+    fixes = " It fixes every defect listed with the plans, or shows from the code why one is not real." if base else ""
     lines.append(f"Write one plan from those two that answers these objections and both voters can approve, to {path} "
                  f"(at most {PLAN_WORDS} words): {PLAN}.{fixes}{BASE if base else ''}")
     return "\n".join(lines) + "\n"
@@ -84,10 +84,10 @@ def build(plan_path, work, checks, note, base_label=None):
     """`base_label`: the candidate the plan builds on; such a plan ends with the defects found in it."""
     lines = [f"Implement the agreed plan, {plan_path}, in {work}" + (f", a copy of {base_label}." if base_label else ".")]
     if base_label:
-        lines.append("Fix every defect listed at its end.")
+        lines.append("Fix every defect listed at its end, except one the plan shows is not real.")
     if checks:
         lines.append(f"Run the checks there: {_checks(checks)}.")
-    lines.append(f"Write a note to {note}: what you changed" + (", and how you fixed each listed defect." if base_label else "."))
+    lines.append(f"Write a note to {note}: what you changed" + (", and for each listed defect, how you fixed it or that the plan shows it is not real." if base_label else "."))
     return "\n".join(lines) + "\n"
 
 

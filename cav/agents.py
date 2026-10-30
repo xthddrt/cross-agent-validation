@@ -235,7 +235,7 @@ class KimiAgent(Agent):
         self.base = None
         self.token = None
         self.session_id = None
-        self._baseline = 0
+        self._since = ""  # created_at of the newest message before this prompt
         self._prompt_id = None
         self._part_fingerprints = {}
         self._transcript = None
@@ -434,7 +434,7 @@ class KimiAgent(Agent):
             self._activate_ponytail()
             self._part_fingerprints = {}
         self.state.session = self.session_id
-        self._baseline = self._assistant_count()
+        self._since = max((message.get("created_at") or "" for message in self._messages()), default="")
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
         submitted = self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
                                {"content": [{"type": "text", "text": prompt}]})
@@ -446,7 +446,9 @@ class KimiAgent(Agent):
             detail = self._call("GET", f"/api/v1/sessions/{self.session_id}")["data"]
             items = self._messages()
             self._capture(items)
-            count = sum(1 for m in items if m.get("role") == "assistant")
+            # Kimi lists only the newest messages, so a long session's total stops growing; count
+            # the replies newer than this prompt instead
+            count = sum(1 for m in items if m.get("role") == "assistant" and (m.get("created_at") or "") > self._since)
             busy = detail.get("busy", False) or detail.get("main_turn_active", False)
             waiting = self._pending(detail)
             if waiting == "waiting:approval" and self._approve_pending():
@@ -460,8 +462,8 @@ class KimiAgent(Agent):
                 # before the busy branch: otherwise the block is invisible until the round timeout.
                 self.state.detail = waiting
                 idle += 1
-            elif count > self._baseline:
-                self.state.touch("writing" if busy else "finishing", count - self._baseline)
+            elif count:
+                self.state.touch("writing" if busy else "finishing", count)
                 idle = 0
             elif busy:
                 self.state.touch("running")
@@ -469,9 +471,9 @@ class KimiAgent(Agent):
             else:
                 idle += 1
             reason = detail.get("last_turn_reason")
-            if not busy and count > self._baseline and reason in ("completed", "failed", "cancelled"):
+            if not busy and count and reason in ("completed", "failed", "cancelled"):
                 break
-            if not busy and reason == "failed" and count == self._baseline:
+            if not busy and reason == "failed" and not count:
                 self.state.error = "kimi turn failed"
                 break
             if idle * KIMI_POLL_SECONDS > 120:
@@ -495,9 +497,6 @@ class KimiAgent(Agent):
                                    "reason": self.state.error or "completed"})
         return {"ok": self.state.error is None, "text": text,
                 "reason": self.state.error or "completed", "session": self.session_id}
-
-    def _assistant_count(self):
-        return sum(1 for message in self._messages() if message.get("role") == "assistant")
 
     def _last_assistant_text(self):
         text = ""
