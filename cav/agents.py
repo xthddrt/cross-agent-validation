@@ -350,6 +350,24 @@ class KimiAgent(Agent):
             approved += 1
         return approved
 
+    def _dismiss_questions(self):
+        """Nobody answers during a run: dismiss a question so Kimi decides for itself and goes on.
+
+        The round prompt already says never to ask; this covers a question asked anyway.
+        """
+        snapshot = self._call("GET", f"/api/v1/sessions/{self.session_id}/snapshot").get("data") or {}
+        dismissed = 0
+        for item in snapshot.get("pending_questions") or []:
+            interaction = item.get("question_id") or item.get("interaction_id")
+            if not interaction:
+                continue
+            self._call("POST", f"/api/v1/sessions/{self.session_id}/interactions/{interaction}",
+                       {"kind": "question", "dismissed": True})
+            asked = "; ".join(q.get("question", "") for q in item.get("questions") or [] if isinstance(q, dict))
+            self._event("agent.dismissed", {"question": asked})
+            dismissed += 1
+        return dismissed
+
     def _activate_ponytail(self):
         skills = self._call("GET", f"/api/v1/sessions/{self.session_id}/skills").get("data") or {}
         names = [item.get("name") for item in (skills.get("skills") if isinstance(skills, dict) else skills) or []]
@@ -428,6 +446,9 @@ class KimiAgent(Agent):
             waiting = self._pending(detail)
             if waiting == "waiting:approval" and self._approve_pending():
                 self.state.touch("approved")
+                idle = 0
+            elif waiting == "waiting:question" and self._dismiss_questions():
+                self.state.touch("question dismissed")
                 idle = 0
             elif waiting:
                 # Kimi reports busy=True while it waits for approval, so this must be checked

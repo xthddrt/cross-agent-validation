@@ -614,6 +614,16 @@ class KimiBlockingTest(unittest.TestCase):
         self.assertEqual(calls[-1], ("POST", "/api/v1/sessions/s/interactions/a1",
                                      {"kind": "approval", "decision": "approved", "scope": "session"}))
 
+    def test_question_is_dismissed_so_the_agent_goes_on(self):
+        agent = self.agent()
+        calls = self.fake_api(agent, {
+            "/snapshot": {"data": {"pending_questions": [
+                {"question_id": "q1", "questions": [{"question": "Which colour?"}]}]}},
+            "/interactions/q1": {"data": {"outcome": "dismissed"}}})
+        self.assertEqual(agent._dismiss_questions(), 1)
+        self.assertEqual(calls[-1], ("POST", "/api/v1/sessions/s/interactions/q1",
+                                     {"kind": "question", "dismissed": True}))
+
     def test_ponytail_is_activated_at_the_cav_level(self):
         agent = self.agent()
         calls = self.fake_api(agent, {

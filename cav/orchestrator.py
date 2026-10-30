@@ -205,9 +205,17 @@ class Orchestrator:
         reviews_dir.mkdir(parents=True, exist_ok=True)
         context_dir.mkdir(parents=True, exist_ok=True)
         worktrees, reviews, prompts, runs = {}, {}, {}, {}
+        for name in names:
+            worktrees[name] = self.prepare_worktree(self.run_dir / "wt" / f"r{round_no}" / name, starts[name])
+        # Each candidate as it stands at the start of the round, for the other agent to read. Its
+        # working tree changes while it works, and a copy inside an agent's own tree would be
+        # committed as part of that agent's proposal.
+        candidates = ({name: self.prepare_worktree(context_dir / "candidates" / name, starts[name])
+                       for name in names} if phase == "reconcile" else {})
         for name, spec in case.agents.items():
             other = case.other(name)
-            worktrees[name] = self.prepare_worktree(self.run_dir / "wt" / f"r{round_no}" / name, starts[name])
+            scratch = self.run_dir / "scratch" / f"r{round_no}" / name
+            scratch.mkdir(parents=True, exist_ok=True)
             reviews[name] = reviews_dir / f"{name}-review.json"
             reviews[name].unlink(missing_ok=True)  # a restarted round must not accept an old review
             patch = (self.write_patch(context_dir / f"{name}-other.patch", starts[name], starts[other])
@@ -215,6 +223,8 @@ class Orchestrator:
             prompts[name] = round_prompt(name, other, round_no, case, worktrees[name], reviews[name], {
                 "phase": phase, "own_sha": starts[name], "other_sha": starts[other],
                 "other_patch": patch, "other_review": self.previous_review(round_no, other),
+                "other_tree": str(candidates[other]) if candidates else None,
+                "other_worktree": str(worktrees[other]), "scratch": str(scratch),
                 "own_review": self.previous_review(round_no, name), "history": self.history_line()})
             (context_dir / f"{name}-context.md").write_text(prompts[name], encoding="utf-8")
             agent = agent_mod.build(spec, self.run_dir / "logs" / f"r{round_no}" / f"{name}.log",

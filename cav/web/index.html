@@ -407,6 +407,7 @@ function apply(e) {
       break;
     case 'agent.skill': a.feed.push({k:'div', text:`${d.skill} ${d.args || ''} activated`}); break;
     case 'agent.approved': a.feed.push({k:'div', text:`auto-approved: ${d.action || d.tool || 'tool call'}`}); break;
+    case 'agent.dismissed': a.feed.push({k:'div', text:`question dismissed (nobody answers during a run): ${d.question || ''}`}); break;
     case 'agent.step': a.steps = d.messages || a.steps; break;
     case 'agent.done': a.done = {ok:d.ok, reason:d.reason, ts}; break;
     case 'agent.retry': r.notes.push(['warn', `Retry ${d.attempt} for ${(d.agents || []).join(' and ')}: the previous attempt left no usable review`]); break;
