@@ -193,29 +193,23 @@
 <body>
 <div class="wrap">
   <header>
+    <a href="#" id="home" class="dim" style="text-decoration:none">&larr; All runs</a>
     <h1 id="case">CAV</h1>
     <span class="badge" id="status">connecting</span>
-    <button id="sumbtn" hidden>How far apart</button>
+    <button id="stop" hidden>Stop</button>
     <span id="meta"></span>
   </header>
-
-  <section class="card" id="pipe" hidden></section>
 
   <nav id="tabs"></nav>
 
   <section class="card" id="process">
-    <div class="steps" id="steps"></div>
-    <div id="notes"></div>
+    <div id="summary"></div>
+    <div id="details" style="margin-top:10px"></div>
   </section>
 
   <section class="agents">
     <article class="card agent" id="agent0"></article>
     <article class="card agent" id="agent1"></article>
-  </section>
-
-  <section class="agree">
-    <div class="card"><h2>Agreement gates</h2><div id="gates"></div></div>
-    <div class="card"><h2>Where the two candidates differ</h2><div id="divergence"></div></div>
   </section>
 </div>
 
@@ -225,15 +219,13 @@
 </dialog>
 
 <script>
-// the page is mounted at /<token>/ (one run) or /<token>/run/<id>/[plan|code]/ (the home server)
+// the page is mounted at /<token>/run/<id>/
 const BASE = location.pathname.replace(/\/+$/, '');
 const TOKEN = BASE.split('/').filter(Boolean)[0];
-const STAGE = BASE.match(/^(\/[^/]+\/run\/[^/]+)(?:\/(plan|code))?$/);  // [_, run base, stage]
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sha = (s) => String(s || '').slice(0, 8);
 const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
-const differ = (n) => `${plural(n, 'path')} ${n === 1 ? 'differs' : 'differ'}`;
 
 function dur(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -250,15 +242,12 @@ async function api(name, query = {}) {
 }
 const parse = (text) => { try { return JSON.parse(text); } catch (e) { return null; } };
 
+
 // ------------------------------------------------------------------ model
-// Everything per round is rebuilt from events.jsonl; state.json adds the per-round results.
+// The agents' feeds are rebuilt from events.jsonl; state.json has the steps.
 let state = {}, names = [], selected = null, follow = true;
 const rounds = {};
-
-function R(n) {
-  return rounds[n] ||= {n, starts:null, differing:0, start:null, agents:{}, reviews:{}, checks:{}, div:null,
-                        verdict:null, blockers:null, notes:[], fin:{}};
-}
+const R = (n) => rounds[n] ||= {n, agents:{}};
 function A(r, name) {
   return r.agents[name] ||= {name, model:null, launch:null, last:null, done:null,
                              steps:0, tools:0, texts:0, feed:[], pending:[], early:[], unpaired:0};
@@ -366,20 +355,13 @@ function finishTool(item, d) {
   refresh(item);
 }
 
+
 function apply(e) {
   const d = e.data || {}, t = e.type, who = e.agent, ts = e.ts ? Date.parse(e.ts) : Date.now();
-  if (!e.round) return;
-  const r = R(e.round);
-  const a = who ? A(r, who) : null;
-  if (a) a.last = ts;
+  if (!e.round || !who) return;
+  const a = A(R(e.round), who);
+  a.last = ts;
   switch (t) {
-    case 'round.prepared':
-      // agent order is the case's order, from the starting points: stable across reloads
-      r.starts = d.starts || {}; r.differing = d.differing || 0;
-      if (!names.length) names = Object.keys(r.starts);
-      break;
-    case 'publication.selected': r.fin.published = {agent:who, reason:d.reason}; break;
-    case 'round.start': r.start = ts; break;
     case 'agent.launch':
       if (a.launch) a.feed.push({k:'div', text:'retry'});
       a.pending = []; a.early = []; a.unpaired = 0;
@@ -387,225 +369,62 @@ function apply(e) {
       break;
     case 'agent.text':
     case 'agent.thinking': {
-      // Kimi's transcript includes the injected system reminders and the round prompt itself
+      // Kimi's transcript includes the injected system reminders
       const text = (d.text || '').replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '').trim();
-      if (!text) break;
-      let kind = t === 'agent.text' ? 'text' : 'think';
-      if (kind === 'text' && text.startsWith(`You are ${who}, one of two`)) kind = 'prompt';
-      if (kind === 'text' && text.startsWith('User activated the skill')) break;  // shown by agent.skill
+      if (!text || text.startsWith('User activated the skill')) break;  // a skill is shown by agent.skill
+      const kind = t === 'agent.text' ? 'text' : 'think';
       const last = a.feed[a.feed.length - 1];
       // Kimi re-emits a part every time it grows: replace the growing message instead of repeating it.
       if (last && last.k === kind && text.startsWith(last.text)) { last.text = text; refresh(last); }
       else { a.feed.push({k:kind, text, ts}); if (kind === 'text') a.texts++; }
       break;
     }
-    case 'agent.tool.start':
-      addTool(a, {k:'tool', agent:who, tool:d.tool || 'tool', call:d.call, input:d.input, ts});
-      break;
-    case 'agent.tool.end':
-      endTool(a, d);
-      break;
+    case 'agent.tool.start': addTool(a, {k:'tool', agent:who, tool:d.tool || 'tool', call:d.call, input:d.input, ts}); break;
+    case 'agent.tool.end': endTool(a, d); break;
     case 'agent.skill': a.feed.push({k:'div', text:`${d.skill} ${d.args || ''} activated`}); break;
     case 'agent.approved': a.feed.push({k:'div', text:`auto-approved: ${d.action || d.tool || 'tool call'}`}); break;
     case 'agent.dismissed': a.feed.push({k:'div', text:`question dismissed (nobody answers during a run): ${d.question || ''}`}); break;
     case 'agent.step': a.steps = d.messages || a.steps; break;
     case 'agent.done': a.done = {ok:d.ok, reason:d.reason, ts}; break;
-    case 'agent.retry': r.notes.push(['warn', `Retry ${d.attempt} for ${(d.agents || []).join(' and ')}: the previous attempt left no usable review`]); break;
-    case 'agent.blocked': r.notes.push(['bad', `${who} stopped on a human-approval prompt (${d.detail}) and was aborted`]); break;
-    case 'review.validated': r.reviews[who] = {ok:true}; break;
-    case 'review.rejected': {
-      const why = d.reason || (d.errors || [])[0] || 'invalid';
-      r.reviews[who] = {ok:false, why};
-      r.notes.push(['bad', `${who}'s review was rejected: ${why}`]);
-      break;
-    }
-    case 'check.start': (r.checks[who] ||= []).push({cmd:d.command}); break;
-    case 'check.result': {
-      const list = r.checks[who] ||= [];
-      const open = [...list].reverse().find(c => c.cmd === d.command && c.exit === undefined);
-      if (open) Object.assign(open, {exit:d.exit, sec:d.seconds});
-      else list.push({cmd:d.command, exit:d.exit, sec:d.seconds});
-      break;
-    }
-    case 'divergence.computed': r.div = {identical:d.identical, differing:d.differing}; break;
-    case 'convergence.evaluated': r.verdict = d.verdict; r.blockers = d.blockers; break;
-    case 'oscillation.detected': r.osc = true; r.notes.push(['bad', 'The candidate pair repeated an earlier round, so the run stopped (oscillation)']); break;
-    case 'final.complete': r.fin.complete = d; break;
-    case 'push.result': r.fin.push = d; break;
   }
 }
 
-// ------------------------------------------------------------- derived
+// --------------------------------------------------------------- steps
+const ENDED = ['done', 'failed', 'stopped'];
+const runOver = () => ENDED.includes(state.phase);
 const hist = (n) => (state.history || []).find(h => h.round === n) || null;
-const runOver = () => !!state.final || ['disagreement', 'implemented', 'done'].includes(state.phase)
-  || /failed$/.test(state.phase || '');
 const isLive = (n) => n === state.round && !runOver();
-const roundNumbers = () => {
-  const set = new Set([...Object.keys(rounds).map(Number), ...(state.history || []).map(h => h.round)]);
-  if (state.round) set.add(state.round);
-  return [...set].filter(Boolean).sort((a, b) => a - b);
-};
-const FLOW_CLS = {planned:'ok', revised:'ok', agreed:'ok', built:'ok', reviewed:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
-function roundStatus(n) {
-  const h = hist(n), r = rounds[n];
-  if (state.flow) return h && h.verdict ? [FLOW_CLS[h.verdict] || '', h.verdict] : isLive(n) ? ['run', 'running'] : ['', '…'];
-  if (h && h.failed) return ['bad', 'failed'];
-  const v = (r && r.verdict) || (h && h.verdict);
-  if (v === 'accepted') {
-    if ((r && r.fin.complete) || (state.final && state.final.round === n)) return ['ok', 'agreed'];
-    return isLive(n) ? ['run', 'publishing'] : ['warn', 'accepted, not published'];
-  }
-  if (v === 'independent') return ['', 'independent'];
-  if (v === 'forced') return ['ok', 'forced choice'];
-  if (v) return ['warn', 'diverged'];
-  return isLive(n) ? ['run', 'running'] : ['', 'incomplete'];
+const roundNumbers = () => [...new Set([...Object.keys(rounds).map(Number), ...(state.history || []).map(h => h.round)])]
+  .filter(Boolean).sort((a, b) => a - b);
+const stepName = (h) => h ? `r${h.cycle || 0} ${h.step}${h.vote ? ' ' + h.vote : ''}` : '';
+function stepClass(h, n) {
+  if (!h || !h.verdict) return isLive(n) ? 'run' : '';
+  return /^(rejected|blocked)$/.test(h.verdict) ? 'warn' : 'ok';
 }
 
-function steps(n) {
-  const r = rounds[n] || R(n), h = hist(n), live = isLive(n);
-  const agents = names.map(x => r.agents[x]).filter(Boolean);
-  const res = (h && h.results) || {};
-  const out = [];
-
-  // each agent reads both candidates and writes one combined proposal from its own
-  out.push({label:'Starting points', done:!!r.starts,
-            sub: r.starts ? 'each from its own' + (r.differing ? ` · ${differ(r.differing)}` : '') : '',
-            title: r.starts ? names.map(x => `${x} @ ${sha(r.starts[x])}`).join('\n') : ''});
-
-  const working = agents.filter(a => a.launch && !a.done);
-  const agentsDone = names.length === 2 && names.every(x => r.reviews[x] || (r.agents[x] && r.agents[x].done));
-  const failedAgent = agents.find(a => a.done && !a.done.ok);
-  out.push({label:'Agents work', done:agentsDone && !failedAgent, state:failedAgent && agentsDone ? 'bad' : null,
-            sub: working.length ? `${working.length} working` : failedAgent ? `${failedAgent.name}: ${failedAgent.done.reason}`
-                 : agentsDone ? 'both finished' : ''});
-
-  const reviews = names.map(x => r.reviews[x]).filter(Boolean);
-  const rejected = reviews.find(v => !v.ok);
-  const b = r.blockers || (h && h.blockers);
-  out.push({label:'Reviews', done:reviews.length === 2 && !rejected, state:rejected ? 'bad' : null,
-            sub: rejected ? 'review rejected' : b ? (b.must_fix_total !== undefined
-                   ? `${b.must_fix_total} MUST_FIX · ${b.blocking_must_fix} blocking` : `${b.blocking_must_fix} MUST_FIX`)
-                 : reviews.length ? `${reviews.length}/2 valid` : ''});
-
-  const cmds = names.flatMap(x => r.checks[x] || []);
-  const running = cmds.find(c => c.exit === undefined);
-  const histChecks = h && h.checks ? Object.values(h.checks) : null;
-  const checksDone = !!(r.div || r.verdict || histChecks);
-  const failedCmds = cmds.filter(c => c.exit !== undefined && c.exit !== 0);
-  const checksOk = histChecks ? histChecks.every(c => c.ok) : !failedCmds.length;
-  const total = histChecks ? histChecks.reduce((s, c) => s + (c.commands || []).length, 0) : cmds.length;
-  out.push({label:'Checks', done:checksDone, state:checksDone && !checksOk ? 'bad' : null,
-            sub: running ? `running ${running.cmd}` : checksDone ? (total ? (checksOk ? 'all pass' : `${failedCmds.length || 'some'} failed`) : 'none configured')
-                 : cmds.length ? `${cmds.length} run` : ''});
-
-  const t = r.div || (h && h.divergence);
-  out.push({label:'Compare trees', done:!!t,
-            sub: t ? (t.differing ? differ(t.differing) : 'identical trees') : ''});
-
-  const v = r.verdict || (h && h.verdict);
-  const accepted = v === 'accepted' || v === 'forced', independent = v === 'independent';
-  const decision = (r.blockers || (h && h.blockers) || {}).decision;
-  out.push({label:'Verdict', done:!!v, state:v ? (accepted ? 'good' : independent ? 'done' : 'warn') : null,
-            sub: v ? (v === 'forced' ? `forced choice · ${decision ? decision.method : ''}`
-                 : accepted ? 'both approve' : independent ? 'independent round · nothing to approve yet'
-                 : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
-
-  const f = r.fin;
-  let fin;
-  if (v && !accepted) fin = {label:'Publish', state:'skip', done:true, sub:'not reached'};
-  else if (f.complete) fin = {label:'Publish', done:true, state:'good', title:f.published ? f.published.reason : '',
-                              sub:`${f.published ? `${f.published.agent}'s · ` : ''}${sha(f.complete.commit)}${f.push ? ' · pushed' : ' · not pushed'}`};
-  else fin = {label:'Publish', done:false, sub:''};
-  out.push(fin);
-
-  // the first unfinished step is where the round is now, or where it stopped
-  const at = out.find(s => !s.done);
-  for (const s of out) s.state = s.state || (s.done ? 'done' : 'todo');
-  if (at) {
-    if (h && h.failed) { at.state = 'bad'; at.sub = h.failed[0]; }
-    else if (live) at.state = 'active';
-  }
-  return out;
-}
-
-// --------------------------------------------------------------- render
 function renderHeader() {
-  $('case').textContent = state.case || 'CAV';
-  document.title = `CAV · ${state.case || ''}`;
-  const st = $('status');
-  let cls = 'run', text = 'Running';
-  if (state.final) { cls = 'ok'; text = `Agreed in round ${state.final.round}`; }
-  else if (state.phase === 'disagreement') { cls = 'bad'; text = 'No agreement'; }
-  else if (/failed$/.test(state.phase || '')) { cls = 'bad'; text = `Round ${state.round} failed`; }
-  else if (!state.phase || state.phase === 'init' || state.phase === 'bootstrap') text = 'Starting';
-  st.className = 'badge ' + cls; st.textContent = text;
-
-  const parts = [];
-  if (state.final) parts.push(`final ${sha(state.final.commit)}${state.final.pushed ? ' · pushed' : ''}`);
-  if (state.run_id) parts.push(state.run_id);
-  let html = esc(parts.join(' · '));
+  $('case').textContent = state.run_id || 'CAV';
+  document.title = `CAV · ${state.run_id || ''}`;
+  const [cls, text] = state.phase === 'done' ? ['ok', state.outcome] : ['failed', 'stopped'].includes(state.phase)
+    ? ['bad', state.phase] : ['run', state.phase || 'starting'];
+  $('status').className = 'badge ' + cls; $('status').textContent = text;
+  $('stop').hidden = runOver();
+  let html = esc([state.repo, state.labels && Object.entries(state.labels).map(([l, v]) => `${l} = ${v.ref}`).join(', ')]
+    .filter(Boolean).join(' · '));
   if (state.updated && !runOver()) {
     const age = (Date.now() - Date.parse(state.updated)) / 1000;  // state.updated is local time
-    if (age > 300) html += ` · <span class="stale">no state update for ${dur(age)}</span>`;
+    if (age > 300) html += ` · <span class="stale">no update for ${dur(age)}</span>`;
   }
+  if (state.detail) html += ` · ${esc(state.detail)}`;
   $('meta').innerHTML = html;
-  $('sumbtn').hidden = state.phase !== 'disagreement';
 }
 
-// ------------------------------------------------------------ pipeline
-let pipe = null;
-async function pollPipeline() {
-  if (!STAGE) return;
-  try {
-    const r = await fetch(`${STAGE[1]}/api/pipeline`, {cache:'no-store'});
-    pipe = r.ok ? await r.json() : {};
-  } catch (e) { return; }
-  renderPipeline();
-}
-function renderPipeline() {
-  const el = $('pipe');
-  if (!STAGE || !pipe) return;
-  el.hidden = false;
-  const home = `<a href="/${TOKEN}/">← All runs</a>`;
-  if (!pipe.id) { setHtml(el, `<div class="prow">${home}</div>`); return; }
-  const stageText = (name) => {
-    const s = (pipe.stages || {})[name];
-    if (!s) return 'not started';
-    if (s.agreed) return 'agreed';
-    if (s.phase === 'disagreement') return 'no agreement';
-    if (/failed$/.test(s.phase || '')) return 'failed';
-    return pipe.stage === name ? `round ${s.round || 1}` : (s.phase || '');
-  };
-  const tabs = ['plan', 'code'].map((name, i) =>
-    `<a href="${STAGE[1]}/${name}/" class="${STAGE[2] === name ? 'on' : ''}${(pipe.stages || {})[name] ? '' : ' off'}">` +
-    `${i + 1} ${name === 'plan' ? 'Plan' : 'Code'}<span>${esc(stageText(name))}</span></a>`).join('');
-  let cls = 'run', text = `running · ${pipe.stage || 'starting'}`;
-  if (pipe.stage === 'failed') { cls = 'bad'; text = 'failed'; }
-  else if (pipe.stopped) { cls = 'bad'; text = 'stopped'; }
-  else if (pipe.outcome === 'merged and pushed') { cls = 'ok'; text = pipe.outcome; }
-  else if (pipe.outcome) { cls = 'warn'; text = pipe.outcome; }
-  const detail = pipe.stopped ? 'the pipeline process ended without recording an outcome; see pipeline.log' : pipe.detail;
-  setHtml(el, `<div class="prow">${home}<nav class="stagetabs">${tabs}</nav>` +
-    `<span class="badge ${cls}">${esc(text)}</span><span class="repo">${esc(pipe.repo || pipe.repo_input || '')}` +
-    `${pipe.branch ? ` → ${esc(pipe.branch)}` : ''}</span></div>` +
-    (detail ? `<div class="detail">${esc(detail)}</div>` : '') +
-    (pipe.labels ? `<div class="detail">Reconciling (agents see only the labels): ` +
-      Object.entries(pipe.labels).map(([l, v]) => `Candidate ${esc(l)} = ${esc(v.ref)} ${esc(sha(v.commit))}`).join(' · ') +
-      (pipe.plan_base ? ` · agreed base: Candidate ${esc(pipe.plan_base)}` : '') + `</div>` : '') +
-    `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
-}
-
-// a flow run (judge or plan, agree rounds, build; repeated): each step is a "round"; label it by cycle, step and plan round
-const stepName = (h) => h ? `${h.cycle ? 'c' + h.cycle + ' ' : ''}${h.step}${h.plan_round ? ' ' + h.plan_round : ''}` : '';
 function renderTabs() {
-  const nums = roundNumbers();
-  const html = nums.map(n => {
-    const [cls, label] = roundStatus(n);
-    const t = (rounds[n] && rounds[n].div) || (hist(n) && hist(n).divergence);
-    const extra = t ? ` · ${differ(t.differing || 0)}` : '';
-    const color = {ok:'var(--ok)', bad:'var(--bad)', warn:'var(--warn)', run:'var(--accent)'}[cls] || 'var(--dim)';
-    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}"><b>${state.flow ? `${n} ${esc(stepName(hist(n)))}` : `Round ${n}`}</b>` +
-           `<span style="color:${color}">${esc(label)}</span><span class="dim">${esc(extra)}</span></button>`;
+  const html = roundNumbers().map(n => {
+    const h = hist(n), cls = stepClass(h, n);
+    const color = {ok:'var(--ok)', warn:'var(--warn)', run:'var(--accent)'}[cls] || 'var(--dim)';
+    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}"><b>${n} ${esc(stepName(h))}</b>` +
+           `<span style="color:${color}">${esc(h && h.verdict || (isLive(n) ? 'running' : '…'))}</span></button>`;
   }).join('');
   if ($('tabs')._html === html) return;
   setHtml($('tabs'), html);
@@ -616,68 +435,36 @@ function renderTabs() {
   });
 }
 
-function flowDetails(h) {
+const where = (b) => `${esc(b.file || '')}${b.line ? ':' + esc(b.line) : ''}`;
+function details(h) {
   // what happened in one step, from state.json
   if (!h) return '<div class="dim">waiting for this step</div>';
   const out = [];
   if (h.how) out.push(esc(h.how));
   if (h.words) out.push(`plan words: ${Object.entries(h.words).map(([a, w]) => `${esc(a)} ${w}`).join(' · ')}`);
-  if (h.blockers !== undefined) out.push(`confirmed blockers: ${h.blockers} · refuted: ${h.refuted || 0}`);
-  if (h.outcomes) out.push('new blockers: ' + (Object.entries(h.outcomes).map(([k, n]) =>
-    `${n} ${k === 'ledger' ? 'agreed (to the ledger)' : k}`).join(' · ') || 'none'));
-  if (h.open) out.push('open blockers: ' + Object.entries(h.open).map(([label, ids]) =>
-    `${esc(label)} ${ids.length ? ids.map(n => '#' + n).join(', ') : 'none'}`).join(' · '));
-  if (h.ledger && h.ledger.length) out.push('ledger:<ul>' + h.ledger.map(item =>
-    `<li>#${item.id} ${esc(item.file || '')}${item.line ? ':' + esc(item.line) : ''} ${esc(item.problem)}</li>`).join('') + '</ul>');
-  if (h.fixed) out.push('fixed, per judge:<br>' + Object.entries(h.fixed).map(([a, byLabel]) => `<b>${esc(a)}</b>: ` +
-    Object.entries(byLabel).map(([label, items]) => `${esc(label)} ` + Object.entries(items).map(([n, ok]) =>
-      `#${esc(n)} ${ok ? '✓' : '✕'}`).join(' ')).join(' · ')).join('<br>'));
-  const [yes, no] = h.step === 'confirm' ? ['clear', 'blocked'] : ['approved', 'rejected'];
+  if (h.plans) out.push('plans: ' + Object.entries(h.plans).map(([n, a]) => `${n} = ${esc(a)}'s`).join(' · '));
   if (h.approvals) out.push(Object.entries(h.approvals).map(([a, v]) => `<b>${esc(a)}</b>: ` +
-    Object.entries(v).map(([k, ok]) => `${esc(/^\d$/.test(k) ? 'plan ' + k : k)} ${ok ? yes : no}`).join(', ') +
-    (h.prefer ? ` · would keep ${esc(h.prefer[a])}` : '')).join('<br>'));
-  if (h.why) out.push('rejections:<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
+    Object.entries(v).map(([k, ok]) => `plan ${esc(k)} ${ok ? 'approved' : 'rejected'}`).join(', ')).join('<br>'));
+  if (h.why) out.push('objections:<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
     texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>');
   if (h.base) out.push(`base: Candidate ${esc(h.base)}`);
-  if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(sha(c))}` +
-    (h.checks && h.checks[a] ? ` · checks ${h.checks[a].commands.length ? (h.checks[a].ok ? 'pass' : 'fail') : 'none configured'}` : '')).join('<br>'));
-  const OUTCOME = {ledger: 'agreed', minor: 'rated minor', dropped: 'not real', disputed: 'disputed'};
-  const status = (d) => d.severity !== 'blocker' ? (d.severity || '')
-    : d.outcome ? `blocker, ${OUTCOME[d.outcome] || d.outcome}${d.id ? ' #' + d.id : ''}` +
-      (d.challenge ? ` · challenged: ${d.challenge}` : '') + (d.defense ? ` · defended: ${d.defense}` : '')
-    : d.confirmed === undefined ? 'blocker' : d.confirmed ? 'blocker, confirmed' : `blocker, refuted: ${d.refuted || ''}`;
-  if (h.defects && h.defects.length) out.push('defects:<ul>' + h.defects.map(d =>
-    `<li>${d.severity ? `<b>${esc(status(d))}</b> · ` : ''}${d.by ? `${esc(d.by)} · ` : ''}${d.candidate ? `Candidate ${esc(d.candidate)} · ` : ''}${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}${d.fix ? ` <span class="dim">(fix: ${esc(d.fix)})</span>` : ''}</li>`).join('') + '</ul>');
+  if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(sha(c))}`).join('<br>'));
+  if (h.blockers) out.push(`blockers raised: ${h.blockers.length}<ul>` + h.blockers.map(b =>
+    `<li><b>${b.agreed === undefined ? 'raised' : b.agreed ? `agreed #${b.id}` : 'dropped'}</b> · ${esc(b.by)} · ` +
+    `Candidate ${esc(b.candidate)} · ${where(b)} ${esc(b.problem)}` +
+    (b.why_not ? ` <span class="dim">(not a blocker: ${esc(b.why_not)})</span>` : '') + '</li>').join('') + '</ul>');
+  if (h.agreed) out.push(Object.entries(h.agreed).map(([label, list]) => `agreed in ${esc(label)}: ${list.length ? '<ul>' +
+    list.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : 'none'}`).join('<br>'));
   if (h.seconds !== undefined) out.push(`<span class="dim">took ${dur(h.seconds)}</span>`);
-  return out.join('<br>') || '<div class="dim">no details</div>';
-}
-
-function renderFlow() {
-  const all = state.history || [];
-  const plan = (state.plan ? `<div class="dim" style="margin-top:6px">plan: ${esc(state.plan.how)} · ${state.plan.words} words</div>` : '') +
-    (state.ledger && !state.final ? `<div class="dim">ledger: ${state.ledger.length ? state.ledger.map(item => '#' + item.id).join(', ') : 'empty'}</div>` : '');
-  const follow = (state.final && state.final.open_defects) || [];
-  const decided = (state.decided ? `<div class="dim">result: ${esc(state.decided)}</div>` : '') +
-    (follow.length ? `<details class="dim"><summary>follow-ups: ${follow.length} defect(s) the result still has</summary><ul>` +
-      follow.map(d => `<li>${esc(d.status || d.severity || '')} · ` +
-        `${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}</li>`).join('') + '</ul></details>' : '');
-  const labels = state.labels ? `<div class="dim">${Object.entries(state.labels).map(([l, v]) => `Candidate ${esc(l)} = ${esc(v.ref)}`).join(' · ')} (agents see only the labels)</div>` : '';
-  setHtml($('steps'), `<div style="grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap">` + all.map(h => {
-    const [cls] = roundStatus(h.round);
-    return `<span class="chip ${cls}">${h.round} ${esc(stepName(h))}: ${esc(h.verdict || 'running')}${h.seconds !== undefined ? ' · ' + dur(h.seconds) : ''}</span>`;
-  }).join('') + `</div><div style="grid-column:1/-1">${plan}${decided}${labels}${state.outcome ? `<div style="margin-top:6px"><b>${esc(state.outcome)}</b> ${esc(state.detail || '')}</div>` : ''}</div>`);
-  setHtml($('notes'), '');
+  return out.join('<br>');
 }
 
 function renderSteps() {
-  if (state.flow) return renderFlow();
-  if (!selected) { setHtml($('steps'), '<div class="empty">waiting for the first round</div>'); setHtml($('notes'), ''); return; }
-  const list = steps(selected);
-  const icon = {done:'✓', good:'✓', bad:'✕', warn:'!', skip:'–'};
-  setHtml($('steps'), list.map((s, i) =>
-    `<div class="step ${s.state}" title="${esc(s.title || '')}"><div class="dot">${icon[s.state] || i + 1}</div>` +
-    `<div class="lbl">${esc(s.label)}</div><div class="sub">${esc(s.sub || '')}</div></div>`).join(''));
-  setHtml($('notes'), R(selected).notes.map(([cls, text]) => `<div class="${cls}">${esc(text)}</div>`).join(''));
+  const final = state.final ? `<div><b>${esc(state.outcome)}</b> · ${esc(sha(state.final.commit))}</div>` : '';
+  const agreed = state.agreed && !state.final ? `<div class="dim">blockers being fixed on ${esc(state.base)}: ${state.agreed.length}</div>` : '';
+  setHtml($('summary'), final + agreed +
+    `<details><summary class="dim">${state.labels ? 'Plan' : 'Task'}</summary><pre>${esc(state.input || '')}</pre></details>`);
+  setHtml($('details'), selected ? details(hist(selected)) : '');
 }
 
 // agent cards: the header is redrawn each tick, the feed only appends
@@ -687,7 +474,7 @@ function cardSkeleton(i) {
   const el = $('agent' + i);
   el.innerHTML = `<div class="ahead"><div class="arow"></div><div class="stats"></div><div class="now"></div>` +
     `<div class="result"><span class="chips result"></span><span class="links">` +
-    `<button data-m="prompt">Prompt</button><button data-m="review">Review</button><button data-m="checks">Checks</button>` +
+    `<button data-m="prompt">Prompt</button>` +
     `</span></div></div><div class="feed"></div>`;
   el.querySelector('.feed').addEventListener('click', (ev) => {
     const head = ev.target.closest('.head');
@@ -840,55 +627,24 @@ function renderAgent(i) {
   const name = names[i];
   if (!name || !selected) { setHtml(card.row, '<span class="dim">waiting for agents</span>'); return; }
   const r = R(selected), a = A(r, name), live = isLive(selected), now = Date.now();
-  const res = ((hist(selected) || {}).results || {})[name];
   const sa = live ? (state.agents || {})[name] : null;
-
   let badge = ['', 'not started'];
   if (a.done) badge = a.done.ok ? ['ok', 'finished'] : ['bad', 'failed'];
   else if (a.launch) badge = live ? ['run', 'working'] : ['warn', 'stopped'];
-  if (r.reviews[name] && !r.reviews[name].ok) badge = ['bad', 'review rejected'];
-
   const end = a.done ? a.done.ts : (live ? now : a.last);
   const elapsed = a.launch ? (end - a.launch) / 1000 : 0;
-  const idle = sa && sa.idle !== undefined && sa.state === 'running' ? sa.idle : (a.last && !a.done && live ? (now - a.last) / 1000 : null);
-  const stats = [
-    `<span>elapsed <b>${a.launch ? dur(elapsed) : '–'}</b></span>`,
-    idle !== null ? `<span class="${idle > 300 ? 'idle-warn' : ''}">idle <b>${dur(idle)}</b></span>` : '',
-    `<span>steps <b>${(sa && sa.messages) || a.steps || 0}</b></span>`,
-    `<span>tools <b>${a.tools}</b></span>`,
-    `<span>messages <b>${a.texts}</b></span>`,
-  ].join('');
-
-  let now_ = '';
-  if (live && !a.done && a.launch) now_ = sa && sa.detail ? `now: ${sa.detail}` : '';
-  else if (a.done && !a.done.ok) now_ = a.done.reason;
-
-  const chips = [];
-  if (res) {
-    const c = res.counts || {};
-    chips.push(`<span class="chip mono">${esc(sha(res.commit))}</span>`);
-    chips.push(`<span class="chip ${res.blocking ? 'bad' : 'ok'}">${res.blocking} blocking</span>`);
-    chips.push(`<span class="chip">MUST ${c.must_fix ?? c.must_fix_total ?? '?'} · SHOULD ${c.should_fix ?? '?'} · NIT ${c.nit ?? '?'}</span>`);
-    if (res.approves) {
-      // a review approves both starting candidates by name; an independent round approves none
-      for (const [who, ok] of Object.entries(res.approves))
-        chips.push(`<span class="chip ${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✕'} ${esc(who)}</span>`);
-    } else {
-      chips.push(`<span class="chip ${res.approved ? 'ok' : 'bad'}">${res.approved ? '✓' : '✕'} own</span>`);
-      chips.push(`<span class="chip ${res.other_approved ? 'ok' : 'bad'}">${res.other_approved ? '✓' : '✕'} other</span>`);
-    }
-    const ck = ((hist(selected) || {}).checks || {})[name];
-    if (ck && (ck.commands || []).length) chips.push(`<span class="chip ${ck.ok ? 'ok' : 'bad'}">checks ${ck.ok ? 'pass' : 'fail'}</span>`);
-  }
-
+  const idle = sa && sa.idle !== undefined && sa.state === 'running' ? sa.idle : null;
   setHtml(card.row, `<h3>${esc(name)}</h3><span class="model">${esc(a.model || '')}</span>` +
                     `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`);
-  setHtml(card.stats, stats);
+  setHtml(card.stats, [
+    `<span>elapsed <b>${a.launch ? dur(elapsed) : '–'}</b></span>`,
+    idle !== null ? `<span class="${idle > 300 ? 'idle-warn' : ''}">idle <b>${dur(idle)}</b></span>` : '',
+    `<span>steps <b>${a.steps || 0}</b></span>`, `<span>tools <b>${a.tools}</b></span>`, `<span>messages <b>${a.texts}</b></span>`,
+  ].join(''));
+  const now_ = live && !a.done && a.launch && sa && sa.detail ? `now: ${sa.detail}` : a.done && !a.done.ok ? a.done.reason : '';
   setHtml(card.now, esc(now_));
   card.now.title = now_;
-  setHtml(card.chips, chips.join(''));
-
-  // feed
+  // feed: append only
   const key = `${selected}|${name}`;
   if (card.key !== key) { card.key = key; card.count = 0; card.feed.innerHTML = ''; }
   const nearBottom = card.feed.scrollHeight - card.feed.scrollTop - card.feed.clientHeight < 80;
@@ -906,182 +662,12 @@ function renderAgent(i) {
   if (fresh || nearBottom) card.feed.scrollTop = card.feed.scrollHeight;
 }
 
-function renderGates() {
-  if (state.flow) { setHtml($('gates'), selected ? flowDetails(hist(selected)) : ''); return; }
-  const r = selected && R(selected), h = selected && hist(selected);
-  const b = r && (r.blockers || (h && h.blockers));
-  if (!b) {
-    setHtml($('gates'), `<div class="dim">${h && h.failed ? 'This round failed before it could be evaluated.'
-      : 'Evaluated after both reviews, the checks and the tree comparison.'}</div>`);
-    return;
-  }
-  const [n0, n1] = names;
-  if (b.decision) {
-    const d = b.decision;
-    const pick = (who) => `Plan ${d.choices[who]} (${d.plans[d.choices[who]]}'s)`;
-    setHtml($('gates'), '<ul class="gates">' +
-      names.map(who => `<li class="info"><span class="i">·</span><span>${esc(who)} chose ${esc(pick(who))}</span></li>`).join('') +
-      `<li class="pass"><span class="i">✓</span><span>${esc(d.winner)}'s plan wins</span><span class="d">${esc(d.method)}</span></li>` +
-      `<li class="info"><span class="i">·</span><span>Defects carried into the code stage</span><span class="d">${d.defects.length}</span></li>` +
-      '</ul><div class="verdict ok">Forced choice: the plan stage ends with one plan</div>');
-    return;
-  }
-  if (b.verdict === 'independent') {
-    setHtml($('gates'), '<div class="dim">Independent round: each agent worked without seeing the other, ' +
-      'so there was nothing to approve. Next round they review each other.</div>');
-    return;
-  }
-  if (b.approvals) {
-    const both = (who) => Object.values(b.approvals[who] || {}).every(Boolean);
-    const detail = (who) => Object.entries(b.approvals[who] || {}).map(([c, ok]) => `${c} ${ok ? '✓' : '✕'}`).join(' · ');
-    const list = [
-      ['Starting candidates pass the checks', b.checks, true],
-      [`${n0} approves both starting candidates`, both(n0), true, detail(n0)],
-      [`${n1} approves both starting candidates`, both(n1), true, detail(n1)],
-      ['Publishes one of the two reviewed candidates', true, false, `${b.blocking_must_fix} MUST_FIX this round`],
-    ];
-    setHtml($('gates'), '<ul class="gates">' + list.map(([label, ok, required, d]) =>
-      `<li class="${!required ? 'info' : ok ? 'pass' : 'fail'}"><span class="i">${!required ? '·' : ok ? '✓' : '✕'}</span>` +
-      `<span>${esc(label)}</span><span class="d">${esc(d || '')}</span></li>`).join('') + '</ul>' +
-      `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? 'Accepted' : 'Not yet: another round'}</div>`);
-    return;
-  }
-  const ap = b.behaviour_approved || [], op = b.other_approved || [];
-  const approve = (i) => `own ${ap[i] ? '✓' : '✕'} · other ${op[i] ? '✓' : '✕'}`;
-  const rows = [
-    ['Every check passes', b.checks, true],
-    ['No blocking MUST_FIX', b.blocking_must_fix === 0, true, `${b.blocking_must_fix} blocking of ${b.must_fix_total}`],
-    [`${n0} approves both candidates`, ap[0] && op[0], true, approve(0)],
-    [`${n1} approves both candidates`, ap[1] && op[1], true, approve(1)],
-    ['No open behavioural disagreement', !b.open_behavioural, true],
-    ['Trees are byte-identical', b.trees_equal, false],
-  ];
-  setHtml($('gates'), '<ul class="gates">' + rows.map(([label, ok, required, detail]) => {
-    const cls = !required ? 'info' : ok ? 'pass' : 'fail';
-    const i = !required ? '·' : ok ? '✓' : '✕';
-    const d = detail || (!required ? 'not required' : '');
-    return `<li class="${cls}"><span class="i">${i}</span><span>${esc(label)}</span><span class="d">${esc(d)}</span></li>`;
-  }).join('') + '</ul>' +
-  `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? 'Accepted' : 'Not yet: another round'}</div>`);
-}
-
-const divCache = {};
-async function renderDivergence() {
-  if (state.flow) {
-    const h = selected && hist(selected);
-    setHtml($('divergence'), h && h.plan ? `<div class="dim">plan file: <span class="mono">${esc(h.plan)}</span></div>`
-      : state.plan ? `<div class="dim">agreed plan: <span class="mono">${esc(state.plan.path)}</span></div>` : '');
-    return;
-  }
-  const n = selected;
-  const r = n && R(n), h = n && hist(n);
-  const totals = r && (r.div || (h && h.divergence));
-  if (!totals) {
-    $('divergence')._key = null;
-    setHtml($('divergence'), `<div class="dim">${n ? 'Compared once both candidates are committed.' : ''}</div>`);
-    return;
-  }
-  const cacheKey = `${n}|${JSON.stringify(totals)}`;
-  if (!divCache[cacheKey]) divCache[cacheKey] = parse(await api('divergence', {round:n})) || {};
-  if (n !== selected) return;
-  const div = divCache[cacheKey], stats = div.stats || {};
-  const rows = (div.differing || []).map(p => {
-    const s = stats[p] || {};
-    return `<li data-p="${esc(p)}"><span class="p" title="${esc(p)}">${esc(p)}</span>` +
-           `<span class="n"><span class="add">+${s.added || 0}</span> <span class="del">-${s.removed || 0}</span></span></li>`;
-  });
-  const [n0, n1] = names;
-  if ($('divergence')._key === cacheKey) return;
-  $('divergence')._key = cacheKey;
-  $('divergence')._html = null;
-  $('divergence').innerHTML = `<div class="dim" style="margin-bottom:6px">${differ(totals.differing || 0)} · ${totals.identical || 0} identical</div>` +
-    (rows.length ? `<div class="dim" style="font-size:12.5px;margin-bottom:4px">Click a file for the ${esc(n0)} → ${esc(n1)} diff</div><ul class="files">${rows.join('')}</ul>`
-                 : `<div class="dim">${totals.differing ? 'File list not available.' : 'The two candidates are identical.'}</div>`);
-  $('divergence').querySelectorAll('li[data-p]').forEach(li => li.onclick = () => openModal('diff', n, li.dataset.p));
-}
-
-// ---------------------------------------------------------------- modal
-async function openModal(kind, round, arg) {
-  const titles = {summary:'How far apart the two candidates ended', prompt:`Prompt sent to ${arg} · round ${round}`, review:`${arg}'s review · round ${round}`,
-                  checks:`${arg}'s checks · round ${round}`, diff:`${arg} · round ${round}`};
-  $('mtitle').textContent = titles[kind];
+async function openModal(kind, round, agent) {
+  $('mtitle').textContent = `Prompt sent to ${agent} · step ${round}`;
   $('mbody').innerHTML = '<div class="dim">loading…</div>';
   $('modal').showModal();
-  let html = '';
-  if (kind === 'summary') {
-    const body = parse(await api('summary')) || {};
-    html = body.summary ? `<pre>${esc(body.summary)}</pre>` : '<div class="dim">No summary written.</div>';
-  } else if (kind === 'prompt') {
-    const body = parse(await api('prompt', {round, agent:arg})) || {};
-    html = body.prompt ? `<pre>${esc(body.prompt)}</pre>` : '<div class="dim">No prompt recorded for this round.</div>';
-  } else if (kind === 'review') {
-    const text = await api('review', {round, agent:arg});
-    const data = parse(text);
-    html = data && data.agent ? reviewHtml(data) : (text && text !== '{}' ? `<pre>${esc(text)}</pre>` : '<div class="dim">No review written yet.</div>');
-  } else if (kind === 'checks') {
-    const data = parse(await api('checks', {round, agent:arg})) || {};
-    const cmds = data.commands || [];
-    html = cmds.length ? cmds.map(c =>
-      `<h4 style="color:${c.exit === 0 ? 'var(--ok)' : 'var(--bad)'}">${c.exit === 0 ? '✓' : '✕'} ${esc(c.command)} · exit ${c.exit} · ${c.seconds}s</h4>` +
-      (c.tail ? `<pre>${esc(c.tail)}</pre>` : '')).join('')
-      : '<div class="dim">No checks recorded for this agent in this round.</div>';
-  } else if (kind === 'diff') {
-    const body = parse(await api('diff', {round, path:arg})) || {};
-    html = `<pre class="diff">${(body.diff || '(no diff)').split('\n').map(line => {
-      const c = /^(\+\+\+|---|diff |index )/.test(line) ? 'm' : line[0] === '+' ? 'a' : line[0] === '-' ? 'r' : line.startsWith('@@') ? 'h' : '';
-      return `<span class="${c}">${esc(line)}</span>`;
-    }).join('\n')}</pre>`;
-  }
-  $('mbody').innerHTML = html;
-}
-
-function reviewHtml(d) {
-  if (d.choice !== undefined) {
-    return `<div class="result" style="font-size:13px"><span>chose <b>Plan ${esc(d.choice)}</b></span></div>` +
-      (d.reason ? `<h4>Reason</h4><div class="md">${md(String(d.reason))}</div>` : '') +
-      ((d.defects || []).length ? `<h4>Defects the chosen plan must fix</h4><ul>${d.defects.map(x =>
-        `<li>${esc(x.summary)}${x.fix ? ` <span class="dim">(fix: ${esc(x.fix)})</span>` : ''}</li>`).join('')}</ul>` : '');
-  }
-  if (d.approve || (d.notes !== undefined && d.behavior_approved === undefined)) return reviewHtmlV2(d);
-  // the orchestrator recomputes counts from the findings; the file holds the agent's own numbers
-  const fs = Array.isArray(d.findings) ? d.findings : [];
-  const n = (sev, kind) => fs.filter(f => f && f.severity === sev && (!kind || f.kind === kind)).length;
-  const c = {must_fix_total:n('MUST_FIX'), blocking_must_fix:n('MUST_FIX', 'behavioral'),
-             should_fix:n('SHOULD_FIX'), nit:n('NIT')};
-  const yes = (v) => v ? '<span style="color:var(--ok)">✓ yes</span>' : '<span style="color:var(--bad)">✕ no</span>';
-  let html = `<div class="result" style="font-size:13px;gap:16px">` +
-    `<span>approves own ${yes(d.behavior_approved)}</span><span>approves other ${yes(d.other_behavior_approved)}</span>` +
-    `<span>MUST_FIX <b>${c.must_fix_total ?? 0}</b> (blocking <b>${c.blocking_must_fix ?? 0}</b>)</span>` +
-    `<span>SHOULD_FIX <b>${c.should_fix ?? 0}</b></span><span>NIT <b>${c.nit ?? 0}</b></span></div>`;
-  const table = (title, head, rows) => rows.length
-    ? `<h4>${title}</h4><table><tr>${head.map(x => `<th>${x}</th>`).join('')}</tr>${rows.map(r => `<tr>${r.map(x => `<td>${x}</td>`).join('')}</tr>`).join('')}</table>` : '';
-  const sev = {MUST_FIX:'bad', SHOULD_FIX:'warn', NIT:''};
-  html += table('Findings', ['ID', 'Severity', 'Kind', 'Where', 'Summary', 'Resolution'], (d.findings || []).map(f =>
-    [esc(f.id), `<span class="chip ${sev[f.severity] || ''}">${esc(f.severity)}</span>`, esc(f.kind),
-     `<span class="mono">${esc(f.path)}:${esc(f.line)}</span>`, esc(f.summary), esc(f.resolution)]));
-  html += table('Remaining disagreements', ['Area', 'Kind', 'Note'], (d.remaining_disagreements || []).map(x =>
-    [esc(x.area), esc(x.kind), esc(x.note)]));
-  html += table('Areas', ['Area', 'Status', 'Kept', 'Why'], (d.areas || []).map(x =>
-    [esc(x.area), esc(x.status), esc(x.kept), esc(x.why)]));
-  return html;
-}
-
-function reviewHtmlV2(d) {
-  // current format: approval of each starting candidate by name, findings tied to a candidate, notes
-  const fs = Array.isArray(d.findings) ? d.findings : [];
-  const count = (sev) => fs.filter(f => f && f.severity === sev).length;
-  const yes = (v) => v ? '<span style="color:var(--ok)">✓ approves</span>' : '<span style="color:var(--bad)">✕ withholds</span>';
-  let html = `<div class="result" style="font-size:13px;gap:16px">` +
-    (d.approve ? Object.entries(d.approve).map(([who, ok]) => `<span>${esc(who)} ${yes(ok)}</span>`).join('')
-               : '<span class="dim">independent round: no approvals</span>') +
-    `<span>MUST_FIX <b>${count('MUST_FIX')}</b></span><span>SHOULD_FIX <b>${count('SHOULD_FIX')}</b></span>` +
-    `<span>NIT <b>${count('NIT')}</b></span></div>`;
-  const sev = {MUST_FIX:'bad', SHOULD_FIX:'warn', NIT:''};
-  if (fs.length) html += `<h4>Findings</h4><table><tr><th>ID</th><th>Candidate</th><th>Severity</th><th>Where</th><th>Summary</th><th>Fix</th></tr>` +
-    fs.map(f => `<tr><td>${esc(f.id)}</td><td>${esc(f.candidate)}</td><td><span class="chip ${sev[f.severity] || ''}">${esc(f.severity)}</span></td>` +
-      `<td><span class="mono">${esc(f.path)}:${esc(f.line)}</span></td><td>${esc(f.summary)}</td><td>${esc(f.fix)}</td></tr>`).join('') + '</table>';
-  if (d.notes) html += `<h4>Notes</h4><div class="md">${md(String(d.notes))}</div>`;
-  return html;
+  const body = parse(await api('prompt', {round, agent})) || {};
+  $('mbody').innerHTML = body.prompt ? `<pre>${esc(body.prompt)}</pre>` : '<div class="dim">No prompt recorded for this step.</div>';
 }
 
 // ----------------------------------------------------------------- loop
@@ -1092,7 +678,6 @@ function render() {
   if (follow || !nums.includes(selected)) selected = state.round && nums.includes(state.round) ? state.round : nums[nums.length - 1] || null;
   renderHeader(); renderTabs(); renderSteps();
   renderAgent(0); renderAgent(1);
-  renderGates(); renderDivergence();
 }
 const schedule = () => { if (!pending) { pending = true; requestAnimationFrame(render); } };
 
@@ -1100,9 +685,7 @@ async function poll() {
   const next = parse(await api('state'));
   if (!next) return;
   state = next;
-  // agent order normally comes from the events; a flow run names its agents instead
-  const known = state.flow && state.names ? state.names : Object.keys(state.agents || {});
-  for (const name of known) if (!names.includes(name) && names.length < 2) names.push(name);
+  for (const name of state.names || Object.keys(state.agents || {})) if (!names.includes(name) && names.length < 2) names.push(name);
   schedule();
 }
 
@@ -1119,10 +702,16 @@ function connect() {
   es.onerror = () => { es.close(); setTimeout(connect, 2000); };
 }
 
+$('home').href = `/${TOKEN}/`;
+$('stop').onclick = async () => {
+  if (!confirm('Stop this run?')) return;
+  const r = await fetch(`/${TOKEN}/api/stop`, {method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({id:BASE.split('/').pop()})});
+  if (!r.ok) alert((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  poll();
+};
 cardSkeleton(0); cardSkeleton(1);
-$('sumbtn').onclick = () => openModal('summary', selected, '');
-poll(); connect(); pollPipeline();
-setInterval(pollPipeline, 3000);
+poll(); connect();
 setInterval(poll, 2000);
 setInterval(schedule, 1000);   // keeps elapsed / idle ticking
 </script>

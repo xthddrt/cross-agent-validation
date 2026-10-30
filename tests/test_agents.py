@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 from cav import agents as agent_mod
-from cav import config, events
+from cav import events
 from cav.gitops import git
 
 
@@ -58,7 +58,7 @@ class EventsTest(unittest.TestCase):
 
 class KimiBlockingTest(unittest.TestCase):
     def agent(self):
-        return agent_mod.KimiAgent(config.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro"),
+        return agent_mod.KimiAgent(agent_mod.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro"),
                                    "log.txt")
 
     def test_pending_approval_wins_over_busy(self):
@@ -147,7 +147,7 @@ class KimiBlockingTest(unittest.TestCase):
 
     def test_opencode_session_directory_is_the_worktree(self):
         """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
-        agent = agent_mod.OpenCodeAgent(config.AgentSpec("deepseek", "opencode"), "log.txt")
+        agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")
         with mock.patch.dict(os.environ, {"PWD": "C:/somewhere/else"}):
             self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
 
