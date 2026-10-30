@@ -1,6 +1,7 @@
 """Tree comparison, review validation, acceptance, publication, events and the dashboard."""
 
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -632,6 +633,12 @@ class KimiBlockingTest(unittest.TestCase):
     def test_opencode_runs_ponytail_at_the_cav_level(self):
         agent = agent_mod.OpenCodeAgent(config.AgentSpec("deepseek", "opencode"), "log.txt")
         self.assertEqual(agent._env()["PONYTAIL_DEFAULT_MODE"], agent_mod.PONYTAIL_LEVEL)
+
+    def test_opencode_session_directory_is_the_worktree(self):
+        """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
+        agent = agent_mod.OpenCodeAgent(config.AgentSpec("deepseek", "opencode"), "log.txt")
+        with mock.patch.dict(os.environ, {"PWD": "C:/somewhere/else"}):
+            self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
 
 
 class AdapterCaptureTest(unittest.TestCase):

@@ -137,9 +137,13 @@ class OpenCodeAgent(Agent):
             except OSError:
                 pass
 
-    def _env(self):
+    def _env(self, cwd=None):
         env = os.environ.copy()
         env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
+        if cwd:
+            # OpenCode takes the session directory from PWD, not the process directory, so an
+            # inherited PWD would put every session in the folder `cav` was started from.
+            env["PWD"] = str(cwd)
         path = env.get("PATH", "")
         if GIT_DIR.lower() not in path.lower():
             env["PATH"] = path + os.pathsep + GIT_DIR
@@ -162,7 +166,7 @@ class OpenCodeAgent(Agent):
             self.state.touch("launched")
             self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, text=True,
-                                          encoding="utf-8", errors="replace", env=self._env())
+                                          encoding="utf-8", errors="replace", env=self._env(cwd))
             for line in self._proc.stdout:
                 log.write(line)
                 log.flush()
