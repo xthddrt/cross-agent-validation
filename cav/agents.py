@@ -198,9 +198,10 @@ class OpenCodeAgent(Agent):
         elif kind == "tool":
             tool = part.get("tool", "?")
             detail = part.get("state") or {}
-            self._event("agent.tool.start", {"tool": tool, "input": detail.get("input")})
-            self._event("agent.tool.end", {"tool": tool, "exit": _find_exit(detail),
-                                           "output_tail": (detail.get("output") or "")[-800:]})
+            call = part.get("callID") or part.get("id")
+            self._event("agent.tool.start", {"tool": tool, "call": call, "input": detail.get("input")})
+            self._event("agent.tool.end", {"tool": tool, "call": call, "exit": _find_exit(detail),
+                                           "output_tail": (detail.get("output") or "")[-4000:]})
             self.state.touch(f"tool:{tool}")
         elif kind == "step-start":
             self.state.touch("step", self.state.messages + 1)
@@ -293,13 +294,16 @@ class KimiAgent(Agent):
                     self._event("agent.thinking", {"text": part.get("text") or ""})
                 elif kind == "tool_use":
                     self._event("agent.tool.start", {"tool": part.get("tool_name"),
+                                                     "call": part.get("tool_call_id"),
                                                      "input": part.get("input")})
                 elif kind == "tool_result":
                     content = part.get("output") or part.get("content") or ""
                     if not isinstance(content, str):
                         content = json.dumps(content)
+                    # Kimi lists a result before its call, so the dashboard pairs them by id
                     self._event("agent.tool.end", {"tool": part.get("tool_name"),
-                                                   "output_tail": content[-800:]})
+                                                   "call": part.get("tool_call_id"),
+                                                   "output_tail": content[-4000:]})
         self._transcript.flush()
 
     def _pending(self, detail):
