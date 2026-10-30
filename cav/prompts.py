@@ -1,149 +1,78 @@
-"""Prompt text for a round: the task, both candidates on equal terms, and the review contract.
-
-Four variants: a plan or code, and an independent first round or a review round. The wording
-is kept neutral: candidates are named by agent, judged against the task only, and a tie
-between two equivalent versions goes the same way for both agents (less code), so it cannot
-keep the two proposals apart.
-"""
+"""What each agent is told, step by step. Short, and the same for both agents: nothing names an
+agent or says whose anything is, and a rejection counts only with a defect or a missed criterion."""
 
 import sys
 
-PLAN_FILE = "CAV-PLAN.md"
-PLAN_CONTENT = "what changes, where (files and functions), how it will be verified, and what is out of scope"
-RECONCILE_CONTENT = ('a first line "Base: Candidate X" or "Base: Candidate Y" (the branch to build on); then, for '
-                     "each part of the task, keep X, keep Y, or new, with the reason; what to port onto the base; "
-                     "how it will be verified")
+PLAN_WORDS, WHY_WORDS, MAX_DEFECTS = 400, 100, 5
+HEAD = "You are one of two agents working on the task below."
+PARETO = ("the few changes that give most of the result (the 20% of the work that delivers 80% of the value), "
+          "each with what and where; what you leave out on purpose; how it is checked. Meet the task's "
+          "acceptance criteria and nothing beyond them.")
 
 
-def task_block(case):
-    prompt = (case.task_prompt or "").strip()
-    lines = ["TASK", prompt or "(no task text was configured)"]
-    for title, items in (("Acceptance", case.task_acceptance),
-                         ("Must not regress", case.base_invariants),
-                         ("Read first", (case.task or {}).get("context_files") or [])):
-        if items:
-            lines += [f"{title}:"] + [f"- {item}" for item in items]
-    return lines + [""]
+def _checks(checks):
+    return "; ".join(c.replace("{python}", f'"{sys.executable}"') for c in checks) or "none configured"
 
 
-def sources_block(case):
-    """Two branches being reconciled, shown blind: neutral labels, plain folders."""
-    sources = (case.task or {}).get("sources") or {}
-    if not sources:
-        return []
-    return (["BRANCHES TO RECONCILE (read-only folders; neither is yours)"]
-            + [f"- Candidate {label}: {path}" for label, path in sorted(sources.items())] + [""])
+def _task(task):
+    return [HEAD, "", "TASK", task]
 
 
-def plan_block(agent, other, case):
-    """The code stage of a pipeline: which plan each agent implements."""
-    plans = (case.task or {}).get("plans") or {}
-    files = plans.get("files") or {}
-    if not files:
-        return []
-    if plans.get("agreed"):
-        start = (case.task or {}).get("plan_base")
-        title = ("PLAN (chosen in the plan stage; implement it, including the defects listed at its end)"
-                 if plans.get("forced") else "PLAN (both agents agreed on it; implement it)")
-        return [title, f"- {files[agent]}",
-                *([f"Your working tree starts from Candidate {start}, the plan's base."] if start else []),
-                "Judge candidates against the task and this plan. A departure from the plan is a MUST_FIX",
-                "unless the candidate's notes explain why the plan was wrong.", ""]
-    return ["PLANS (no agreed plan; each agent implements its own)",
-            f"- {agent}: {files[agent]}", f"- {other}: {files[other]}", ""]
+def plan(task, path):
+    return "\n".join([
+        *_task(task), "",
+        f"Write a plan to {path}, at most {PLAN_WORDS} words: {PARETO}",
+        "Don't edit code. Don't ask questions.",
+    ]) + "\n"
 
 
-def review_block(agent, other, round_no, review_json, reviewing, planning):
-    names = sorted((agent, other))
-    if not reviewing:
-        return [f"REVIEW: write this JSON to {review_json}",
-                f'{{"round": {round_no}, "agent": "{agent}", "notes": "<your approach, and anything you did not do>"}}']
-    approve = ", ".join(f'"{name}": true|false' for name in names)
-    candidate = "|".join(names)
-    defect = ("something that would make the code wrong or leave part of the task undone" if planning else
-              "wrong behaviour, an unmet part of the task, a security hole or data loss")
-    return [
-        f"REVIEW: write this JSON to {review_json}",
-        f'{{"round": {round_no}, "agent": "{agent}", "approve": {{{approve}}},',
-        f' "findings": [{{"id": "F-01", "candidate": "{candidate}", "severity": "MUST_FIX|SHOULD_FIX|NIT",',
-        '               "path": "<file in that candidate\'s checkout>", "line": <n>, "summary": "...", "fix": "..."}],',
-        ' "notes": "<what you took from which candidate, and why>"}',
-        "- Approve each candidate you started this round from, unless it has a defect: " + defect + ".",
-        "  Each defect is a MUST_FIX on that candidate, with a real path and line in its checkout.",
-        "- Style and wording are SHOULD_FIX or NIT. They never block.",
+def judge(task, candidates, reply, plan_path):
+    """`candidates`: (label, folder, checks summary), in the order to list them."""
+    return "\n".join([
+        *_task(task), "", "CANDIDATES (read-only folders)",
+        *[f"- Candidate {label}: {folder} (checks: {checks})" for label, folder, checks in candidates], "",
+        "1. Judge each candidate against the task only. Approve it unless it has a defect: wrong behaviour, an "
+        "unmet acceptance criterion, a security hole or data loss. Style and wording never block.",
+        f"2. Write JSON to {reply}:",
+        '{"approve": {"X": true|false, "Y": true|false}, "defects": [{"candidate": "X|Y", "file": "<path in that '
+        'candidate>", "line": 1, "problem": "...", "fix": "..."}], "prefer": "X|Y"}',
+        f"A rejected candidate has 1 to {MAX_DEFECTS} defects; an approved one has none. \"prefer\" is the one you "
+        "would keep if only one could be kept.",
+        f"3. Write a plan to {plan_path}, at most {PLAN_WORDS} words: first line \"Base: Candidate X\" or "
+        f"\"Base: Candidate Y\" (the candidate to build on); then what makes it meet the task, fixing its defects "
+        f"and taking what the other does better: {PARETO}",
+        "Don't edit code. Don't ask questions.",
+    ]) + "\n"
+
+
+def agree(task, candidates, reviews, plans, reply):
+    """`candidates`: (label, folder); `reviews`: review files; `plans`: (number, path)."""
+    lines = _task(task)
+    if candidates:
+        lines += ["", "CANDIDATES (read-only folders)"] + [f"- Candidate {label}: {folder}" for label, folder in candidates]
+    if reviews:
+        lines += ["", "REVIEWS OF THE CANDIDATES (authors not shown)"] + [f"- {path}" for path in sorted(map(str, reviews))]
+    lines += ["", "PLANS (authors not shown)"] + [f"- Plan {number}: {path}" for number, path in plans]
+    lines += [
+        "", "Approve each plan unless it misses an acceptance criterion or would not work. A plan you would have "
+        "written differently is still approved; preferring the other plan is not a reason to reject one.",
+        f"Write JSON to {reply}:",
+        '{"approve": {"1": true|false, "2": true|false}, "why": {"<rejected plan number>": "<the criterion it '
+        f'misses or why it would not work, at most {WHY_WORDS} words>"}}, "prefer": 1|2}}',
+        '"prefer" is the plan you would keep if only one could be kept. Don\'t edit files. Don\'t ask questions.',
     ]
-
-
-def round_prompt(agent, other, round_no, case, worktree, review_json, context):
-    phase = context.get("phase", "reconcile")
-    planning = case.mode == "plan"
-    reviewing = phase == "reconcile"
-    work = "plan" if planning else "solution"
-    lines = [f"You are {agent}. You and {other} each propose a {work} for the task below. Round {round_no}.",
-             f"Repository: {case.host_repo}", f"Your working tree: {worktree}", "", *task_block(case),
-             *sources_block(case), *plan_block(agent, other, case)]
-    content = RECONCILE_CONTENT if (planning and (case.task or {}).get("sources")) else PLAN_CONTENT
-
-    if reviewing:
-        own, theirs = context.get("own_review"), context.get("other_review")
-        lines += ["CANDIDATES",
-                  f"- {agent}: {context['own_sha']} (your working tree starts here; checkout: {context.get('own_tree')})",
-                  f"- {other}: {context['other_sha']} (checkout: {context.get('other_tree')}; "
-                  f"diff from {agent}'s: {context.get('other_patch') or 'none, the trees are identical'})"]
-        if own or theirs:
-            lines.append(f"- Last reviews: {agent} {own or '(none)'}, {other} {theirs or '(none)'}")
-        lines += ["", "DO", "1. Read both candidates. Judge each against the task only.",
-                  f"2. Make your working tree the best {work}: take either candidate whole, parts of each, "
-                  "or new work."]
-        lines += ([f"3. Where two plans say the same thing, keep the shorter wording. A plan has {content}.",
-                   f"4. Change no file but {PLAN_FILE}, then write your review."] if planning else
-                  ["3. Where two versions do the same thing, keep the one with less code.",
-                   "4. Build and test what you change, then write your review."])
-    elif planning:
-        lines += ["DO", "1. Read the code the task touches." if content is PLAN_CONTENT else
-                  "1. Read both branches to reconcile. Judge each against the task only.",
-                  f"2. Write your plan in {PLAN_FILE} at the root of your working tree: {content}.",
-                  f"3. Change no other file, then write your review. {other} plans independently; "
-                  "you will not see its plan this round."]
-    else:
-        lines += ["DO", "1. Read the code the task touches.", "2. Implement the task in your working tree.",
-                  f"3. Build and test what you change, then write your review. {other} works independently; "
-                  "you will not see its work this round."]
-
-    lines += ["", "RULES",
-              f"- Change only your working tree, and only with your {work}. Temporary files go in "
-              f"{context.get('scratch')}.",
-              f"- Don't open {other}'s working tree ({context.get('other_worktree')}); it is being edited.",
-              "- No git commands that change history or the index (commit, add, checkout, reset, stash...). "
-              "The orchestrator commits.",
-              "- Don't ask questions; nobody is watching. Decide, and explain in the review.",
-              "- Don't claim a test you didn't run.", ""]
-    if case.checks:
-        lines += ["The orchestrator then runs: " + "; ".join(c.replace("{python}", sys.executable) for c in case.checks), ""]
-    lines += review_block(agent, other, round_no, review_json, reviewing, planning)
     return "\n".join(lines) + "\n"
 
 
-def decide_prompt(agent, round_no, case, plans, decision_json):
-    """The plan stage's forced choice: two plans, blind (random order, no authors), choose one."""
-    lines = [f"You are {agent}. Two plans were written for the task below. Choose the one to implement. "
-             f"Round {round_no}.", f"Repository: {case.host_repo}", "", *task_block(case), *sources_block(case),
-             "PLANS (in random order; who wrote which is not shown)",
-             f"- Plan 1: {plans[1]}", f"- Plan 2: {plans[2]}", "",
-             "DO", "1. Read both plans and the code they refer to. Judge each against the task only.",
-             "2. Choose one. You must choose: there is no third option and no merging.",
-             "3. List the defects the plan you chose must still fix: anything that would make the code wrong "
-             "or leave part of the task undone. Leave style alone.", "",
-             "RULES", "- Change no files; only write the decision below.",
-             "- Don't ask questions; nobody is watching.", "",
-             f"DECISION: write this JSON to {decision_json}",
-             f'{{"round": {round_no}, "agent": "{agent}", "choice": 1|2, '
-             '"defects": [{"summary": "...", "fix": "..."}], "reason": "..."}']
-    return "\n".join(lines) + "\n"
+def build(plan_path, work, checks, note, base_label=None):
+    start = f" It starts from Candidate {base_label}, the plan's base." if base_label else ""
+    return "\n".join([
+        f"Implement this plan: {plan_path}, in {work}.{start} Write the least code that does it.",
+        f"Run the checks: {_checks(checks)}.",
+        f"Write what you did, in a few lines, to {note}. Change only files in {work}. No git commands. "
+        "Don't ask questions.",
+    ]) + "\n"
 
 
-def retry_note(attempt, problem):
-    return f"""
-Your previous attempt left no usable review ({problem}). Continue from your working tree as it
-is now, and make sure the review file exists and is valid.
-"""
+def retry_note(problem):
+    return f"\nYour last answer was not usable: {problem}. Fix that and answer again.\n"

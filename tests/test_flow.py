@@ -1,263 +1,224 @@
-"""Two-round loop with fake agents, snapshots, the check runner, config and agent adapters."""
+"""The loop end to end with fake agents: judge or plan, agree, build (both), judge, publish."""
 
-import os
+import json
 import pathlib
+import re
 import shutil
 import tempfile
-import time
 import unittest
 from unittest import mock
 
-from cav import agents as agent_mod
-from cav import config
-from cav.gitops import Repo, git, git_ok
-from cav.orchestrator import Orchestrator
-from tests.test_v2 import ROUND_RE, StructuredFake, make_repo
-
-BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
-            "summary": "the other candidate is wrong", "resolution": "fix it"}
+from cav.agents import RunState
+from cav.flow import Flow
+from cav.gitops import git
+from tests.test_agents import with_origin
 
 
-class AgreesInRoundTwo(StructuredFake):
-    """Round 1: blocks the other candidate with a behavioural MUST_FIX. Round 2: agrees."""
+class Fake:
+    """Answers each step from what is on disk. `approve(folder)` judges a candidate, `approve_plan(text)`
+    a plan; `prefer` and `keep_plan` pick one; `base(folders)` is the candidate a plan builds on."""
+
+    def __init__(self, name, approve=lambda folder: True, prefer=lambda folders: "X", base=lambda folders: "X",
+                 plan_text=None, approve_plan=lambda text: True, keep_plan=lambda texts: 1):
+        self.name, self.state, self.session_id = name, RunState(), None
+        self.approve, self.prefer, self.base = approve, prefer, base
+        self.plan_text = plan_text or (lambda attempt: f"{name} plan: add feature.txt.")
+        self.approve_plan, self.keep_plan = approve_plan, keep_plan
+        self.prompts, self.sessions, self.plans, self.builds = [], 0, 0, 0
+
+    def reset(self):
+        self.state = RunState()
+
+    def abort(self):
+        pass
 
     def run(self, prompt, cwd):
-        first = int(ROUND_RE.search(prompt).group(1)) == 1
-        self.approve, self.findings = not first, [BLOCKING] if first else []
-        return super().run(prompt, cwd)
+        if not self.session_id:
+            self.session_id, self.sessions = f"s-{self.name}-{self.sessions + 1}", self.sessions + 1
+        self.prompts.append(prompt)
+        if "1. Judge each candidate" in prompt:
+            folders = dict(re.findall(r"- Candidate ([XY]): (\S+) \(checks", prompt))
+            approve = {label: self.approve(pathlib.Path(folder)) for label, folder in folders.items()}
+            defects = [{"candidate": label, "file": "base.txt", "line": 1, "problem": "wrong"}
+                       for label, ok in approve.items() if not ok]
+            reply = re.search(r"Write JSON to (\S+):", prompt).group(1)
+            pathlib.Path(reply).write_text(json.dumps({"approve": approve, "defects": defects,
+                                                       "prefer": self.prefer(folders)}), encoding="utf-8")
+            self.write_plan(re.search(r"Write a plan to (\S+), at most", prompt).group(1),
+                            f"Base: Candidate {self.base(folders)}\n")
+        elif "PLANS (authors not shown)" in prompt:
+            plans = {int(n): pathlib.Path(path).read_text(encoding="utf-8")
+                     for n, path in re.findall(r"- Plan (\d): (\S+)", prompt)}
+            approve = {str(n): self.approve_plan(text) for n, text in plans.items()}
+            reply = re.search(r"Write JSON to (\S+):", prompt).group(1)
+            pathlib.Path(reply).write_text(json.dumps({
+                "approve": approve, "why": {n: "it misses a criterion" for n, ok in approve.items() if not ok},
+                "prefer": self.keep_plan(plans)}), encoding="utf-8")
+        elif "Write a plan to" in prompt:
+            self.write_plan(re.search(r"Write a plan to (\S+), at most", prompt).group(1), "")
+        elif prompt.startswith("Implement this plan"):
+            self.builds += 1
+            work = pathlib.Path(re.search(r", in (\S+)\. (?:It starts|Write)", prompt).group(1))
+            (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
+            pathlib.Path(re.search(r"in a few lines, to (\S+)\. Change", prompt).group(1)).write_text("built",
+                                                                                                    encoding="utf-8")
+        self.state.finished = True
+        return {"ok": True, "text": "done", "reason": "completed"}
+
+    def write_plan(self, path, head):
+        self.plans += 1
+        pathlib.Path(path).write_text(head + self.plan_text(self.plans), encoding="utf-8")
 
 
-class LoopTest(unittest.TestCase):
+def has(name):
+    """A judge or base rule: the candidate whose folder holds this file."""
+    return lambda folder: (pathlib.Path(folder) / name).exists()
+
+
+class FlowTest(unittest.TestCase):
     def setUp(self):
-        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-test-"))
-        self.repo, self.base = make_repo(self.tmp)
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-flow-"))
+        self.work, self.origin, self.base = with_origin(self.tmp)
+        self.branch = git("rev-parse", "--abbrev-ref", "HEAD", cwd=self.work)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def case(self, rounds=2):
-        return config.Case(
-            name="flow", host_repo=self.repo, base=self.base,
-            agents={"deepseek": config.AgentSpec("deepseek", "opencode", bootstrap_ref=self.base),
-                    "kimi": config.AgentSpec("kimi", "kimi", bootstrap_ref=self.base)},
-            max_rounds=rounds, round_seconds=30, stall_seconds=5, retries=0,
-        )
+    def run_flow(self, fakes, **options):
+        with mock.patch("cav.flow.agent_mod.build", side_effect=lambda spec, log, title_prefix="": fakes[spec.name]):
+            flow = Flow(str(self.work), "Add feature.txt.", self.tmp / "runs" / "r1", **options)
+            code = flow.run()
+        return code, flow
 
-    def test_two_rounds_converge(self):
-        fakes = {name: AgreesInRoundTwo(name, lambda r, name=name: {
-            "shared.txt": "agreed\n" if r >= 2 else f"{name}\n"}) for name in ("deepseek", "kimi")}
+    def steps(self, flow):
+        return [(item["step"], item.get("verdict")) for item in flow.state["history"]]
 
-        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
-            orchestrator = Orchestrator(self.case(), self.tmp / "run")
-            state = orchestrator.run()
+    def branches(self):
+        shas = {}
+        for name in ("feat-a", "feat-b"):
+            git("checkout", "-q", "-b", name, self.base, cwd=self.work)
+            (self.work / f"{name}.txt").write_text(name, encoding="utf-8")
+            git("add", "-A", cwd=self.work)
+            git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", f"note {name}", cwd=self.work)
+            shas[name] = git("rev-parse", "HEAD", cwd=self.work)
+        git("checkout", "-q", self.branch, cwd=self.work)
+        return shas
 
-        self.assertEqual(state["phase"], "converged")
-        self.assertEqual(len(state["history"]), 2)
-        self.assertFalse(state["history"][0]["converged"], "a blocking finding stops round 1")
-        self.assertEqual(state["history"][0]["divergence"]["differing"], 1,
-                         "round 2 starts from two proposals that differ in one path")
-        self.assertTrue(state["history"][1]["converged"])
-        final = state["final"]
-        published = final["published_from"]["agent"]
-        self.assertEqual(final["commit"], state["history"][0]["results"][published]["commit"],
-                         "round 2 approved round 1's proposals, so one of those is published")
-        self.assertEqual(git("show", f"{final['commit']}:shared.txt", cwd=self.repo).strip(), published)
-        self.assertTrue((orchestrator.run_dir / "REPORT.md").exists())
-        self.assertIn("finished", (orchestrator.run_dir / "run.log").read_text(encoding="utf-8"))
+    def label_of(self, flow, ref):
+        return next(label for label, item in flow.state["labels"].items() if item["ref"] == ref)
 
-    def test_each_round_starts_from_both_latest_proposals(self):
-        """Round N+1: each agent's tree is its own round-N proposal, and the other's round-N
-        proposal is handed over as a fixed checkout, a diff and its review, never the live tree."""
-        fakes = {name: StructuredFake(name, lambda r, name=name: {"shared.txt": f"{name} round {r}\n"},
-                                      approve=False, findings=[BLOCKING]) for name in ("deepseek", "kimi")}
-        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
-            orchestrator = Orchestrator(self.case(rounds=3), self.tmp / "run")
-            state = orchestrator.run()
+    def assert_blind(self, fakes, leaks=()):
+        for fake in fakes.values():
+            for prompt in fake.prompts:
+                for word in ("deepseek", "kimi", "yours", "your plan", *leaks):
+                    self.assertNotIn(word, prompt)
 
-        run_dir = orchestrator.run_dir
-        for previous, item in zip(state["history"], state["history"][1:]):
-            n = item["round"]
-            self.assertEqual(item["starts"], {name: previous["results"][name]["commit"] for name in previous["results"]},
-                             f"round {n} starts from round {previous['round']}'s proposals")
-            for name, other in (("deepseek", "kimi"), ("kimi", "deepseek")):
-                checkout = run_dir / "rounds" / f"r{n}" / "candidates" / other
-                self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), previous["results"][other]["commit"])
-                self.assertEqual((checkout / "shared.txt").read_text(encoding="utf-8"), f"{other} round {n - 1}\n")
-                prompt = (run_dir / "rounds" / f"r{n}" / f"{name}-context.md").read_text(encoding="utf-8")
-                self.assertIn(f"- {name}: {previous['results'][name]['commit']} (your working tree starts here", prompt)
-                self.assertIn(f"- {other}: {previous['results'][other]['commit']} (checkout: {checkout}", prompt)
-                self.assertIn(str(checkout), prompt)
-                self.assertIn(str(run_dir / "reviews" / f"r{n - 1}" / f"{other}-review.json"), prompt)
-                patch = (run_dir / "rounds" / f"r{n}" / f"{name}-other.patch").read_text(encoding="utf-8")
-                self.assertIn(f"+{other} round {n - 1}", patch)
-                self.assertIn(f"-{name} round {n - 1}", patch)
+    def test_task_plan_agree_build_judge_publish(self):
+        fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
+        self.assertTrue(flow.state["outcome"].startswith("merged and pushed"))
+        self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
+        self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build")
+        self.assertEqual([fake.sessions for fake in fakes.values()], [4, 4], "a fresh session for every step")
+        self.assert_blind(fakes)
 
-    def test_snapshot_works_without_commits(self):
-        fresh = self.tmp / "no-commits"
-        fresh.mkdir()
-        git("init", "-q", cwd=fresh)
-        git("config", "user.email", "t@example.com", cwd=fresh)
-        git("config", "user.name", "t", cwd=fresh)
-        (fresh / "a.txt").write_text("first\n", encoding="utf-8")
+    def test_a_branch_both_approve_is_the_result_at_once(self):
+        shas = self.branches()
+        fakes = {name: Fake(name, approve=has("feat-a.txt")) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(self.steps(flow), [("judge", "accepted")])
+        self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
+        for label in flow.state["labels"]:
+            self.assertFalse((flow.run_dir / "candidates" / "c1" / f"candidate-{label}" / ".git").exists())
+        self.assert_blind(fakes, leaks=("feat-a", "feat-b", "note feat"))
 
-        orchestrator = Orchestrator(self.case(), self.tmp / "snap2")
-        sha, problem = orchestrator.snapshot(Repo(fresh), config.AgentSpec("kimi", "kimi"))
+    def test_approval_decides_not_preference(self):
+        self.branches()
+        fakes = {"deepseek": Fake("deepseek", approve=has("feat-a.txt"), prefer=lambda folders: "Y"),
+                 "kimi": Fake("kimi", approve=lambda folder: True,
+                              prefer=lambda folders: next(l for l, f in folders.items() if has("feat-b.txt")(f)))}
+        code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
+        self.assertEqual(code, 0, flow.state)
+        label = self.label_of(flow, "feat-a")
+        self.assertEqual(flow.state["final"]["candidate"], label, "both approve feat-a, though neither prefers it")
+        self.assertEqual(flow.state["decided"], f"both approved Candidate {label}")
 
-        self.assertIsNone(problem)
-        self.assertIn("a.txt", git("ls-tree", "-r", "--name-only", sha, cwd=fresh).splitlines())
-        self.assertFalse(git_ok("rev-parse", "--verify", "--quiet", "HEAD", cwd=fresh),
-                         "snapshot must not create a HEAD in the source repo")
+    def test_no_shared_approval_agrees_a_base_and_both_build_from_it(self):
+        shas = self.branches()
+        on_a = lambda folders: next(label for label, folder in folders.items() if has("feat-a.txt")(folder))
+        fakes = {"deepseek": Fake("deepseek", approve=lambda f: has("feature.txt")(f) or has("feat-a.txt")(f), base=on_a),
+                 "kimi": Fake("kimi", approve=lambda f: has("feature.txt")(f) or has("feat-b.txt")(f), base=on_a)}
+        code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(self.steps(flow), [("judge", "rejected"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
+        build = flow.state["history"][2]
+        self.assertEqual(build["start"], shas["feat-a"], "both builds start from the agreed base")
+        for commit in build["commits"].values():
+            self.assertEqual(git("merge-base", commit, shas["feat-a"], cwd=self.work), shas["feat-a"])
+        agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
+        self.assertIn("Defects found in the base", agreed, "the judges' defects against the base go to the builders")
+        self.assert_blind(fakes, leaks=("feat-a", "feat-b"))
 
-    def test_snapshot_and_commit_work_without_git_identity(self):
-        fresh = self.tmp / "no-identity"
-        fresh.mkdir()
-        git("init", "-q", cwd=fresh)
-        (fresh / "a.txt").write_text("first\n", encoding="utf-8")
+    def test_plans_without_both_approvals_go_to_the_plan_both_would_keep(self):
+        keep = lambda texts: next(n for n, text in texts.items() if "deepseek plan" in text)
+        fakes = {"deepseek": Fake("deepseek", approve_plan=lambda text: "deepseek" in text, keep_plan=keep),
+                 "kimi": Fake("kimi", approve_plan=lambda text: "kimi" in text, keep_plan=keep)}
+        code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
+        self.assertIn("deepseek plan", agreed)
+        self.assertIn("Objections to this plan", agreed)
+        self.assertIn("both would keep plan", flow.state["plan"]["how"])
 
-        blocked = {"GIT_CONFIG_GLOBAL": str(self.tmp / "no-global.cfg"),
-                   "GIT_CONFIG_SYSTEM": str(self.tmp / "no-system.cfg")}
-        with mock.patch.dict(os.environ, blocked):
-            orchestrator = Orchestrator(self.case(), self.tmp / "snap3")
-            sha, problem = orchestrator.snapshot(Repo(fresh), config.AgentSpec("kimi", "kimi"))
-            self.assertIsNone(problem)
-            self.assertTrue(sha)
-            (fresh / "b.txt").write_text("second\n", encoding="utf-8")
-            self.assertTrue(Repo(fresh).commit_all(fresh, "tool-made commit"))
+    def test_a_split_on_plans_is_a_coin_flip(self):
+        fakes = {"deepseek": Fake("deepseek", approve_plan=lambda text: False, keep_plan=lambda texts: 1),
+                 "kimi": Fake("kimi", approve_plan=lambda text: False, keep_plan=lambda texts: 2)}
+        with mock.patch("cav.flow.random.choice", side_effect=lambda items: 2 if tuple(items) == (1, 2) else items[0]) as flip:
+            code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        flip.assert_any_call((1, 2))
+        self.assertIn("coin flip chose plan 2", flow.state["plan"]["how"])
 
-    def test_snapshot_excludes_and_leaves_repo_alone(self):
-        secondary = self.tmp / "secondary"
-        secondary.mkdir()
-        git("init", "-q", cwd=secondary)
-        git("config", "user.email", "t@example.com", cwd=secondary)
-        git("config", "user.name", "t", cwd=secondary)
-        (secondary / "base.txt").write_text("base\n", encoding="utf-8")
-        git("add", "-A", cwd=secondary)
-        git("commit", "-q", "-m", "base", cwd=secondary)
-        before = git("rev-parse", "HEAD", cwd=secondary)
-        (secondary / "changed.txt").write_text("work\n", encoding="utf-8")
-        (secondary / "reconciliation").mkdir()
-        (secondary / "reconciliation" / "note.md").write_text("meta\n", encoding="utf-8")
+    def test_the_last_judge_keeps_the_result_both_would_keep(self):
+        keep = lambda folders: next(label for label, folder in folders.items()
+                                    if (pathlib.Path(folder) / "feature.txt").read_text() == "built by kimi\n")
+        fakes = {name: Fake(name, approve=lambda folder: False, prefer=keep) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, push=False, max_builds=2)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual([step for step, _ in self.steps(flow)],
+                         ["plan", "agree", "build", "judge", "agree", "build", "judge"])
+        self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
+        self.assertEqual(git("show", f"{flow.state['final']['commit']}:feature.txt", cwd=self.work), "built by kimi")
+        self.assertEqual(len(flow.state["final"]["open_defects"]), 2, "each judge's defect against it stays open")
 
-        spec = config.AgentSpec("kimi", "kimi", bootstrap_exclude=["reconciliation"])
-        orchestrator = Orchestrator(self.case(), self.tmp / "snap")
-        sha, problem = orchestrator.snapshot(Repo(secondary), spec)
+    def test_failing_checks_are_never_accepted_or_pushed(self):
+        fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, checks=['{python} -c "import sys; sys.exit(1)"'], max_builds=1)
+        self.assertEqual(code, 2)
+        self.assertEqual(flow.state["outcome"], "checks fail")
+        self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
+        self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base)
 
-        self.assertIsNone(problem)
-        files = git("ls-tree", "-r", "--name-only", sha, cwd=secondary).splitlines()
-        self.assertIn("changed.txt", files)
-        self.assertNotIn("reconciliation/note.md", files)
-        self.assertEqual(git("rev-parse", "HEAD", cwd=secondary), before)
-        status = git("status", "--porcelain", cwd=secondary)
-        self.assertIn("changed.txt", status)
-        self.assertIn("reconciliation/", status)
+    def test_an_over_long_plan_is_sent_back_once(self):
+        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (450 if attempt == 1 else 50)),
+                 "kimi": Fake("kimi")}
+        code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        retry = [p for p in fakes["deepseek"].prompts if "Write a plan to" in p][1]
+        self.assertIn("450 words; cut it to 400", retry)
 
-    def test_checks_run_python_placeholder(self):
-        case = self.case()
-        case.checks = ['{python} -c "print(\'ok\')"']
-        orchestrator = Orchestrator(case, self.tmp / "checks")
-        result = orchestrator.execute_checks(1, "deepseek", self.repo)
-        self.assertTrue(result["ok"], result)
-        self.assertEqual(result["commands"][0]["exit"], 0)
-
-    def test_identical_trees_are_checked_once_and_keep_each_label(self):
-        case = self.case()
-        case.checks = ['{python} -c "print(1)"']
-        orchestrator = Orchestrator(case, self.tmp / "checks-cache")
-        results = {name: {"tree": "same"} for name in ("deepseek", "kimi")}
-        with mock.patch.object(Orchestrator, "execute_checks", wraps=orchestrator.execute_checks) as run:
-            report = orchestrator.run_checks(1, results, {name: self.repo for name in results})
-        self.assertEqual(run.call_count, 1)
-        self.assertEqual(report["kimi"]["agent"], "kimi")
-        self.assertEqual(report["deepseek"]["agent"], "deepseek")
-        self.assertIsNot(report["kimi"], report["deepseek"])
-
-    def test_different_trees_are_checked_in_parallel(self):
-        case = self.case()
-        case.checks = ['{python} -c "import time; time.sleep(1)"']
-        orchestrator = Orchestrator(case, self.tmp / "checks-parallel")
-        results = {"deepseek": {"tree": "a"}, "kimi": {"tree": "b"}}
-        started = time.time()
-        report = orchestrator.run_checks(1, results, {name: self.repo for name in results})
-        self.assertTrue(all(item["ok"] for item in report.values()))
-        self.assertLess(time.time() - started, 1.9, "two 1s checks overlap")
-
-
-class ConfigTest(unittest.TestCase):
-    ROOT = pathlib.Path(__file__).resolve().parents[1] / "cases"
-
-    def test_shipped_cases_load(self):
-        case = config.load(self.ROOT / "msmon-five-phase.local.json")
-        self.assertEqual(sorted(case.agents), ["deepseek", "kimi"])
-        self.assertEqual(case.agents["kimi"].bootstrap_ref, "origin/candidate/kimi-phase-1-5")
-        self.assertEqual(len(case.checks), 4)
-        self.assertEqual(case.other("kimi"), "deepseek")
-        self.assertEqual(case.agents["deepseek"].model, "deepseek/deepseek-flash#high")
-        self.assertEqual(case.agents["kimi"].model, "kimi-code/k3.1-pro")
-        self.assertEqual(case.agents["kimi"].thinking, "high")
-        config.load(self.ROOT / "msmon-five-phase.json")
-
-    def test_tool_case_has_no_shared_base(self):
-        case = config.load(self.ROOT / "cross-agent-validation.json")
-        self.assertIsNone(case.base)
-        self.assertEqual(case.agents["deepseek"].bootstrap_ref, "HEAD")
-        self.assertEqual(case.secondary_repo.name, "cross-agent-validation")
-
-
-class AgentLifecycleTest(unittest.TestCase):
-    def test_reset_clears_abort_and_failure_state(self):
-        agent = agent_mod.Agent(config.AgentSpec("kimi", "kimi"), "log.txt")
-        agent.state.error = "round timeout"
-        agent.abort()
-        agent.reset()
-        self.assertFalse(agent._abort.is_set())
-        self.assertIsNone(agent.state.error)
-
-    def test_opencode_abort_kills_running_process(self):
-        spec = config.AgentSpec("deepseek", "opencode")
-        with mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"):
-            agent = agent_mod.OpenCodeAgent(spec, "log.txt")
-        agent._proc = mock.Mock()
-        agent._proc.poll.return_value = None
-        agent.abort()
-        agent._proc.kill.assert_called_once_with()
-
-    def test_aborted_opencode_keeps_the_monitor_reason(self):
-        class Proc:
-            returncode = -9
-
-            def __init__(self):
-                self.stdout = iter(())
-
-            def wait(self):
-                return -9
-
-        spec = config.AgentSpec("deepseek", "opencode")
-        with tempfile.TemporaryDirectory() as tmp, \
-                mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"), \
-                mock.patch("cav.agents.subprocess.Popen", return_value=Proc()):
-            agent = agent_mod.OpenCodeAgent(spec, pathlib.Path(tmp) / "run.log")
-            agent.state.error = "blocked: waiting:permission"
-            agent.abort()
-            result = agent.run("prompt", tmp)
-        self.assertFalse(result["ok"])
-        self.assertEqual(result["reason"], "blocked: waiting:permission")
-
-
-class ModelPinningTest(unittest.TestCase):
-    def test_opencode_command_pins_model(self):
-        spec = config.AgentSpec("deepseek", "opencode", model="deepseek/deepseek-flash#high")
-        with mock.patch("cav.agents._opencode_cli", return_value="opencode-cli.exe"):
-            agent = agent_mod.OpenCodeAgent(spec, "log.txt")
-        command = agent._command("hello")
-        self.assertIn("--model", command)
-        self.assertEqual(command[command.index("--model") + 1], "deepseek/deepseek-flash#high")
-        self.assertEqual(command[-1], "hello")
-
-    def test_kimi_profile_pins_model_and_thinking(self):
-        spec = config.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro", thinking="high")
-        agent = agent_mod.KimiAgent(spec, "log.txt")
-        self.assertEqual(agent._agent_config(),
-                         {"model": "kimi-code/k3.1-pro", "permission_mode": "yolo", "thinking": "high"})
+    def test_answers_are_checked(self):
+        self.assertEqual(Flow.plan_problem("no base here", {"X": {}, "Y": {}}),
+                         'the plan must start with "Base: Candidate X" or "Base: Candidate Y"')
+        self.assertIsNone(Flow.plan_problem("**Base:** Candidate y\nplan", {"X": {}, "Y": {}}))
+        reply = self.tmp / "reply.json"
+        reply.write_text(json.dumps({"approve": {"1": False, "2": True}, "prefer": 2}), encoding="utf-8")
+        self.assertEqual(Flow.agree_problem(reply), 'plan 1 is rejected without a "why"')
 
 
 if __name__ == "__main__":

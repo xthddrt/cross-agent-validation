@@ -77,7 +77,7 @@
           <input id="branch1" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/one">
           <input id="branch2" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/two">
         </div>
-        <div class="hint">With two branches the agents first agree on a reconciliation plan, reading the branches blind as Candidate X and Y, then both implement it from the base the plan picks.</div>
+        <div class="hint">With two branches the agents first judge them blind as Candidate X and Y: a branch both approve is the result; otherwise they agree on a base and a plan, and both implement it.</div>
       </div>
       <div class="field">
         <label for="prompt">Prompt</label>
@@ -87,9 +87,10 @@
         <button id="go" type="submit">Start run</button>
         <span class="error" id="error"></span>
       </div>
-      <p class="flow"><b>Plan</b>: each agent writes a plan, then up to 3 review rounds.
-        <b>Code</b>: each implements the agreed plan (or its own, without agreement), then up to 3 review rounds.
-        On agreement the result is <b>merged into origin's default branch and pushed</b>; otherwise you get a summary of how far apart they ended.</p>
+      <p class="flow"><b>Agree</b>: both write a plan and approve or reject each; a plan both approve is used.
+        <b>Build</b>: both implement it from the same base. <b>Judge</b>: both approve or reject each result, blind;
+        one both approve is <b>merged into origin's default branch and pushed</b>. Otherwise they agree on a base and a fix plan and build again;
+        after 3 builds the result both would keep wins (a split: a coin flip).</p>
     </form>
   </section>
 

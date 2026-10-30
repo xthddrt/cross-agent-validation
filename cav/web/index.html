@@ -437,15 +437,18 @@ function apply(e) {
 
 // ------------------------------------------------------------- derived
 const hist = (n) => (state.history || []).find(h => h.round === n) || null;
-const runOver = () => !!state.final || state.phase === 'disagreement' || /failed$/.test(state.phase || '');
+const runOver = () => !!state.final || ['disagreement', 'implemented', 'done'].includes(state.phase)
+  || /failed$/.test(state.phase || '');
 const isLive = (n) => n === state.round && !runOver();
 const roundNumbers = () => {
   const set = new Set([...Object.keys(rounds).map(Number), ...(state.history || []).map(h => h.round)]);
   if (state.round) set.add(state.round);
   return [...set].filter(Boolean).sort((a, b) => a - b);
 };
+const FLOW_CLS = {planned:'ok', agreed:'ok', built:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
 function roundStatus(n) {
   const h = hist(n), r = rounds[n];
+  if (state.flow) return h && h.verdict ? [FLOW_CLS[h.verdict] || '', h.verdict] : isLive(n) ? ['run', 'running'] : ['', '…'];
   if (h && h.failed) return ['bad', 'failed'];
   const v = (r && r.verdict) || (h && h.verdict);
   if (v === 'accepted') {
@@ -592,6 +595,8 @@ function renderPipeline() {
     `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
+// a flow run (judge or plan, agree, build; repeated): each step is a "round"; label it by cycle and step
+const stepName = (h) => h ? `${h.cycle ? 'c' + h.cycle + ' ' : ''}${h.step}` : '';
 function renderTabs() {
   const nums = roundNumbers();
   const html = nums.map(n => {
@@ -599,7 +604,7 @@ function renderTabs() {
     const t = (rounds[n] && rounds[n].div) || (hist(n) && hist(n).divergence);
     const extra = t ? ` · ${differ(t.differing || 0)}` : '';
     const color = {ok:'var(--ok)', bad:'var(--bad)', warn:'var(--warn)', run:'var(--accent)'}[cls] || 'var(--dim)';
-    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}"><b>Round ${n}</b>` +
+    return `<button data-r="${n}" class="${n === selected ? 'on' : ''}"><b>${state.flow ? `${n} ${esc(stepName(hist(n)))}` : `Round ${n}`}</b>` +
            `<span style="color:${color}">${esc(label)}</span><span class="dim">${esc(extra)}</span></button>`;
   }).join('');
   if ($('tabs')._html === html) return;
@@ -611,7 +616,38 @@ function renderTabs() {
   });
 }
 
+function flowDetails(h) {
+  // what happened in one step, from state.json
+  if (!h) return '<div class="dim">waiting for this step</div>';
+  const out = [];
+  if (h.how) out.push(esc(h.how));
+  if (h.words) out.push(`plan words: ${Object.entries(h.words).map(([a, w]) => `${esc(a)} ${w}`).join(' · ')}`);
+  if (h.approvals) out.push(Object.entries(h.approvals).map(([a, v]) => `<b>${esc(a)}</b>: ` +
+    Object.entries(v).map(([k, ok]) => `${esc(/^\d$/.test(k) ? 'plan ' + k : k)} ${ok ? 'approved' : 'rejected'}`).join(', ') +
+    (h.prefer ? ` · would keep ${esc(h.prefer[a])}` : '')).join('<br>'));
+  if (h.base) out.push(`base: Candidate ${esc(h.base)}`);
+  if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(sha(c))}` +
+    (h.checks && h.checks[a] ? ` · checks ${h.checks[a].commands.length ? (h.checks[a].ok ? 'pass' : 'fail') : 'none configured'}` : '')).join('<br>'));
+  if (h.defects && h.defects.length) out.push('defects:<ul>' + h.defects.map(d =>
+    `<li>${d.candidate ? `Candidate ${esc(d.candidate)} · ` : ''}${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}${d.fix ? ` <span class="dim">(fix: ${esc(d.fix)})</span>` : ''}</li>`).join('') + '</ul>');
+  if (h.seconds !== undefined) out.push(`<span class="dim">took ${dur(h.seconds)}</span>`);
+  return out.join('<br>') || '<div class="dim">no details</div>';
+}
+
+function renderFlow() {
+  const all = state.history || [];
+  const plan = state.plan ? `<div class="dim" style="margin-top:6px">plan: ${esc(state.plan.how)} · ${state.plan.words} words</div>` : '';
+  const decided = state.decided ? `<div class="dim">result: ${esc(state.decided)}</div>` : '';
+  const labels = state.labels ? `<div class="dim">${Object.entries(state.labels).map(([l, v]) => `Candidate ${esc(l)} = ${esc(v.ref)}`).join(' · ')} (agents see only the labels)</div>` : '';
+  setHtml($('steps'), `<div style="grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap">` + all.map(h => {
+    const [cls] = roundStatus(h.round);
+    return `<span class="chip ${cls}">${h.round} ${esc(stepName(h))}: ${esc(h.verdict || 'running')}${h.seconds !== undefined ? ' · ' + dur(h.seconds) : ''}</span>`;
+  }).join('') + `</div><div style="grid-column:1/-1">${plan}${decided}${labels}${state.outcome ? `<div style="margin-top:6px"><b>${esc(state.outcome)}</b> ${esc(state.detail || '')}</div>` : ''}</div>`);
+  setHtml($('notes'), '');
+}
+
 function renderSteps() {
+  if (state.flow) return renderFlow();
   if (!selected) { setHtml($('steps'), '<div class="empty">waiting for the first round</div>'); setHtml($('notes'), ''); return; }
   const list = steps(selected);
   const icon = {done:'✓', good:'✓', bad:'✕', warn:'!', skip:'–'};
@@ -848,6 +884,7 @@ function renderAgent(i) {
 }
 
 function renderGates() {
+  if (state.flow) { setHtml($('gates'), selected ? flowDetails(hist(selected)) : ''); return; }
   const r = selected && R(selected), h = selected && hist(selected);
   const b = r && (r.blockers || (h && h.blockers));
   if (!b) {
@@ -907,6 +944,12 @@ function renderGates() {
 
 const divCache = {};
 async function renderDivergence() {
+  if (state.flow) {
+    const h = selected && hist(selected);
+    setHtml($('divergence'), h && h.plan ? `<div class="dim">plan file: <span class="mono">${esc(h.plan)}</span></div>`
+      : state.plan ? `<div class="dim">agreed plan: <span class="mono">${esc(state.plan.path)}</span></div>` : '');
+    return;
+  }
   const n = selected;
   const r = n && R(n), h = n && hist(n);
   const totals = r && (r.div || (h && h.divergence));
@@ -1034,8 +1077,9 @@ async function poll() {
   const next = parse(await api('state'));
   if (!next) return;
   state = next;
-  // agent order normally comes from the events; fall back to state.json before any event arrives
-  for (const name of Object.keys(state.agents || {})) if (!names.includes(name) && names.length < 2) names.push(name);
+  // agent order normally comes from the events; a flow run names its agents instead
+  const known = state.flow && state.names ? state.names : Object.keys(state.agents || {});
+  for (const name of known) if (!names.includes(name) && names.length < 2) names.push(name);
   schedule();
 }
 
