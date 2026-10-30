@@ -2,12 +2,12 @@
 
 import subprocess
 
-from .gitops import GIT, git
+from .gitops import GIT, NO_WINDOW, git
 
 
 def _entries(git_dir, tree):
     result = subprocess.run([GIT, "--git-dir", str(git_dir), "ls-tree", "-r", "-z", "--full-tree", tree],
-                            capture_output=True)
+                            capture_output=True, creationflags=NO_WINDOW)
     if result.returncode != 0:
         raise RuntimeError(f"ls-tree {tree} failed: {result.stderr.decode('utf-8', 'replace')[:200]}")
     entries = {}

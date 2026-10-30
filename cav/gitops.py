@@ -7,6 +7,9 @@ import subprocess
 
 GIT = os.environ.get("CAV_GIT") or shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
 EXCHANGE_REMOTE = "cav-exchange"
+# A console program started from a process without a console (the dashboard runs under pythonw)
+# gets a window of its own that flashes up and closes; start them all without one.
+NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 # Commits the tool creates must not depend on the machine's git identity being configured.
 IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@localhost")
 
@@ -14,7 +17,7 @@ IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@loca
 def git(*args, cwd=None, check=True, env=None):
     result = subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
                             capture_output=True, text=True, encoding="utf-8",
-                            errors="replace", env=env)
+                            errors="replace", env=env, creationflags=NO_WINDOW)
     if check and result.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {result.stderr.strip() or result.stdout.strip()}")
     return result.stdout.strip()
@@ -22,7 +25,7 @@ def git(*args, cwd=None, check=True, env=None):
 
 def git_ok(*args, cwd=None):
     return subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
-                          capture_output=True, text=True).returncode == 0
+                          capture_output=True, text=True, creationflags=NO_WINDOW).returncode == 0
 
 
 class Exchange:

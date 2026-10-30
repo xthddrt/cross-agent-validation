@@ -14,7 +14,7 @@ from . import agents as agent_mod
 from . import compare
 from . import review as review_mod
 from .events import EventWriter
-from .gitops import GIT, IDENTITY, Exchange, Repo, git, git_ok
+from .gitops import GIT, IDENTITY, NO_WINDOW, Exchange, Repo, git, git_ok
 from .prompts import PLAN_FILE, decide_prompt, retry_note, round_prompt
 
 MAX_PATCH_BYTES = 2_000_000
@@ -447,7 +447,7 @@ class Orchestrator:
             started = time.time()
             self.emit("check.start", round_no, name, {"command": command})
             proc = subprocess.run(rendered, shell=True, cwd=str(worktree), capture_output=True,
-                                  text=True, encoding="utf-8", errors="replace")
+                                  text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
             seconds = int(time.time() - started)
             commands.append({"command": command, "exit": proc.returncode, "seconds": seconds,
                              "tail": (proc.stdout or "")[-1500:] + (proc.stderr or "")[-1500:]})
@@ -518,6 +518,8 @@ class Orchestrator:
                                                 changes[name]["files_changed"], results[name]["tree"]))
         others = ", ".join(f"{name} {item['lines_changed']}" for name, item in changes.items()
                            if name != chosen)
+        if not others:
+            return chosen, {"reason": "the only candidate both agents approved", "changes": changes}
         reason = (f"fewest changes from its original branch: {changes[chosen]['lines_changed']} lines "
                   f"in {changes[chosen]['files_changed']} files (vs {others})")
         return chosen, {"reason": reason, "changes": changes}
@@ -684,7 +686,7 @@ class Orchestrator:
         """origin moved during the run: merge the agreed commit into it, or refuse on a conflict."""
         proc = subprocess.run([GIT, "merge-tree", "--write-tree", "--name-only", upstream, commit],
                               cwd=str(self.repo.path), capture_output=True, text=True,
-                              encoding="utf-8", errors="replace")
+                              encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
         lines = proc.stdout.strip().splitlines()
         if proc.returncode != 0 or not lines:
             conflicts = ", ".join(line for line in lines[1:] if line.strip())[:500]

@@ -28,7 +28,7 @@ import time
 import traceback
 
 from . import config
-from .gitops import GIT, git, git_ok
+from .gitops import GIT, NO_WINDOW, git, git_ok
 from .orchestrator import Orchestrator
 from .prompts import PLAN_FILE
 
@@ -99,7 +99,7 @@ def resolve_ref(repo, ref):
 def export_tree(repo, sha, dest):
     """A commit's files as a plain folder: no .git, so no branch name, author or message."""
     data = subprocess.run([GIT, "archive", "--format=tar", sha], cwd=str(repo),
-                          capture_output=True, check=True).stdout
+                          capture_output=True, check=True, creationflags=NO_WINDOW).stdout
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         archive.extractall(dest, filter="data")
@@ -113,7 +113,7 @@ def plan_base(text):
 
 
 class Pipeline:
-    def __init__(self, repo_spec, prompt, run_dir, resume=False, branches=None, checks=None):
+    def __init__(self, repo_spec, prompt, run_dir, resume=False, branches=None, checks=None, push=True):
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.prompt = prompt
@@ -122,6 +122,7 @@ class Pipeline:
         if self.branches and len(self.branches) != 2:
             raise ValueError("give two branches to reconcile, or none")
         self.checks = list(checks or [])
+        self.push = push  # False keeps an agreed result in the run's own repo, as `cav run` without --push
         self.path = self.run_dir / "pipeline.json"
         previous = Orchestrator.read_json(self.path)
         self.state = dict(previous, id=self.run_dir.name, repo_input=repo_spec, pid=os.getpid())
@@ -183,7 +184,7 @@ class Pipeline:
         task = {"prompt": self.prompt, "plans": plans, "sources": sources,
                 "plan_base": self.state.get("plan_base") if sources else None}
         code = Orchestrator(self.stage_case(f"{name}-code", repo, "code", task, code_from, self.checks),
-                            self.run_dir / "code", push=self.state["pushable"], merge=True,
+                            self.run_dir / "code", push=self.state["pushable"] and self.push, merge=True,
                             resume=self.resume, run_id=f"{self.state['id']}-code")
         push_error = None
         try:
@@ -201,6 +202,8 @@ class Pipeline:
             outcome, detail = "no agreement", "see code/SUMMARY.md for how far apart the candidates ended"
         elif push_error:
             outcome, detail = "agreed, not pushed", push_error
+        elif not self.push:
+            outcome, detail = "agreed, not pushed", f"kept local (--no-push); agreed commit {final['commit']}"
         elif not self.state["pushable"]:
             outcome, detail = "agreed, not pushed", f"the repo has no origin remote; agreed commit {final['commit']}"
         else:

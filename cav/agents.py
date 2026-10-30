@@ -13,6 +13,8 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
 
+from .gitops import NO_WINDOW
+
 GIT_DIR = r"C:\Program Files\Git\cmd"
 KIMI_POLL_SECONDS = 3
 # Both agents always run under the ponytail ruleset at this level. OpenCode reads it from the
@@ -166,7 +168,8 @@ class OpenCodeAgent(Agent):
             self.state.touch("launched")
             self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, text=True,
-                                          encoding="utf-8", errors="replace", env=self._env(cwd))
+                                          encoding="utf-8", errors="replace", env=self._env(cwd),
+                                          creationflags=NO_WINDOW)
             for line in self._proc.stdout:
                 log.write(line)
                 log.flush()

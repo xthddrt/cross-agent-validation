@@ -17,6 +17,7 @@ import urllib.parse
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import compare_runs
 from . import events as events_mod
 from . import pipeline as pipeline_mod
 from .gitops import git
@@ -24,6 +25,7 @@ from .gitops import git
 WEB = pathlib.Path(__file__).resolve().parent / "web"
 INDEX = WEB / "index.html"
 HOME = WEB / "home.html"
+COMPARE = WEB / "compare.html"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 RUNS = ROOT / "runs"
 RUN_ID = re.compile(r"^[\w.-]+$")
@@ -341,6 +343,13 @@ class Home(Server):
             return handler.send(200, HOME.read_text(encoding="utf-8"), "text/html; charset=utf-8")
         if parts == ["api", "runs"]:
             return handler.send(200, json.dumps(self.runs()))
+        if parts == ["compare"]:
+            return handler.send(200, COMPARE.read_text(encoding="utf-8"), "text/html; charset=utf-8")
+        if parts == ["api", "compare"]:
+            ids = [item for item in (query.get("runs") or "").split(",") if item]
+            if len(ids) != 2 or not all(self.run_path(item) for item in ids):
+                return handler.send(400, json.dumps({"error": "give two run ids: ?runs=a,b"}))
+            return handler.send(200, json.dumps(compare_runs.compare(self.runs_dir, ids, alive)))
         if parts[0] != "run" or len(parts) < 2 or not self.run_path(parts[1]):
             return handler.send(404, "not found", "text/plain")
         run_dir, rest = self.run_path(parts[1]), parts[2:]

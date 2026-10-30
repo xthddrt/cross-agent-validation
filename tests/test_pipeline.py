@@ -118,6 +118,17 @@ class PipelineTest(unittest.TestCase):
         files = git("--git-dir", str(self.origin), "ls-tree", "-r", "--name-only", pushed).splitlines()
         self.assertNotIn("CAV-PLAN.md", files, "the plan stays out of the pushed code")
 
+    def test_no_push_keeps_an_agreed_result_local(self):
+        fakes = {name: StageFake(name) for name in ("deepseek", "kimi")}
+        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
+            pipeline = Pipeline(str(self.work), "Add a feature file.", self.tmp / "runs" / "p1", push=False)
+            code = pipeline.run()
+        self.assertEqual(code, 0)
+        self.assertEqual(pipeline.state["outcome"], "agreed, not pushed")
+        self.assertIn("--no-push", pipeline.state["detail"])
+        self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", f"refs/heads/{pipeline.state['branch']}"),
+                         self.base, "origin is untouched")
+
     def test_a_plan_stage_without_agreement_is_forced_to_one_plan(self):
         fakes = {name: NeverAgrees(name) for name in ("deepseek", "kimi")}
         code, state = self.run_pipeline(fakes)
