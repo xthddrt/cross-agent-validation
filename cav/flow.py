@@ -267,13 +267,16 @@ class Flow:
                 self.end(entry, "revised")
                 paths = revised
             order = random.sample(self.names, 2)  # plan 1 and plan 2, at random
-            texts = [paths[name].read_text(encoding="utf-8") for name in order]
-            if texts[0].strip() == texts[1].strip():
-                return self.agreed_plan(paths[order[0]], "the two plans are the same")
+            # neutral copies: a voter is not shown which file it wrote
+            ballots = [self.blind / f"c{self.cycle}-vote-{number}-plan-{n}.md" for n in (1, 2)]
+            for ballot, name in zip(ballots, order):
+                ballot.write_text(paths[name].read_text(encoding="utf-8"), encoding="utf-8")
+            if ballots[0].read_text(encoding="utf-8").strip() == ballots[1].read_text(encoding="utf-8").strip():
+                return self.agreed_plan(ballots[0], "the two plans are the same")
             replies = {name: self.blind / f"c{self.cycle}-vote-{number}-{n}.json" for name, n in self.numbered().items()}
             self.mine(replies)
             entry = self.begin("vote", vote=number, plans={str(n): name for n, name in enumerate(order, 1)})
-            self.ask({name: prompts.vote([(1, paths[order[0]]), (2, paths[order[1]])], replies[name], fixes)
+            self.ask({name: prompts.vote(list(enumerate(ballots, 1)), replies[name], fixes)
                       for name in self.names}, lambda name: self.vote_problem(replies[name]))
             answers = {name: _json(replies[name]) for name in self.names}
             approvals = {name: answers[name]["approve"] for name in self.names}
@@ -281,9 +284,9 @@ class Flow:
                           for n in (1, 2)}
             both = [n for n in (1, 2) if all(approvals[name][str(n)] for name in self.names)]
             if both:
-                pick = min(both, key=lambda n: words(texts[n - 1]))
+                pick = random.choice(both)  # both approved both: neither is preferred
                 self.end(entry, "agreed", approvals=approvals, how=f"both approved plan {pick}")
-                return self.agreed_plan(paths[order[pick - 1]], f"both approved plan {pick} in vote {number}")
+                return self.agreed_plan(ballots[pick - 1], f"both approved plan {pick} in vote {number}")
             self.end(entry, "rejected", approvals=approvals, why=objections)
 
     def agreed_plan(self, path, how):
@@ -444,10 +447,10 @@ class Flow:
         if not isinstance(blockers, list) or any(not isinstance(item, dict) or not item.get("problem")
                                                  or item.get("candidate") not in (*LABELS, "both") for item in blockers):
             return 'write JSON with "blockers": a list of {"candidate": "X|Y|both", "file", "line", "problem", "fix"}'
-        for item in blockers:
-            roots = [pathlib.Path(candidates[label]["folder"]) for label in LABELS if hits(item, label)]
-            if not any((root / str(item.get("file") or "")).is_file() for root in roots):
-                return f"blocker file {item.get('file')!r} is not a file in {item['candidate']}"
+        for item in blockers:  # a missing file can be the blocker; a path outside the candidate cannot
+            root = pathlib.Path(candidates[LABELS[0]]["folder"]).resolve()
+            if not item.get("file") or root not in (root / str(item["file"])).resolve().parents:
+                return f"blocker file {item.get('file')!r} is not a path inside the candidate"
         return None
 
     @staticmethod
