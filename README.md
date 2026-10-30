@@ -15,7 +15,7 @@ py -m cav run    --case cases\msmon-five-phase.local.json [--run-dir runs\<id>] 
 py -m cav solve  --repo <path> --prompt task.md [--checks C]...
 py -m cav web    --run runs\<id> [--open]
 py -m cav serve  [--port 7700] [--open]
-py -m cav pipeline --repo <path or GitHub URL> --prompt-file task.md [--run-dir runs\<id>] [--resume]
+py -m cav pipeline --repo <path or GitHub URL> --prompt-file task.md [--branch A --branch B] [--check C]... [--run-dir runs\<id>] [--resume]
 ```
 
 On Windows use `py` rather than `python`: the bare `python` on PATH is the Microsoft Store stub.
@@ -26,12 +26,14 @@ On Windows use `py` rather than `python`: the bare `python` on PATH is the Micro
 
 The form starts `cav pipeline` as its own process, so a run outlives the server:
 
-1. **Plan** — each agent writes `CAV-PLAN.md` independently, then up to 3 review rounds of the usual loop over the two plans.
-2. **Code** — both agents implement the agreed plan from the base commit, or, without agreement, each implements its own last plan. Then up to 3 review rounds over the two branches.
+1. **Plan** — at most 4 rounds, always ending in one plan. Round 1: each agent writes `CAV-PLAN.md` independently. Rounds 2–3: each reviews both plans and revises its own; a plan is agreed as soon as **both agents approve the same plan** (it need not approve both). Round 4, if no plan has both approvals: a **blind forced choice**: each agent, in a fresh session that sees only the task and the two plans as Plan 1 and Plan 2 (random order, no authors), must pick one. The same pick wins; a split goes to the plan with fewer open MUST_FIX findings in round 3, and a tie to a recorded coin flip. The defects listed against the winner are appended to it as part of the code stage's spec.
+2. **Code** — both agents implement the one plan from the base commit, then up to 3 review rounds over the two branches.
 3. **Agreement** — the agreed commit is pushed to origin's default branch; if that branch moved during the run it is merged first, and a conflicting merge is refused, not pushed.
 4. **No agreement** — the stage's `SUMMARY.md` (also the dashboard's *How far apart* button) lists, from the reviews and trees, the round-by-round trend, the files that still differ, and each agent's MUST_FIX findings and notes.
 
-Each stage is an ordinary run directory (`runs\<id>\plan`, `runs\<id>\code`) with its own dashboard; the pipeline's state is `runs\<id>\pipeline.json` and its output `pipeline.log`. Defaults for now: the two agents and models below, no check commands, 90 minutes per round.
+**Reconciling two branches** (both *Branches to reconcile* fields, or `--branch` twice): the plan stage is a reconciliation plan written blind. Both agents plan in the branches' common ancestor and read the branches as plain folders labelled *Candidate X* and *Candidate Y* (assigned at random per run, the same for both agents, exported without `.git`, so no branch name, author or commit message). The plan's first line is `Base: Candidate X` or `Base: Candidate Y`, then keep X / keep Y / new per part of the task and what to port. Once both agree, both agents implement from that base, and reviews judge the task and the plan (a departure is a MUST_FIX unless explained). The reconciliation plan converges the same way (round 4 forces one plan), so both agents always implement from one base. The dashboard shows which branch each label stands for; the agents never see it.
+
+Each stage is an ordinary run directory (`runs\<id>\plan`, `runs\<id>\code`) with its own dashboard; the pipeline's state is `runs\<id>\pipeline.json` and its output `pipeline.log`. Defaults for now: the two agents and models below, 90 minutes per round, and no check commands unless `--check` is given (code stage).
 
 ## What a run does
 

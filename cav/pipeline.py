@@ -1,28 +1,41 @@
 """Repo + prompt to a pushed result: both agents plan, agree on a plan, implement it, agree on code.
 
-    plan stage   each agent writes CAV-PLAN.md independently, then up to 3 review rounds
-    code stage   each implements the agreed plan (or, without agreement, its own last plan),
+    plan stage   each agent writes CAV-PLAN.md independently, then 2 review rounds; a plan both
+                 approve wins, else round 4 is a blind forced choice between the two
+    code stage   both implement the one plan the plan stage ends with (round 4 forces one),
                  then up to 3 review rounds
     agreement    the agreed commit is merged into origin's default branch and pushed
     otherwise    SUMMARY.md in the stage folder says how far apart the two candidates ended
 
+Given two existing branches, the plan is a reconciliation plan written blind: both agents plan
+in the branches' common ancestor and read the branches as plain folders labelled Candidate X
+and Candidate Y (assigned at random, the same for both agents, no branch names or history).
+The plan names its base; both agents then implement from that base. Without an agreed plan the
+run stops: implementing two different plans would recreate the two branches.
+
 Each stage is an ordinary run directory (plan/, code/) so the per-run dashboard works on it.
 """
 
+import io
 import json
 import os
 import pathlib
+import random
 import re
+import subprocess
+import tarfile
 import time
 import traceback
 
 from . import config
-from .gitops import git, git_ok
+from .gitops import GIT, git, git_ok
 from .orchestrator import Orchestrator
 from .prompts import PLAN_FILE
 
 REVIEW_ROUNDS = 3  # after each stage's independent first round
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
+LABELS = ("X", "Y")
+BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*candidate\s+([XY])\b")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
 
 
@@ -74,12 +87,41 @@ def base_of(repo):
     return git("rev-parse", "HEAD", cwd=repo), git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo), False
 
 
+def resolve_ref(repo, ref):
+    """A branch as given, or as fetched from origin."""
+    for candidate in (ref, f"origin/{ref}"):
+        sha = git("rev-parse", "--verify", "--quiet", f"{candidate}^{{commit}}", cwd=repo, check=False)
+        if sha:
+            return sha
+    raise ValueError(f"branch {ref!r} not found in {repo}")
+
+
+def export_tree(repo, sha, dest):
+    """A commit's files as a plain folder: no .git, so no branch name, author or message."""
+    data = subprocess.run([GIT, "archive", "--format=tar", sha], cwd=str(repo),
+                          capture_output=True, check=True).stdout
+    dest.mkdir(parents=True, exist_ok=True)
+    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+        archive.extractall(dest, filter="data")
+    return dest
+
+
+def plan_base(text):
+    """The candidate label a reconciliation plan builds on, from its "Base: Candidate X" line."""
+    match = BASE_LINE.search(text or "")
+    return match.group(1).upper() if match else None
+
+
 class Pipeline:
-    def __init__(self, repo_spec, prompt, run_dir, resume=False):
+    def __init__(self, repo_spec, prompt, run_dir, resume=False, branches=None, checks=None):
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.prompt = prompt
         self.resume = resume
+        self.branches = list(branches or [])
+        if self.branches and len(self.branches) != 2:
+            raise ValueError("give two branches to reconcile, or none")
+        self.checks = list(checks or [])
         self.path = self.run_dir / "pipeline.json"
         previous = Orchestrator.read_json(self.path)
         self.state = dict(previous, id=self.run_dir.name, repo_input=repo_spec, pid=os.getpid())
@@ -107,16 +149,40 @@ class Pipeline:
             self.save(repo=str(repo), base=base, branch=branch, pushable=pushable)
         name = re.sub(r"[^\w.-]+", "-", repo.name)
 
+        sources = self.prepare_sources(repo) if self.branches else None
+        plan_from = self.state["sources_base"] if sources else self.state["base"]
+
         self.save(stage="plan")
-        plan = Orchestrator(self.stage_case(f"{name}-plan", repo, "plan", {"prompt": self.prompt}),
+        task = {"prompt": self.prompt, "sources": sources}
+        plan = Orchestrator(self.stage_case(f"{name}-plan", repo, "plan", task, plan_from),
                             self.run_dir / "plan", resume=self.resume, run_id=f"{self.state['id']}-plan")
         plan_state = plan.run()
+        if sources and not plan_state.get("final"):
+            self.save(plan={"outcome": "disagreement", "rounds": len(plan_state.get("history") or []),
+                            "summary": plan_state.get("summary")}, stage="done",
+                      outcome="no agreement on the plan",
+                      detail="see plan/SUMMARY.md for the decisions they disagree on; nothing was implemented")
+            print(f"pipeline {self.state['id']}: no agreement on the reconciliation plan", flush=True)
+            return 2
         plans = self.write_plans(plan, plan_state)
-        self.save(plan={"outcome": "agreed" if plans["agreed"] else "disagreement",
+        code_from = self.state["base"]
+        if sources:
+            agreed = pathlib.Path(next(iter(plans["files"].values()))).read_text(encoding="utf-8")
+            label = plan_base(agreed)
+            if label not in sources:
+                raise RuntimeError('the agreed plan names no base; its first line must be "Base: Candidate X" '
+                                   'or "Base: Candidate Y"')
+            code_from = self.state["labels"][label]["commit"]
+            self.save(plan_base=label)
+        forced = (plan_state.get("final") or {}).get("forced")
+        self.save(plan={"outcome": f"forced: {forced['method']}" if forced else
+                        "agreed" if plans["agreed"] else "disagreement",
                         "rounds": len(plan_state.get("history") or []), "summary": plan_state.get("summary")})
 
         self.save(stage="code")
-        code = Orchestrator(self.stage_case(f"{name}-code", repo, "code", {"prompt": self.prompt, "plans": plans}),
+        task = {"prompt": self.prompt, "plans": plans, "sources": sources,
+                "plan_base": self.state.get("plan_base") if sources else None}
+        code = Orchestrator(self.stage_case(f"{name}-code", repo, "code", task, code_from, self.checks),
                             self.run_dir / "code", push=self.state["pushable"], merge=True,
                             resume=self.resume, run_id=f"{self.state['id']}-code")
         push_error = None
@@ -145,12 +211,27 @@ class Pipeline:
         print(f"pipeline {self.state['id']}: {outcome}: {detail}", flush=True)
         return 0 if final else 2
 
-    def stage_case(self, name, repo, mode, task):
+    def prepare_sources(self, repo):
+        """The two branches as Candidate X and Y, blind: random labels, plain folders."""
+        if not (self.resume and self.state.get("labels")):
+            shas = [resolve_ref(repo, ref) for ref in self.branches]
+            order = random.sample(range(2), 2)
+            labels = {label: {"ref": self.branches[i], "commit": shas[i]} for label, i in zip(LABELS, order)}
+            self.save(labels=labels, sources_base=git("merge-base", shas[0], shas[1], cwd=repo))
+        sources = {}
+        for label, item in self.state["labels"].items():
+            target = self.run_dir / "sources" / f"candidate-{label}"
+            if not target.exists():
+                export_tree(repo, item["commit"], target)
+            sources[label] = str(target)
+        return sources
+
+    def stage_case(self, name, repo, mode, task, base, checks=()):
         agents = {agent: config.AgentSpec(name=agent, kind=kind, model=model,
                                           thinking="high" if kind == "kimi" else None)
                   for agent, (kind, model) in config.DEFAULT_MODELS.items()}
-        return config.Case(name=name, host_repo=repo, base=self.state["base"], branch=self.state["branch"],
-                           agents=agents, checks=[], bootstrap="base", mode=mode, task=task,
+        return config.Case(name=name, host_repo=repo, base=base, branch=self.state["branch"],
+                           agents=agents, checks=list(checks), bootstrap="base", mode=mode, task=task,
                            max_rounds=1 + REVIEW_ROUNDS, round_seconds=5400, stall_seconds=1200, retries=1)
 
     def write_plans(self, plan, state):
@@ -165,9 +246,16 @@ class Pipeline:
             return body + "\n"
 
         if state.get("final"):
+            body = text(state["final"]["commit"])
+            forced = state["final"].get("forced")
+            if forced and forced.get("defects"):
+                body += ("\n## Defects to fix while implementing\n\nFound in the plan stage against this plan:\n\n"
+                         + "\n".join(f"- {item.get('summary')}" + (f" (fix: {item['fix']})" if item.get("fix") else "")
+                                      for item in forced["defects"]) + "\n")
             path = folder / "agreed.md"
-            path.write_text(text(state["final"]["commit"]), encoding="utf-8")
-            return {"agreed": True, "files": {agent: str(path) for agent in config.DEFAULT_MODELS}}
+            path.write_text(body, encoding="utf-8")
+            return {"agreed": True, "forced": bool(forced),
+                    "files": {agent: str(path) for agent in config.DEFAULT_MODELS}}
         last = next((item for item in reversed(state.get("history") or []) if item.get("results")), None)
         if not last:
             raise RuntimeError("the plan stage produced no plans")

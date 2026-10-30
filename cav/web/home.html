@@ -72,6 +72,14 @@
         <div class="hint">A local git repo, or a GitHub URL (cloned to Documents\Default Project, or reused if it is already there).</div>
       </div>
       <div class="field">
+        <label>Branches to reconcile <span class="hint" style="font-weight:400">(optional: both or neither)</span></label>
+        <div style="display:flex;gap:10px;flex-wrap:wrap">
+          <input id="branch1" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/one">
+          <input id="branch2" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/two">
+        </div>
+        <div class="hint">With two branches the agents first agree on a reconciliation plan, reading the branches blind as Candidate X and Y, then both implement it from the base the plan picks.</div>
+      </div>
+      <div class="field">
         <label for="prompt">Prompt</label>
         <textarea id="prompt" placeholder="What should be built or changed, and what counts as done."></textarea>
       </div>
@@ -148,7 +156,8 @@ $('form').addEventListener('submit', async (ev) => {
   $('go').disabled = true;
   try {
     const r = await fetch(`${BASE}/api/start`, {method:'POST', headers:{'Content-Type':'application/json'},
-                          body:JSON.stringify({repo:$('repo').value, prompt:$('prompt').value})});
+                          body:JSON.stringify({repo:$('repo').value, prompt:$('prompt').value,
+                                               branches:[$('branch1').value, $('branch2').value]})});
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(body.error || `HTTP ${r.status}`);
     location.href = body.url;

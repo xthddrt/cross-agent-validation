@@ -138,3 +138,31 @@ def load(path, agent, round_no, trees=None):
     except json.JSONDecodeError as error:
         return Review(agent, round_no, path, {}, [f"invalid JSON: {error}"])
     return Review(agent, round_no, path, data, validate(data, agent, round_no, trees))
+
+
+def load_decision(path, agent, round_no):
+    """A forced-choice round's decision and the problem with it (None when valid)."""
+    path = pathlib.Path(path)
+    if not path.exists():
+        return None, "no decision file"
+    try:
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
+    except json.JSONDecodeError as error:
+        return None, f"invalid JSON: {error}"
+    if not isinstance(data, dict):
+        return None, "decision is not an object"
+    if data.get("agent") != agent:
+        return None, f"agent is {data.get('agent')!r}, expected {agent!r}"
+    try:
+        if int(data.get("round")) != int(round_no):
+            return None, f"round is {data.get('round')!r}, expected {round_no}"
+    except (TypeError, ValueError):
+        return None, "round missing or not an integer"
+    if data.get("choice") not in (1, 2):
+        return None, "choice must be 1 or 2"
+    defects = data.get("defects") or []
+    if not isinstance(defects, list) or any(not isinstance(item, dict) or not item.get("summary")
+                                            for item in defects):
+        return None, "defects must be a list of objects with a summary"
+    data["defects"] = defects
+    return data, None
