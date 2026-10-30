@@ -70,7 +70,7 @@ def agree(task, candidates, reviews, plans, reply):
 def build(plan_path, work, checks, note, base_label=None):
     lines = [f"Implement {plan_path} in {work}" + (f", a copy of {base_label}." if base_label else ".")]
     if checks:
-        lines.append(f"Run the checks: {_checks(checks)}.")
+        lines.append(f"Run the checks there: {_checks(checks)}.")
     lines.append(f"Write a short note of what you did to {note}.")
     return "\n".join(lines) + "\n"
 

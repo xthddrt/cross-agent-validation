@@ -15,7 +15,8 @@
 
 No prompt names an agent or says whose anything is: candidates are X and Y (labelled at random,
 read from plain folders without .git), plans and reviews are numbered at random, candidates are
-listed in random order, and every step runs in a fresh session, so no agent remembers what it wrote.
+listed in random order. Each agent keeps one session through a cycle (judge or plan, plan rounds,
+build) and starts a fresh one at the next cycle, so no agent judges builds knowing which is its own.
 Everything an agent reads or writes lives in a blind area outside every git repo and away from
 the run's bookkeeping; builds are plain copies that CAV commits itself, through a separate index.
 """
@@ -229,8 +230,7 @@ class Flow:
             threads = []
             for name, (prompt, cwd) in pending.items():
                 agent = self.agents[name]
-                agent.reset()
-                agent.session_id = None  # a fresh session: nothing remembered from an earlier step
+                agent.reset()  # the session itself carries on until the next cycle
                 note = prompts.retry_note(problems[name]) if attempt else ""
                 record = self.run_dir / "rounds" / f"r{self.step}" / f"{name}-context.md"  # for the dashboard
                 record.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +301,8 @@ class Flow:
             raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
         candidates = self.branch_candidates(repo) if self.branches else None
         for cycle in range(1, self.max_builds + 2):
+            for agent in self.agents.values():
+                agent.session_id = None  # a fresh session per cycle: no agent judges builds knowing which is its own
             if candidates:
                 result, plans, reviews = self.judge(cycle, candidates, final=cycle > self.max_builds)
                 if result:
@@ -450,7 +452,8 @@ class Flow:
         for name in self.names:
             notes[name].parent.mkdir(parents=True, exist_ok=True)
         entry = self.begin("build", cycle=cycle, start=start)
-        self.ask({name: (prompts.build(plan_path, works[name], self.checks, notes[name], base_label), works[name])
+        # the cycle's session started in the blind area; the prompt names the build folder
+        self.ask({name: (prompts.build(plan_path, works[name], self.checks, notes[name], base_label), self.blind)
                   for name in self.names}, "build", lambda name: None if notes[name].exists() else "no note written")
         commits = {name: self.snapshot(works[name], start, f"cycle {cycle} build {numbers[name]}") for name in self.names}
         labels = dict(zip(random.sample(self.names, 2), LABELS))
