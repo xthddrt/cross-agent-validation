@@ -74,6 +74,8 @@ def stage_rounds(stage_dir, stage, live):
 def _host(run_dir, pipe):
     if pipe.get("repo"):
         return pipe["repo"]
+    if _read(run_dir / "state.json").get("repo"):
+        return _read(run_dir / "state.json")["repo"]
     for gitfile in run_dir.glob("wt/r*/*/.git"):
         text = gitfile.read_text(encoding="utf-8", errors="replace").strip()
         if text.startswith("gitdir:"):
@@ -107,14 +109,15 @@ def run_summary(run_dir, alive=lambda pid: False):
     else:
         state = _read(run_dir / "state.json")
         stages = [""]
-        live = not (state.get("final") or state.get("phase") == "disagreement"
+        live = not (state.get("final") or state.get("phase") in ("disagreement", "done")
                     or str(state.get("phase", "")).endswith("failed"))
         dirs = {"": run_dir}
         first = (state.get("history") or [{}])[0].get("starts") or {}
-        originals = {sha: _branch_name(host, sha) if host else sha[:8] for sha in first.values()}
+        originals = ({item["commit"]: item["ref"] for item in state["labels"].values()} if state.get("labels")
+                     else {sha: _branch_name(host, sha) if host else sha[:8] for sha in first.values()})
         last_stage = state
-        outcome = ("agreed" if state.get("final") else "no agreement" if state.get("phase") == "disagreement"
-                   else "running" if live else state.get("phase"))
+        outcome = (state.get("outcome") or ("agreed" if state.get("final") else "no agreement"
+                   if state.get("phase") == "disagreement" else "running" if live else state.get("phase")))
         plan = None
         start = None
     rounds = [item for stage in stages for item in stage_rounds(dirs[stage], stage, live)]

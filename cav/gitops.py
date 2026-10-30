@@ -1,4 +1,4 @@
-"""All git work in one place. The orchestrator owns commits and branches; agents only edit files."""
+"""All git work in one place. CAV owns commits and branches; agents only edit files."""
 
 import os
 import pathlib

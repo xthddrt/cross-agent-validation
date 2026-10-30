@@ -19,7 +19,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import compare_runs
 from . import events as events_mod
-from . import pipeline as pipeline_mod
+from . import flow as flow_mod
 from .gitops import git
 
 WEB = pathlib.Path(__file__).resolve().parent / "web"
@@ -308,11 +308,11 @@ class Home(Server):
             raise ValueError("give a local repo path or a GitHub URL")
         if not prompt:
             raise ValueError("the prompt is empty")
-        if not pipeline_mod.is_github(repo):
-            local = pipeline_mod.resolve_repo(repo)  # a bad path is refused here; a clone happens in the run
+        if not flow_mod.is_github(repo):
+            local = flow_mod.resolve_repo(repo)  # a bad path is refused here; a clone happens in the run
             for ref in branches:
-                pipeline_mod.resolve_ref(local, ref)
-        slug = re.sub(r"[^\w.-]+", "-", pipeline_mod.repo_name(repo)).strip("-.") or "repo"
+                flow_mod.resolve_ref(local, ref)
+        slug = re.sub(r"[^\w.-]+", "-", flow_mod.repo_name(repo)).strip("-.") or "repo"
         run_id = f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
         while (self.runs_dir / run_id).exists():
             run_id += "x"
@@ -328,7 +328,7 @@ class Home(Server):
             python = python.parent / "python.exe"
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         with open(run_dir / "pipeline.log", "ab") as log:
-            subprocess.Popen([str(python), "-m", "cav", "pipeline", "--repo", repo,
+            subprocess.Popen([str(python), "-m", "cav", "run", "--repo", repo,
                               "--prompt-file", str(run_dir / "prompt.md"), "--run-dir", str(run_dir),
                               *[arg for ref in branches for arg in ("--branch", ref)]],
                              cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,

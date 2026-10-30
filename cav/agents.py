@@ -46,7 +46,7 @@ def _find_exit(value):
 
 @dataclass
 class RunState:
-    """Live progress for one agent run. Read by the orchestrator's monitor."""
+    """Live progress for one agent run. Read by the flow's monitor."""
     started: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     messages: int = 0
@@ -164,7 +164,7 @@ class OpenCodeAgent(Agent):
         cmd = self._command(prompt)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
-        with open(self.log_path, "w", encoding="utf-8", errors="replace") as log:
+        with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
             self.state.touch("launched")
             self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, text=True,
@@ -417,22 +417,24 @@ class KimiAgent(Agent):
             self._connect()
         cwd = str(pathlib.Path(cwd).resolve())
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._transcript = open(self.log_path, "w", encoding="utf-8", errors="replace")
-        workspace = self._call("POST", "/api/v1/workspaces", {"root": cwd, "name": pathlib.Path(cwd).name})["data"]
-        session = self._call("POST", "/api/v1/sessions", {
-            "title": f"{self.title_prefix} {self.name}",
-            "metadata": {"cwd": cwd},
-            "workspace_id": workspace["id"],
-        })["data"]
-        self.session_id = session["id"]
+        self._transcript = open(self.log_path, "a", encoding="utf-8", errors="replace")
+        if not self.session_id:
+            # one session for the whole run: later steps continue it instead of re-reading everything
+            workspace = self._call("POST", "/api/v1/workspaces", {"root": cwd, "name": pathlib.Path(cwd).name})["data"]
+            session = self._call("POST", "/api/v1/sessions", {
+                "title": f"{self.title_prefix} {self.name}",
+                "metadata": {"cwd": cwd},
+                "workspace_id": workspace["id"],
+            })["data"]
+            self.session_id = session["id"]
+            self._call("POST", f"/api/v1/sessions/{self.session_id}/profile", {
+                "agent_config": self._agent_config(),
+            })
+            self._verify_permission(self._agent_config()["permission_mode"])
+            self._activate_ponytail()
+            self._part_fingerprints = {}
         self.state.session = self.session_id
-        self._call("POST", f"/api/v1/sessions/{self.session_id}/profile", {
-            "agent_config": self._agent_config(),
-        })
-        self._verify_permission(self._agent_config()["permission_mode"])
-        self._activate_ponytail()
         self._baseline = self._assistant_count()
-        self._part_fingerprints = {}
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
         submitted = self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
                                {"content": [{"type": "text", "text": prompt}]})

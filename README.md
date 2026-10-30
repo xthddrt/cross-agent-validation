@@ -1,125 +1,51 @@
 # cross-agent-validation
 
-Two AI agents — one in **OpenCode**, one in **Kimi Code** — each produce a candidate, review each other's with evidence, and iterate until both approve. Nothing is published until both agents approve both candidates and the published one passed every check.
+Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) turn one task into one reviewed result, fast:
 
 ```
-candidate/deepseek/r0 ─┐                  ┌─ both approve ─ publish
-                       ├─ round 1 ─ r1 ─ … ┤
-candidate/kimi/r0 ─────┘                  └─ otherwise next round
+plan    both write a plan (≤400 words), independently, in parallel
+agree   take turns: accept the other plan as written, or answer with a revised plan and why (≤100 words)
+        one accept ends it; after 4 turns a coin flip picks between the two latest plans
+build   DeepSeek implements the agreed plan; the checks run
+review  Kimi approves or lists ≤5 defects; DeepSeek fixes them; at most 2 fixes
+publish committed, and pushed to origin's default branch (merged if it moved) unless --no-push
 ```
 
+Each agent keeps **one session** for the whole run, so nothing is read twice. Plans are Pareto: the few changes that deliver most of the result, meeting the acceptance criteria and nothing beyond. Prompts never name an agent; a plan is rejected only when it misses the task or would not work.
+
+**Two branches to reconcile** (`--branch A --branch B`, or the two fields on the dashboard form): both agents read the branches as plain folders labelled **Candidate X** and **Candidate Y** (random per run, exported without `.git`, so no branch name, author or commit message), and the plan's first line is `Base: Candidate X` or `Base: Candidate Y`. The build starts from that branch. Everything else is the same.
+
+## Use
+
 ```
-py -m cav check  --case cases\msmon-five-phase.local.json
-py -m cav smoke  --case cases\msmon-five-phase.local.json
-py -m cav run    --case cases\msmon-five-phase.local.json [--run-dir runs\<id>] [--resume] [--push] [--dashboard]
-py -m cav solve  --repo <path> --prompt task.md [--checks C]...
-py -m cav web    --run runs\<id> [--open]
-py -m cav serve  [--port 7700] [--open]
-py -m cav pipeline --repo <path or GitHub URL> --prompt-file task.md [--branch A --branch B] [--check C]... [--run-dir runs\<id>] [--resume]
+py -m cav serve                     # the home dashboard (link kept in runs\serve.json); starts runs from a form
+py -m cav run --repo <path or GitHub URL> --prompt-file task.md [--branch A --branch B] [--check C]... [--no-push] [--dashboard]
+py -m cav run --case cases\kernel-filter-containment.json [--no-push]
+py -m cav web --run runs\<id>       # the dashboard for one run
+py -m cav smoke                     # both agents answer a trivial prompt
 ```
 
-On Windows use `py` rather than `python`: the bare `python` on PATH is the Microsoft Store stub.
+`--builder kimi` swaps the roles (the other agent reviews). On Windows use `py`, not `python` (the Store stub).
 
-## Starting a run from the dashboard
-
-`py -m cav serve` is the home dashboard: every run under `runs\`, and a **New run** form that takes a repo (a local path, or a GitHub URL cloned to `Documents\Default Project\<repo>` or reused if that folder already has the same origin) and a prompt. Its link is fixed: the token is kept in `runs\serve.json`, which also records the URL. A Startup shortcut (`CAV dashboard.lnk`, running `pyw -m cav serve` in this folder) starts it at login; its output goes to `runs\serve.log`.
-
-The form starts `cav pipeline` as its own process, so a run outlives the server:
-
-1. **Plan** — at most 4 rounds, always ending in one plan. Round 1: each agent writes `CAV-PLAN.md` independently. Rounds 2–3: each reviews both plans and revises its own; a plan is agreed as soon as **both agents approve the same plan** (it need not approve both). Round 4, if no plan has both approvals: a **blind forced choice**: each agent, in a fresh session that sees only the task and the two plans as Plan 1 and Plan 2 (random order, no authors), must pick one. The same pick wins; a split goes to the plan with fewer open MUST_FIX findings in round 3, and a tie to a recorded coin flip. The defects listed against the winner are appended to it as part of the code stage's spec.
-2. **Code** — both agents implement the one plan from the base commit, then up to 3 review rounds over the two branches.
-3. **Agreement** — the agreed commit is pushed to origin's default branch; if that branch moved during the run it is merged first, and a conflicting merge is refused, not pushed.
-4. **No agreement** — the stage's `SUMMARY.md` (also the dashboard's *How far apart* button) lists, from the reviews and trees, the round-by-round trend, the files that still differ, and each agent's MUST_FIX findings and notes.
-
-**Reconciling two branches** (both *Branches to reconcile* fields, or `--branch` twice): the plan stage is a reconciliation plan written blind. Both agents plan in the branches' common ancestor and read the branches as plain folders labelled *Candidate X* and *Candidate Y* (assigned at random per run, the same for both agents, exported without `.git`, so no branch name, author or commit message). The plan's first line is `Base: Candidate X` or `Base: Candidate Y`, then keep X / keep Y / new per part of the task and what to port. Once both agree, both agents implement from that base, and reviews judge the task and the plan (a departure is a MUST_FIX unless explained). The reconciliation plan converges the same way (round 4 forces one plan), so both agents always implement from one base. The dashboard shows which branch each label stands for; the agents never see it.
-
-Each stage is an ordinary run directory (`runs\<id>\plan`, `runs\<id>\code`) with its own dashboard; the pipeline's state is `runs\<id>\pipeline.json` and its output `pipeline.log`. Defaults for now: the two agents and models below, 90 minutes per round, and no check commands unless `--check` is given (code stage).
-
-## What a run does
-
-1. **Bootstrap** — publish both starting candidates (r0) into a local bare repo (`exchange.git`), from a ref, the base commit (`solve`), or a snapshot of an uncommitted working tree. Nothing touches GitHub.
-2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* candidate, a fixed checkout of both starting candidates (`rounds/rN/candidates/<agent>`), the other's diff, and a scratch folder outside its worktree. On a round that starts from branches nobody has checked yet (round 1 of `run`), the checks run on them first.
-3. **Propose** — both agents run in parallel. Each judges both starting candidates against the task only, then makes its worktree the best solution: either candidate whole, parts of each, or new work; where two versions do the same thing, the one with less code. It writes a JSON review: `approve` for each candidate by name, findings tied to a candidate with a real path and line in its checkout, and notes. An agent that writes no valid review is retried once.
-4. **Monitor** — live progress in `state.json` and `events.jsonl`; Kimi's approval prompts are answered and its questions dismissed, a stall is reported, and the round has a timeout.
-5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN`. Agents never run git commands that change history.
-6. **Check** — the case's checks run on both new proposals at once (an identical tree once); they gate the round that reviews them.
-7. **Decide** — accepted when both agents approve both starting candidates and those passed the checks. An independent first round (`solve`, and each pipeline stage) reviews nothing and is never accepted. Otherwise the two new proposals start the next round; a pair that repeats an earlier round stops the run.
-8. **Publish** — one of the two **reviewed starting candidates** is published, the one that changed least from its own original branch; a proposal written after the reviews is never published unreviewed. `REPORT.md` records the rounds, where the two approved candidates differ, and each agent's notes. `--push` fast-forwards `origin/<branch>` (the pipeline merges when it moved).
-
-Approval of a candidate is withheld only with a `MUST_FIX` on that candidate (wrong behaviour, an unmet part of the task, a security hole or data loss) at a real path and line, so style and wording never block. Counts are derived from the findings, never trusted from the agent.
-
-## Watching a run
-
-`--dashboard` (or `cav web --run <dir>`) serves a read-only local page: the round's steps, each agent's live feed, the acceptance gates, and the files the candidates still differ on with per-file diffs. The terminal and `run.log` show round, agent, check and verdict lines.
+A run directory holds `state.json` (steps, verdicts, times), `events.jsonl` (every agent action), `plans/` (numbered plans; `agreed.md`), `agree/` (each turn's reply), `review/` (diffs and reviews), `work/` (the built tree), `REPORT.md`, and the result as `refs/cav/<id>/result` in the repo. `/compare?runs=a,b` on the home dashboard puts two runs side by side.
 
 ## Requirements
 
-- Windows with Git installed (`C:\Program Files\Git\cmd\git.exe` is used if `git` is not on `PATH`).
-- OpenCode desktop installed (its bundled `opencode-cli.exe` is used).
-- Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`). Sessions run in yolo mode, and CAV approves the prompts Kimi's dangerous-command guard still raises (e.g. `rm -rf`) for its own sessions only. A question to the user is dismissed, so the agent decides for itself; the round prompt also tells both agents never to ask.
-- [Ponytail](https://github.com/DietrichGebert/ponytail) in both agents: CAV runs them at level `ultra` (`PONYTAIL_LEVEL` in `cav/agents.py`). OpenCode needs the plugin in its config and gets the level through `PONYTAIL_DEFAULT_MODE`; each Kimi session activates the `ponytail:ponytail` skill with it, and a Kimi without the plugin fails the run instead of running without it.
-- Python 3.10+ (standard library only).
-
-## Case file
-
-```json
-{
-  "name": "msmon-five-phase",
-  "repo":   { "host": "...", "base": "816163d", "branch": "main" },
-  "agents": { "deepseek": { "kind": "opencode", "model": "deepseek/deepseek-flash#high",
-                            "bootstrap_ref": "origin/candidate/deepseek-phase-1-5" },
-              "kimi":     { "kind": "kimi", "model": "kimi-code/k3.1-pro", "thinking": "high",
-                            "bootstrap_ref": "origin/candidate/kimi-phase-1-5" } },
-  "checks": [".\\build.cmd", "{python} tools\\check_sensor_map.py"],
-  "task":   { "prompt": "...", "acceptance": ["..."], "context_files": ["..."] },
-  "max_rounds": 3, "round_seconds": 5400, "stall_seconds": 1200, "retries": 1
-}
-```
-
-- `bootstrap_ref` — the commit to use as that agent's r0. Without one, the agent's uncommitted working tree in `repo.secondary` is snapshotted (`bootstrap_exclude` skips paths); the source repo is left untouched.
-- `base` — omit it when the two implementations have unrelated histories.
-- `model` — **always set it.** OpenCode's CLI otherwise falls back to its own default model.
-- `thinking` — Kimi's thinking level; the model and level are verified after each run.
-- `checks` — shell commands run in each candidate's worktree; `{python}` is the interpreter running the tool. Use `.\build.cmd`, not `build.cmd`: Windows may refuse to run scripts from the current directory by bare name.
-- `task` — the objective, acceptance criteria, base-behaviour invariants and context files, all given to both agents.
-- `canonical_agent`, `carry_forward_limit`, `convergence`, `strict_paths` and `formatter` no longer exist; a case that sets one is rejected.
-
-## Failure handling
-
-| Situation | Behaviour |
-|---|---|
-| Agent fails, exits non-zero, or leaves no valid review | one retry with the reason, then the round fails |
-| Agent waits for a permission prompt | aborted immediately with `blocked: ...` |
-| No activity for `stall_seconds` | warning logged, run continues |
-| Round exceeds `round_seconds` | unfinished agents aborted |
-| A check fails | that round is not accepted; the next round sees the result |
-| Candidate pair repeats an earlier round | stopped as oscillation |
-| Rounds exhausted | `phase: disagreement`, nothing published |
-| Interrupted run | `--resume` continues after the last finished round, or publishes an accepted one |
-
-## Limits
-
-- Kimi Code must be running; a timed-out Kimi turn is abandoned, not cancelled.
-- Agreement and checks are mechanical evidence, not human approval. A green check matrix means it builds, not that it works on hardware.
-- Worktrees stay under `runs/<id>/wt` for inspection. Deleting a run directory needs `git worktree prune` in the host repo afterwards.
+- Windows with Git; OpenCode desktop (its `opencode-cli.exe`); Kimi Code desktop **running** (its local API via `~/.kimi-code/server.token`); Python 3.10+, standard library only.
+- [Ponytail](https://github.com/DietrichGebert/ponytail) in both agents, run at `ultra` (`PONYTAIL_LEVEL` in `cav/agents.py`).
+- Unattended: Kimi's approval prompts are answered and its questions dismissed for CAV's own sessions only; every process CAV starts has no window.
 
 ## Layout
 
 ```
-cav/
-  config.py        case loading and validation
-  gitops.py        exchange repo, worktrees, commits
-  agents.py        OpenCode CLI and Kimi HTTP adapters + progress state
-  prompts.py       the round prompt and review contract
-  review.py        review validation
-  compare.py       which paths the two candidates share or differ on
-  orchestrator.py  bootstrap, rounds, checks, acceptance, publication, report
-  events.py        append-only, redacted event log
-  pipeline.py      repo + prompt: plan stage, code stage, merge and push
-  web.py, web/     run dashboard, and the home server that lists runs and starts pipelines
-  cli.py           run / solve / pipeline / serve / check / web / smoke
-cases/             one JSON per reconciliation
-tests/             loop tests with fake agents, plus unit tests
+cav/flow.py      the run: plan, agree, build, review, publish; repo, branch and push helpers
+cav/prompts.py   what each agent is told, step by step
+cav/agents.py    OpenCode and Kimi adapters: persistent sessions, approvals, ponytail
+cav/gitops.py    git helpers
+cav/events.py    the event log
+cav/web.py, web/ the run dashboard, the home server, the compare page
+cav/config.py    case files
+cav/cli.py       run / serve / web / check / smoke
 ```
 
 ## Tests
