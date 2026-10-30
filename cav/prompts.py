@@ -3,7 +3,7 @@ agent or says whose anything is, and a rejection counts only with a defect or a 
 
 import sys
 
-PLAN_WORDS, WHY_WORDS, MAX_DEFECTS = 400, 100, 5
+PLAN_WORDS, WHY_WORDS, MAX_DEFECTS = 500, 100, 5
 HEAD = "You are one of two agents working on the task below."
 PARETO = ("the few changes that give most of the result (the 20% of the work that delivers 80% of the value), "
           "each with what and where; what you leave out on purpose; how it is checked. Meet the task's "

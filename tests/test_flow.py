@@ -10,7 +10,7 @@ from unittest import mock
 
 from cav.agents import RunState
 from cav.flow import Flow
-from cav.gitops import git
+from cav.gitops import git, git_ok
 from tests.test_agents import with_origin
 
 
@@ -107,11 +107,18 @@ class FlowTest(unittest.TestCase):
     def label_of(self, flow, ref):
         return next(label for label, item in flow.state["labels"].items() if item["ref"] == ref)
 
-    def assert_blind(self, fakes, leaks=()):
+    def assert_blind(self, fakes, flow, leaks=()):
+        """No prompt names an agent or a branch or points into the run; nothing the agents can reach
+        has git history or the run's bookkeeping."""
         for fake in fakes.values():
             for prompt in fake.prompts:
-                for word in ("deepseek", "kimi", "yours", "your plan", *leaks):
+                for word in ("deepseek", "kimi", "yours", "your plan", str(flow.run_dir), *leaks):
                     self.assertNotIn(word, prompt)
+        self.assertFalse(flow.blind.is_relative_to(flow.run_dir))
+        folders = [flow.blind] + [path for path in flow.blind.rglob("*") if path.is_dir()]
+        self.assertFalse([path for path in folders if git_ok("rev-parse", "--git-dir", cwd=path)],
+                         "no git repo is reachable from any folder the agents use")
+        self.assertFalse(list(flow.blind.rglob("state.json")))
 
     def test_task_plan_agree_build_judge_publish(self):
         fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
@@ -123,7 +130,7 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
         self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build")
         self.assertEqual([fake.sessions for fake in fakes.values()], [4, 4], "a fresh session for every step")
-        self.assert_blind(fakes)
+        self.assert_blind(fakes, flow)
 
     def test_a_branch_both_approve_is_the_result_at_once(self):
         shas = self.branches()
@@ -133,8 +140,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.steps(flow), [("judge", "accepted")])
         self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
         for label in flow.state["labels"]:
-            self.assertFalse((flow.run_dir / "candidates" / "c1" / f"candidate-{label}" / ".git").exists())
-        self.assert_blind(fakes, leaks=("feat-a", "feat-b", "note feat"))
+            self.assertFalse((flow.blind / "candidates" / "c1" / f"candidate-{label}" / ".git").exists())
+        self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b", "note feat"))
 
     def test_approval_decides_not_preference(self):
         self.branches()
@@ -162,7 +169,7 @@ class FlowTest(unittest.TestCase):
             self.assertEqual(git("merge-base", commit, shas["feat-a"], cwd=self.work), shas["feat-a"])
         agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
         self.assertIn("Defects found in the base", agreed, "the judges' defects against the base go to the builders")
-        self.assert_blind(fakes, leaks=("feat-a", "feat-b"))
+        self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
     def test_plans_without_both_approvals_go_to_the_plan_both_would_keep(self):
         keep = lambda texts: next(n for n, text in texts.items() if "deepseek plan" in text)
@@ -205,12 +212,12 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base)
 
     def test_an_over_long_plan_is_sent_back_once(self):
-        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (450 if attempt == 1 else 50)),
+        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (550 if attempt == 1 else 50)),
                  "kimi": Fake("kimi")}
         code, flow = self.run_flow(fakes, push=False)
         self.assertEqual(code, 0, flow.state)
         retry = [p for p in fakes["deepseek"].prompts if "Write a plan to" in p][1]
-        self.assertIn("450 words; cut it to 400", retry)
+        self.assertIn("550 words; cut it to 500", retry)
 
     def test_answers_are_checked(self):
         self.assertEqual(Flow.plan_problem("no base here", {"X": {}, "Y": {}}),

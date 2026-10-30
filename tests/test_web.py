@@ -166,15 +166,18 @@ class HomeTest(unittest.TestCase):
         self.assertIn(str(self.repo), args)
         run_dir = self.tmp / "runs" / body["id"]
         self.assertEqual((run_dir / "prompt.md").read_text(encoding="utf-8").strip(), "Do the thing")
-        self.assertEqual(json.loads((run_dir / "pipeline.json").read_text(encoding="utf-8"))["stage"], "starting")
+        self.assertFalse((run_dir / "pipeline.json").exists(), "a flow run keeps its status in state.json")
 
         with urllib.request.urlopen(self.base + "/api/runs", timeout=5) as response:
             runs = json.loads(response.read())
         self.assertEqual([run["id"] for run in runs], [body["id"]])
+        self.assertEqual(runs[0]["prompt"].strip(), "Do the thing")
+        (run_dir / "pipeline.json").write_text("{}", encoding="utf-8")  # as the form wrote it before
+        (run_dir / "state.json").write_text(json.dumps({"flow": True, "phase": "judge", "round": 1}), encoding="utf-8")
         with urllib.request.urlopen(self.base + f"/run/{body['id']}/", timeout=5) as response:
-            self.assertTrue(response.geturl().endswith(f"/run/{body['id']}/plan/"), "a pipeline opens on its stage")
-        with urllib.request.urlopen(self.base + f"/run/{body['id']}/api/pipeline", timeout=5) as response:
-            self.assertEqual(json.loads(response.read())["prompt"].strip(), "Do the thing")
+            self.assertTrue(response.geturl().endswith(f"/run/{body['id']}/"), "a flow run opens its own dashboard")
+        with urllib.request.urlopen(self.base + "/api/runs", timeout=5) as response:
+            self.assertEqual(json.loads(response.read())[0]["phase"], "judge")
 
     def test_start_refuses_bad_input(self):
         for body, content_type, code in (({"repo": str(self.tmp / "nope"), "prompt": "x"}, "application/json", 400),

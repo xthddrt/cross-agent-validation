@@ -2,7 +2,7 @@
 
     judge    both agents, blind and separately: approve or reject each of the two candidates (a
              rejection needs a defect), name the one they would keep, and write a plan (at most
-             400 words) whose first line names the candidate to build on. A candidate both
+             500 words) whose first line names the candidate to build on. A candidate both
              approve, with passing checks, is the result.
     plan     a task with no candidates yet: both write a plan, separately
     agree    both read the two plans (no authors) and approve or reject each (a rejection needs
@@ -17,6 +17,10 @@ Two branches start at judge, since they may already be acceptable. No prompt nam
 says whose anything is: candidates are Candidate X and Y (relabelled at random each round, read
 from plain folders without .git), plans and reviews are numbered at random, candidates are listed
 in random order, and every step runs in a fresh session, so no agent remembers what it wrote.
+
+Everything an agent reads or writes lives in a blind area outside every git repo and away from
+the run's bookkeeping: plain folders only, no .git anywhere above them, no state.json. Builds
+happen in plain copies too; CAV commits them into the repo itself, through a separate index.
 """
 
 import concurrent.futures
@@ -26,6 +30,7 @@ import os
 import pathlib
 import random
 import re
+import secrets
 import subprocess
 import sys
 import tarfile
@@ -44,6 +49,9 @@ BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*candidate\s+([XY])\b")
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
 STEP_SECONDS = {"judge": 2700, "plan": 1800, "agree": 1800, "build": 5400}
+# The agents' side of a run: outside every git repo, so no git command there finds any history.
+BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
+                          or pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home()) / "cav-blind")
 
 
 # ------------------------------------------------------------------------ repo helpers
@@ -173,9 +181,11 @@ class Flow:
         models = models or config.DEFAULT_MODELS
         self.names = list(models)
         self.run_id = self.run_dir.name
+        self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
         self.state = {"case": f"{repo_name(repo_spec)}", "run_id": self.run_id, "flow": True, "phase": "starting",
-                      "round": 0, "agents": {}, "history": [], "names": self.names, "authors": {}}
+                      "round": 0, "agents": {}, "history": [], "names": self.names, "authors": {},
+                      "blind": str(self.blind)}
         self.step = 0
         self.agents = {}
         for name, (kind, model) in models.items():
@@ -289,6 +299,9 @@ class Flow:
         self.repo = repo = resolve_repo(self.repo_spec)
         base, branch, pushable = base_of(repo)
         self.save(repo=str(repo), base=base, branch=branch, pushable=pushable and self.push)
+        self.blind.mkdir(parents=True, exist_ok=True)
+        if git_ok("rev-parse", "--git-dir", cwd=self.blind):
+            raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
         candidates = self.branch_candidates(repo) if self.branches else None
         for cycle in range(1, self.max_builds + 2):
             if candidates:
@@ -306,19 +319,19 @@ class Flow:
     def judge(self, cycle, candidates, last):
         """Both agents judge both candidates blind. A candidate both approve, with passing checks, is
         the result; after the last build, the one both would keep (a split: a coin flip)."""
-        folder = self.run_dir / "judge" / f"c{cycle}"
+        folder = self.blind / "judge" / f"c{cycle}"
         folder.mkdir(parents=True, exist_ok=True)
         numbers = _numbered(self.names)
         replies = {name: folder / f"review-{numbers[name]}.json" for name in self.names}
         plans = {name: folder / f"plan-{numbers[name]}.md" for name in self.names}
-        self.state["authors"].update({str(path.relative_to(self.run_dir)): name
+        self.state["authors"].update({str(path.relative_to(self.blind)): name
                                       for files in (replies, plans) for name, path in files.items()})
         entry = self.begin("judge", cycle, candidates={label: item["commit"] for label, item in candidates.items()})
         jobs = {}
         for name in self.names:
             listed = [(label, candidates[label]["folder"], self.checks_summary(candidates[label]))
                       for label in random.sample(LABELS, 2)]  # no fixed first place
-            jobs[name] = (prompts.judge(self.task, listed, replies[name], plans[name]), self.run_dir)
+            jobs[name] = (prompts.judge(self.task, listed, replies[name], plans[name]), self.blind)
         self.ask(jobs, "judge", lambda name: self.judge_problem(replies[name], plans[name], candidates))
         verdicts = {name: _json(replies[name]) for name in self.names}
         approvals = {name: verdicts[name]["approve"] for name in self.names}
@@ -342,13 +355,13 @@ class Flow:
 
     def plan(self, cycle):
         """No candidates yet: both write a plan for the task, separately."""
-        folder = self.run_dir / "plans"
+        folder = self.blind / "plans"
         folder.mkdir(exist_ok=True)
         numbers = _numbered(self.names)
         paths = {name: folder / f"c{cycle}-plan-{numbers[name]}.md" for name in self.names}
-        self.state["authors"].update({str(path.relative_to(self.run_dir)): name for name, path in paths.items()})
+        self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
         entry = self.begin("plan", cycle)
-        self.ask({name: (prompts.plan(self.task, paths[name]), self.run_dir) for name in self.names}, "plan",
+        self.ask({name: (prompts.plan(self.task, paths[name]), self.blind) for name in self.names}, "plan",
                  lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
                                                 if paths[name].exists() else None, None))
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
@@ -360,18 +373,18 @@ class Flow:
         reviews' defects against its base go with it to the builders."""
         texts = {name: plans[name].read_text(encoding="utf-8") for name in self.names}
         numbers = {int(re.search(r"plan-(\d)", plans[name].name).group(1)): name for name in self.names}
-        folder = self.run_dir / "agree"
+        folder = self.blind / "agree"
         folder.mkdir(exist_ok=True)
         entry = self.begin("agree", cycle)
         if len(set(text.strip() for text in texts.values())) == 1:
             chosen, how, objections, approvals = numbers[1], "the two plans are the same", [], {}
         else:
             replies = {name: folder / f"c{cycle}-reply-{n}.json" for name, n in _numbered(self.names).items()}
-            self.state["authors"].update({str(path.relative_to(self.run_dir)): name for name, path in replies.items()})
+            self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
             listed = [(n, plans[numbers[n]]) for n in (1, 2)]
             sources = ([(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)]
                        if candidates else [])
-            self.ask({name: (prompts.agree(self.task, sources, reviews, listed, replies[name]), self.run_dir)
+            self.ask({name: (prompts.agree(self.task, sources, reviews, listed, replies[name]), self.blind)
                       for name in self.names}, "agree", lambda name: self.agree_problem(replies[name]))
             data = {name: _json(replies[name]) for name in self.names}
             approvals = {name: data[name]["approve"] for name in self.names}
@@ -403,9 +416,10 @@ class Flow:
         if objections:
             body += "\n## Objections to this plan (address them where they are right)\n\n" + "\n".join(
                 f"- {text}" for text in objections) + "\n"
-        path = self.run_dir / "plans" / f"c{cycle}-agreed.md"
-        path.parent.mkdir(exist_ok=True)
-        path.write_text(body, encoding="utf-8")
+        path = self.blind / "plans" / f"c{cycle}-agreed.md"
+        for copy in (path, self.run_dir / "plans" / path.name):  # the builders' copy, and the run's record
+            copy.parent.mkdir(exist_ok=True)
+            copy.write_text(body, encoding="utf-8")
         self.end(entry, "agreed", how=how, approvals=approvals, plan=str(path), base=label)
         self.save(plan={"path": str(path), "how": how, "words": words(texts[chosen]), "base": label})
         self.log(f"plan: {how}")
@@ -415,15 +429,15 @@ class Flow:
         """Both implement the plan from the same commit, separately. The two results are relabelled
         at random for the next judge."""
         numbers = _numbered(self.names)
-        works = {name: self.run_dir / "wt" / f"c{cycle}-{numbers[name]}" for name in self.names}
-        notes = {name: self.run_dir / "notes" / f"c{cycle}-build-{numbers[name]}.md" for name in self.names}
+        works = {name: export_tree(self.repo, start, self.blind / "build" / f"c{cycle}-{numbers[name]}")
+                 for name in self.names}  # plain copies: no git history to read
+        notes = {name: self.blind / "notes" / f"c{cycle}-build-{numbers[name]}.md" for name in self.names}
         for name in self.names:
-            git("worktree", "add", "--detach", str(works[name]), start, cwd=self.repo)
             notes[name].parent.mkdir(parents=True, exist_ok=True)
         entry = self.begin("build", cycle, start=start)
         self.ask({name: (prompts.build(plan_path, works[name], self.checks, notes[name], base_label), works[name])
                   for name in self.names}, "build", lambda name: None if notes[name].exists() else "no note written")
-        commits = {name: self.commit(works[name], f"cycle {cycle} build {numbers[name]}") for name in self.names}
+        commits = {name: self.snapshot(works[name], start, f"cycle {cycle} build {numbers[name]}") for name in self.names}
         labels = dict(zip(random.sample(self.names, 2), LABELS))
         candidates = self.candidates(cycle + 1, {labels[name]: (commits[name], works[name]) for name in self.names})
         self.state["authors"].update({f"c{cycle + 1} Candidate {labels[name]}": name for name in self.names})
@@ -463,21 +477,19 @@ class Flow:
         order = random.sample(range(2), 2)
         labels = {label: {"ref": self.branches[i], "commit": shas[i]} for label, i in zip(LABELS, order)}
         self.save(labels=labels)
-        trees = {}
-        for label, item in labels.items():
-            work = self.run_dir / "wt" / f"c1-{label}"
-            git("worktree", "add", "--detach", str(work), item["commit"], cwd=repo)
-            trees[label] = (item["commit"], work)
+        # the checks run in CAV's own copies; the agents only ever see the blind exports
+        trees = {label: (item["commit"], export_tree(repo, item["commit"], self.run_dir / "checks" / f"c1-{label}"))
+                 for label, item in labels.items()}
         return self.candidates(1, trees)
 
     def candidates(self, cycle, trees):
-        """label -> commit, a plain folder to read, and its checks (run in its worktree, both at once)."""
+        """label -> commit, a clean plain folder to read, and its checks (run in the given folder, both at once)."""
         with concurrent.futures.ThreadPoolExecutor(2) as pool:
             checks = {label: pool.submit(self.run_checks, work) for label, (_, work) in trees.items()}
         out = {}
         for label, (commit, _) in trees.items():
             ok, results = checks[label].result()
-            folder = export_tree(self.repo, commit, self.run_dir / "candidates" / f"c{cycle}" / f"candidate-{label}")
+            folder = export_tree(self.repo, commit, self.blind / "candidates" / f"c{cycle}" / f"candidate-{label}")
             out[label] = {"commit": commit, "folder": str(folder), "checks_ok": ok, "checks": results}
         return out
 
@@ -506,11 +518,24 @@ class Flow:
         label = random.choice(LABELS)
         return label, f"no candidate had both approvals and they would keep different ones; coin flip chose Candidate {label}"
 
-    def commit(self, work, what):
-        git("add", "-A", cwd=work)
-        if git("status", "--porcelain", cwd=work):
-            git(*IDENTITY, "commit", "-q", "-m", f"CAV {self.run_id}: {what}", cwd=work)
-        return git("rev-parse", "HEAD", cwd=work)
+    def snapshot(self, folder, parent, what):
+        """Commit a plain folder on top of `parent` through a separate index: the folder never gets a
+        .git, and the repo's own index and checkout are untouched. Its .gitignore still applies."""
+        git_dir = git("rev-parse", "--absolute-git-dir", cwd=self.repo)
+        index = self.run_dir / f"index-{secrets.token_hex(4)}"
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+        where = ("--git-dir", git_dir, "--work-tree", str(folder))
+        try:
+            git(*where, "read-tree", parent, cwd=folder, env=env)
+            git(*where, "add", "-A", cwd=folder, env=env)
+            tree = git(*where, "write-tree", cwd=folder, env=env)
+        finally:
+            index.unlink(missing_ok=True)
+        if tree == git("rev-parse", f"{parent}^{{tree}}", cwd=self.repo):
+            return parent
+        commit = git(*IDENTITY, "commit-tree", tree, "-p", parent, "-m", f"CAV {self.run_id}: {what}", cwd=self.repo)
+        git("update-ref", f"refs/cav/{self.run_id}/{what.replace(' ', '-')}", commit, cwd=self.repo)  # keep it reachable
+        return commit
 
     @staticmethod
     def checks_summary(candidate):

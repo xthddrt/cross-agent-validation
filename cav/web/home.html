@@ -115,10 +115,11 @@ function ago(sec) {
 
 function status(run) {
   if (run.kind === 'run') {
+    if (run.outcome) return [/failed|stopped|checks fail/.test(run.outcome) ? 'bad' : 'ok', run.outcome];
     if (run.agreed) return ['ok', 'agreed'];
     if (run.phase === 'disagreement') return ['warn', 'no agreement'];
     if (/failed$/.test(run.phase || '')) return ['bad', 'failed'];
-    return ['', run.phase || 'unknown'];
+    return ['run', run.phase ? `${run.phase}${run.round ? ` · step ${run.round}` : ''}` : 'starting'];
   }
   if (run.stage === 'failed') return ['bad', 'failed'];
   if (run.stopped) return ['bad', 'stopped'];
@@ -137,8 +138,8 @@ async function loadRuns() {
   } catch (e) { return; }
   const html = runs.length ? runs.map(run => {
     const [cls, label] = status(run);
-    const what = run.kind === 'pipeline' ? (run.prompt || '').split('\n').find(l => l.trim()) || '' : `case ${run.case || ''}`;
-    const detail = run.kind === 'pipeline' && run.outcome ? run.detail : '';
+    const what = (run.prompt || '').split('\n').find(l => l.trim()) || (run.case ? `case ${run.case}` : '');
+    const detail = run.outcome ? run.detail : '';
     return `<li><a href="${BASE}/run/${encodeURIComponent(run.id)}/">` +
       `<span class="id">${esc(run.id)}${run.repo ? ` · ${esc(run.repo)}` : ''}</span>` +
       `<span class="badge ${cls}">${esc(label)}</span>` +
