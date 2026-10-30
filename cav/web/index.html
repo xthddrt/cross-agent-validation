@@ -445,7 +445,7 @@ const roundNumbers = () => {
   if (state.round) set.add(state.round);
   return [...set].filter(Boolean).sort((a, b) => a - b);
 };
-const FLOW_CLS = {planned:'ok', revised:'ok', agreed:'ok', built:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
+const FLOW_CLS = {planned:'ok', revised:'ok', agreed:'ok', built:'ok', reviewed:'ok', accepted:'ok', rejected:'warn', forced:'warn'};
 function roundStatus(n) {
   const h = hist(n), r = rounds[n];
   if (state.flow) return h && h.verdict ? [FLOW_CLS[h.verdict] || '', h.verdict] : isLive(n) ? ['run', 'running'] : ['', '…'];
@@ -622,16 +622,20 @@ function flowDetails(h) {
   const out = [];
   if (h.how) out.push(esc(h.how));
   if (h.words) out.push(`plan words: ${Object.entries(h.words).map(([a, w]) => `${esc(a)} ${w}`).join(' · ')}`);
+  if (h.blockers !== undefined) out.push(`confirmed blockers: ${h.blockers} · refuted: ${h.refuted || 0}`);
+  const [yes, no] = h.step === 'confirm' ? ['clear', 'blocked'] : ['approved', 'rejected'];
   if (h.approvals) out.push(Object.entries(h.approvals).map(([a, v]) => `<b>${esc(a)}</b>: ` +
-    Object.entries(v).map(([k, ok]) => `${esc(/^\d$/.test(k) ? 'plan ' + k : k)} ${ok ? 'approved' : 'rejected'}`).join(', ') +
+    Object.entries(v).map(([k, ok]) => `${esc(/^\d$/.test(k) ? 'plan ' + k : k)} ${ok ? yes : no}`).join(', ') +
     (h.prefer ? ` · would keep ${esc(h.prefer[a])}` : '')).join('<br>'));
   if (h.why) out.push('rejections:<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
     texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>');
   if (h.base) out.push(`base: Candidate ${esc(h.base)}`);
   if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(sha(c))}` +
     (h.checks && h.checks[a] ? ` · checks ${h.checks[a].commands.length ? (h.checks[a].ok ? 'pass' : 'fail') : 'none configured'}` : '')).join('<br>'));
+  const status = (d) => d.severity !== 'blocker' ? (d.severity || '') : d.confirmed === undefined ? 'blocker'
+    : d.confirmed ? 'blocker, confirmed' : `blocker, refuted: ${d.refuted || ''}`;
   if (h.defects && h.defects.length) out.push('defects:<ul>' + h.defects.map(d =>
-    `<li>${d.candidate ? `Candidate ${esc(d.candidate)} · ` : ''}${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}${d.fix ? ` <span class="dim">(fix: ${esc(d.fix)})</span>` : ''}</li>`).join('') + '</ul>');
+    `<li>${d.severity ? `<b>${esc(status(d))}</b> · ` : ''}${d.by ? `${esc(d.by)} · ` : ''}${d.candidate ? `Candidate ${esc(d.candidate)} · ` : ''}${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}${d.fix ? ` <span class="dim">(fix: ${esc(d.fix)})</span>` : ''}</li>`).join('') + '</ul>');
   if (h.seconds !== undefined) out.push(`<span class="dim">took ${dur(h.seconds)}</span>`);
   return out.join('<br>') || '<div class="dim">no details</div>';
 }
@@ -639,7 +643,11 @@ function flowDetails(h) {
 function renderFlow() {
   const all = state.history || [];
   const plan = state.plan ? `<div class="dim" style="margin-top:6px">plan: ${esc(state.plan.how)} · ${state.plan.words} words</div>` : '';
-  const decided = state.decided ? `<div class="dim">result: ${esc(state.decided)}</div>` : '';
+  const follow = (state.final && state.final.open_defects) || [];
+  const decided = (state.decided ? `<div class="dim">result: ${esc(state.decided)}</div>` : '') +
+    (follow.length ? `<details class="dim"><summary>follow-ups: ${follow.length} defect(s) the result still has</summary><ul>` +
+      follow.map(d => `<li>${esc(d.severity || '')}${d.severity === 'blocker' ? (d.confirmed ? ', confirmed' : ', refuted') : ''} · ` +
+        `${esc(d.file || '')}${d.line ? ':' + esc(d.line) : ''} ${esc(d.problem)}</li>`).join('') + '</ul></details>' : '');
   const labels = state.labels ? `<div class="dim">${Object.entries(state.labels).map(([l, v]) => `Candidate ${esc(l)} = ${esc(v.ref)}`).join(' · ')} (agents see only the labels)</div>` : '';
   setHtml($('steps'), `<div style="grid-column:1/-1;display:flex;gap:8px;flex-wrap:wrap">` + all.map(h => {
     const [cls] = roundStatus(h.round);
