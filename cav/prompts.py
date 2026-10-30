@@ -62,8 +62,11 @@ def vote(plans, reply, fixes=False):
 def revise(objections, path, fixes=False):
     lines = ["OBJECTIONS"] + [f"- Plan {number}: {text}" for number, texts in sorted(objections.items())
                               for text in texts] + [""]
+    rules = (" Like the plans before it, it fixes every agreed blocker in its base, keeps to the agreed plans except where "
+             "a blocker needs otherwise, builds on the candidate that needs the least work to be right, and takes what "
+             "the other candidate does better." + BASE) if fixes else ""
     lines.append(f"Write one plan from those two that answers these objections and both voters can approve, to {path} "
-                 f"{PLAN}.{BASE if fixes else ''}")
+                 f"{PLAN}.{rules}")
     return "\n".join(lines) + "\n"
 
 
