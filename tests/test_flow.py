@@ -13,7 +13,7 @@ from cav.flow import Flow
 from cav.gitops import git, git_ok
 from tests.test_agents import with_origin
 
-BUILD = re.compile(r"^(?:Implement the agreed plan, \S+|Fix every blocker in \S+) in (\S+?)(?:, a copy of [XY])?\.")
+BUILD = re.compile(r"^Implement the agreed plan, \S+, in (\S+?)(?:, a copy of [XY])?\.")
 
 
 class Fake:
@@ -177,18 +177,21 @@ class FlowTest(unittest.TestCase):
         self.assertEqual([fake.sessions for fake in fakes.values()], [2, 2])
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
-    def test_later_rounds_rebuild_the_build_with_fewer_agreed_blockers_without_a_plan(self):
+    def test_every_failed_review_gets_a_fix_plan_that_carries_all_earlier_agreed_plans(self):
         fewer = lambda folder: 0 if built(3)(folder) else 2 if built_by("kimi")(folder) else 1
         fakes = {name: Fake(name, blockers=fewer) for name in ("deepseek", "kimi")}
         code, flow = self.run_flow(fakes, task="Add feature.txt.")
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)],
                          ["plan", "vote", "build", "review", "confirm", "plan", "vote", "build",
-                          "review", "confirm", "build", "review", "confirm"])
-        third = [p for p in fakes["kimi"].prompts if BUILD.match(p)][2]
-        self.assertTrue(third.startswith("Fix every blocker"), "no plan after the first review")
-        base = flow.state["history"][10]["base"]
-        self.assertEqual(len(flow.state["history"][9]["agreed"][base]), 2, "the build with fewer agreed blockers")
+                          "review", "confirm", "plan", "vote", "build", "review", "confirm"])
+        fixes = [p for p in fakes["kimi"].prompts if p.startswith("AGREED BLOCKERS")]
+        earlier = [re.findall(r"^- (\S+)$", p.split("AGREED PLANS", 1)[1].split("\n\n", 1)[0], re.M) for p in fixes]
+        self.assertEqual([len(paths) for paths in earlier], [1, 2], "the task plan, then it and the first fix plan")
+        self.assertEqual(earlier[1][0], earlier[0][0], "the task plan stays first")
+        self.assertTrue(pathlib.Path(earlier[1][1]).read_text(encoding="utf-8").startswith("Base:"))
+        self.assertIn("undoes an agreed plan", next(p for p in fakes["kimi"].prompts if p.startswith("PLANS")
+                                                     and "agreed blocker" in p))
 
     def test_answers_are_checked(self):
         path = self.tmp / "answer.json"
