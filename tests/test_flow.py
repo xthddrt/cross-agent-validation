@@ -16,10 +16,14 @@ from tests.test_agents import with_origin
 BUILD = re.compile(r"^Implement the agreed plan, \S+, in (\S+?)(?:, a copy of [XY])?\.")
 
 
+def first_repo(folder):
+    return sorted(path for path in pathlib.Path(folder).iterdir() if path.is_dir())[0]
+
+
 class Fake:
     """Answers each prompt from what is on disk. `blockers(folder)` is how many blockers it finds in a
-    candidate; `agree(line)` its vote on another's blocker; `approve(text)` its vote on a plan;
-    `base(folders)` the candidate a fix plan builds on."""
+    candidate (judged on its first repo); `agree(line)` its vote on another's blocker; `approve(text)` its
+    vote on a plan; `base(folders)` the candidate a fix plan builds on. A build changes every repo."""
 
     def __init__(self, name, blockers=lambda folder: 0, agree=lambda line: True, approve=lambda text: True,
                  base=lambda folders: "X"):
@@ -40,8 +44,8 @@ class Fake:
         out = re.search(r"(?:Write to|Write a plan to|answer to|, to) (\S+?):?(?:\s|$)", prompt)
         path = pathlib.Path(out.group(1)) if out else None
         if "\nCANDIDATES\n" in prompt:
-            self.folders = {label: pathlib.Path(folder) for label, folder in re.findall(r"^- ([XY]): (\S+)$", prompt, re.M)}
-            found = [{"candidate": label, "file": "base.txt", "line": n, "problem": f"{label} wrong {n}"}
+            self.folders = {label: first_repo(folder) for label, folder in re.findall(r"^- ([XY]): (\S+)$", prompt, re.M)}
+            found = [{"candidate": label, "file": f"{folder.name}/base.txt", "line": n, "problem": f"{label} wrong {n}"}
                      for label, folder in self.folders.items() for n in range(1, self.blockers(folder) + 1)]
             path.write_text(json.dumps({"blockers": found}), encoding="utf-8")
         elif prompt.startswith("BLOCKERS"):
@@ -64,8 +68,9 @@ class Fake:
         elif BUILD.match(prompt):
             self.builds += 1
             work = pathlib.Path(BUILD.match(prompt).group(1))
-            (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
-            (work / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
+            for repo in (path for path in work.iterdir() if path.is_dir()):
+                (repo / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
+                (repo / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
             pathlib.Path(re.search(r"changed to (\S+)\.$", prompt, re.M).group(1)).write_text("done", encoding="utf-8")
         self.state.finished = True
         return {"ok": True, "text": "done", "reason": "completed"}
@@ -89,9 +94,10 @@ class FlowTest(unittest.TestCase):
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
-    def run_flow(self, fakes, **options):
+    def run_flow(self, fakes, branches=(), repos=None, **options):
+        repos = repos or [{"repo": str(self.work), "branches": list(branches)}]
         with mock.patch("cav.flow.agent_mod.build", side_effect=lambda spec, log, title_prefix="": fakes[spec.name]):
-            flow = Flow(str(self.work), self.tmp / "runs" / "r1", **options)
+            flow = Flow(repos, self.tmp / "runs" / "r1", **options)
             code = flow.run()
         return code, flow
 
@@ -127,7 +133,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.steps(flow), [("plan", "planned"), ("vote", "agreed"), ("build", "built"),
                                             ("review", "reviewed"), ("confirm", "no blocker in X and Y")])
         branch = flow.state["final"]["branch"]
-        self.assertEqual(git("rev-parse", branch, cwd=self.work), flow.state["final"]["commit"])
+        self.assertEqual(git("rev-parse", branch, cwd=self.work), flow.state["final"]["commits"]["work"])
         self.assertTrue(git("show", f"{branch}:feature.txt", cwd=self.work).startswith("built by"))
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base, "nothing is pushed")
         self.assertEqual([fake.sessions for fake in fakes.values()], [2, 2], "a fresh session for the review round")
@@ -148,7 +154,7 @@ class FlowTest(unittest.TestCase):
         code, flow = self.run_flow(fakes, plan="Add a note.", branches=["feat-a", "feat-b"])
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)], ["review", "confirm"])
-        self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
+        self.assertEqual(flow.state["final"]["commits"], {"work": shas["feat-a"]})
         self.assertTrue(fakes["kimi"].prompts[0].startswith("AGREED PLANS"))
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b", "note feat"))
 
@@ -169,7 +175,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)],
                          ["review", "confirm", "plan", "vote", "build", "review", "confirm"])
-        self.assertEqual(flow.state["history"][4]["start"], shas["feat-a"], "both rebuild from the fix plan's base")
+        self.assertEqual(flow.state["history"][4]["start"], {"work": shas["feat-a"]}, "both rebuild from the fix plan's base")
         fix = next(p for p in fakes["kimi"].prompts if p.startswith("AGREED BLOCKERS"))
         self.assertIn("#1", pathlib.Path(re.search(r"^- (\S+)$", fix, re.M).group(1)).read_text(encoding="utf-8"))
         review = [p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p][1]
@@ -195,6 +201,33 @@ class FlowTest(unittest.TestCase):
                          "each review checks every plan agreed so far")
         self.assertIn("undoes an agreed plan", next(p for p in fakes["kimi"].prompts if p.startswith("PLANS")
                                                      and "agreed blocker" in p))
+
+    def test_several_repos_are_one_candidate_and_get_the_result_branch_each(self):
+        other = self.tmp / "second"
+        other.mkdir()
+        git("init", "-q", cwd=other)
+        (other / "base.txt").write_text("other\n", encoding="utf-8")
+        git("add", "-A", cwd=other)
+        git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "base", cwd=other)
+        fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, task="Add feature.txt to both.",
+                                   repos=[{"repo": str(self.work)}, {"repo": str(other)}])
+        self.assertEqual(code, 0, flow.state)
+        branch = flow.state["final"]["branch"]
+        for repo, name in ((self.work, "work"), (other, "second")):
+            self.assertEqual(git("rev-parse", branch, cwd=repo), flow.state["final"]["commits"][name])
+            self.assertTrue(git("show", f"{branch}:feature.txt", cwd=repo).startswith("built by"))
+        review = next(p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p)
+        folder = pathlib.Path(re.search(r"^- X: (\S+)$", review, re.M).group(1))
+        self.assertEqual(sorted(path.name for path in folder.iterdir()), ["second", "work"], "one folder per repo")
+
+    def test_a_blank_branch_in_a_set_is_that_repos_main(self):
+        shas = self.branches()
+        fakes = {name: Fake(name, blockers=lambda folder: int(not (folder / "feat-a.txt").exists())) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, plan="Add a note.", branches=["feat-a", ""])
+        self.assertEqual(code, 0, flow.state)
+        labels = {item["work"]["ref"]: item["work"]["commit"] for item in flow.state["labels"].values()}
+        self.assertEqual(labels, {"feat-a": shas["feat-a"], "(main)": self.base})
 
     def test_answers_are_checked(self):
         path = self.tmp / "answer.json"

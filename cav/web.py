@@ -138,37 +138,47 @@ class Home:
                         "running": phase not in ENDED, "updated": max(stamps)})
         return sorted(out, key=lambda item: item["updated"], reverse=True)
 
-    def start(self, repo, text, branches=()):
-        """Start a run as its own process, so it outlives this server."""
-        spec, text = (repo or "").strip().strip('"'), (text or "").strip()
-        branches = [item.strip() for item in branches or () if item and item.strip()]
-        if len(branches) not in (0, 2) or len(set(branches)) != len(branches):
-            raise ValueError("give two different branches, or none")
+    def start(self, repos, text):
+        """Start a run as its own process, so it outlives this server. `repos`: [{"repo", "branches":
+        [set 1, set 2]}]; a blank branch is that repo's main."""
+        repos = [{"repo": str(item.get("repo") or "").strip().strip('"'),
+                  "branches": [str(ref or "").strip() for ref in (list(item.get("branches") or []) + ["", ""])[:2]]}
+                 for item in repos or () if str(item.get("repo") or "").strip()]
+        branched = any(ref for item in repos for ref in item["branches"])
+        if not repos:
+            raise ValueError("give at least one repository")
+        if branched and all(item["branches"][0] == item["branches"][1] for item in repos):
+            raise ValueError("the two branch sets are the same")
+        text = (text or "").strip()
         if not text:
-            raise ValueError("give the plan" if branches else "give the task")
-        repo = resolve_repo(spec)  # a GitHub URL is cloned (or its clone fetched) here, so its branches can be checked
-        for ref in branches:
-            resolve_ref(repo, ref)
-        slug = re.sub(r"[^\w.-]+", "-", pathlib.Path(repo).name).strip("-.") or "repo"
+            raise ValueError("give the plan" if branched else "give the task")
+        paths = []
+        for item in repos:
+            path = resolve_repo(item["repo"])  # a GitHub URL is cloned (or its clone fetched) here, so its branches can be checked
+            for ref in item["branches"]:
+                if ref:
+                    resolve_ref(path, ref)
+            paths.append(path)
+        slug = "-".join(re.sub(r"[^\w.-]+", "-", path.name).strip("-.") for path in paths)[:60] or "repo"
         run_id = f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
         while (self.runs_dir / run_id).exists():
             run_id += "x"
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True)
         (run_dir / "input.md").write_text(text + "\n", encoding="utf-8")
+        (run_dir / "spec.json").write_text(json.dumps({"repos": repos, "plan" if branched else "task": text}, indent=2),
+                                           encoding="utf-8")
         # python.exe, not pythonw.exe: the agents' console children then share one hidden console
         python = pathlib.Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and (python.parent / "python.exe").exists():
             python = python.parent / "python.exe"
-        args = [str(python), "-m", "cav", "run", "--repo", spec, "--run-dir", str(run_dir),
-                "--plan-file" if branches else "--task-file", str(run_dir / "input.md"),
-                *[arg for ref in branches for arg in ("--branch", ref)]]
+        args = [str(python), "-m", "cav", "run", "--spec", str(run_dir / "spec.json"), "--run-dir", str(run_dir)]
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         with open(run_dir / "run-output.log", "ab") as log:
             process = subprocess.Popen(args, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                        env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
                                        creationflags=flags, start_new_session=os.name != "nt")
-        (run_dir / "run.json").write_text(json.dumps({"pid": process.pid, "repo": spec, "branches": branches}),
+        (run_dir / "run.json").write_text(json.dumps({"pid": process.pid, "repo": ", ".join(item["repo"] for item in repos)}),
                                           encoding="utf-8")
         return run_id
 
@@ -221,7 +231,7 @@ class Home:
         body = json.loads(raw or b"{}")
         try:
             if parts == ["api", "start"]:
-                run_id = self.start(body.get("repo"), body.get("text"), body.get("branches") or ())
+                run_id = self.start(body.get("repos"), body.get("text"))
                 return handler.send(200, json.dumps({"id": run_id, "url": f"/{self.token}/run/{run_id}/"}))
             if parts == ["api", "stop"]:
                 self.stop(str(body.get("id") or ""))
