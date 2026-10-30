@@ -595,8 +595,8 @@ function renderPipeline() {
     `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
-// a flow run (judge or plan, agree, build; repeated): each step is a "round"; label it by cycle and step
-const stepName = (h) => h ? `${h.cycle ? 'c' + h.cycle + ' ' : ''}${h.step}` : '';
+// a flow run (judge or plan, agree rounds, build, judge): each step is a "round"; label it by step and plan round
+const stepName = (h) => h ? `${h.step}${h.plan_round ? ' ' + h.plan_round : ''}` : '';
 function renderTabs() {
   const nums = roundNumbers();
   const html = nums.map(n => {
@@ -625,6 +625,8 @@ function flowDetails(h) {
   if (h.approvals) out.push(Object.entries(h.approvals).map(([a, v]) => `<b>${esc(a)}</b>: ` +
     Object.entries(v).map(([k, ok]) => `${esc(/^\d$/.test(k) ? 'plan ' + k : k)} ${ok ? 'approved' : 'rejected'}`).join(', ') +
     (h.prefer ? ` · would keep ${esc(h.prefer[a])}` : '')).join('<br>'));
+  if (h.why) out.push('rejections:<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
+    texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>');
   if (h.base) out.push(`base: Candidate ${esc(h.base)}`);
   if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(sha(c))}` +
     (h.checks && h.checks[a] ? ` · checks ${h.checks[a].commands.length ? (h.checks[a].ok ? 'pass' : 'fail') : 'none configured'}` : '')).join('<br>'));
