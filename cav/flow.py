@@ -9,7 +9,7 @@
     build     both implement the agreed plan from the same base, separately; the checks run
     judge     both judge the two builds blind, as above: a build both approve, with passing checks,
               is the result; otherwise each judge writes a plan and the cycle repeats (agree, build,
-              judge), up to 5 builds. The judge after the last build keeps the one passing its
+              judge), up to 10 builds. The judge after the last build keeps the one passing its
               checks, else the one both would keep, else a coin flip.
     publish   pushed to origin's default branch unless --no-push; failing checks publish nothing
 
@@ -42,7 +42,7 @@ from .gitops import GIT, IDENTITY, NO_WINDOW, git, git_ok
 
 PLAN_WORDS, WHY_WORDS = prompts.PLAN_WORDS, prompts.WHY_WORDS
 LABELS = ("X", "Y")
-MAX_PLAN_ROUNDS, MAX_BUILDS = 10, 5
+MAX_PLAN_ROUNDS, MAX_BUILDS = 10, 10
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
