@@ -19,12 +19,12 @@ from cav.pipeline import Pipeline
 from cav.web import Home
 from tests.test_v2 import ROUND_RE, StructuredFake, make_repo
 
-BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral", "path": "base.txt", "line": 1,
+BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
             "summary": "the other candidate is wrong", "resolution": "fix it"}
 
 
 def is_plan(prompt):
-    return "WRITE A PLAN" in prompt or "WRITE ONE NEW PLAN" in prompt
+    return "each propose a plan" in prompt
 
 
 class StageFake(StructuredFake):
@@ -85,12 +85,14 @@ class PipelineTest(unittest.TestCase):
         self.assertEqual(state["outcome"], "merged and pushed")
         self.assertEqual(state["plan"]["outcome"], "agreed")
         run_dir = self.tmp / "runs" / "p1"
-        self.assertEqual((run_dir / "plans" / "agreed.md").read_text(encoding="utf-8").strip(), "agreed plan")
-        implement = next(p for p in fakes["kimi"].prompts if "IMPLEMENT THE TASK" in p)
-        self.assertIn("PLAN TO IMPLEMENT", implement)
+        # round 2 approved both round-1 plans, so the agreed plan is one of them
+        self.assertIn((run_dir / "plans" / "agreed.md").read_text(encoding="utf-8").strip(),
+                      ("deepseek plan", "kimi plan"))
+        implement = next(p for p in fakes["kimi"].prompts if "Implement the task" in p)
+        self.assertIn("PLAN (both agents agreed on it", implement)
         self.assertIn(str(run_dir / "plans" / "agreed.md"), implement)
         pushed = f"refs/heads/{state['branch']}"
-        self.assertEqual(git("--git-dir", str(self.origin), "show", f"{pushed}:feature.txt"), "agreed")
+        self.assertIn(git("--git-dir", str(self.origin), "show", f"{pushed}:feature.txt"), ("deepseek", "kimi"))
         files = git("--git-dir", str(self.origin), "ls-tree", "-r", "--name-only", pushed).splitlines()
         self.assertNotIn("CAV-PLAN.md", files, "the plan stays out of the pushed code")
 
@@ -105,9 +107,9 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue((run_dir / "plan" / "SUMMARY.md").exists())
         summary = (run_dir / "code" / "SUMMARY.md").read_text(encoding="utf-8")
         self.assertIn("feature.txt", summary)
-        self.assertIn("Blocking: [F-01]", summary)
-        implement = next(p for p in fakes["deepseek"].prompts if "IMPLEMENT THE TASK" in p)
-        self.assertIn("each implements its own", implement)
+        self.assertIn("MUST_FIX on kimi's candidate [F-01] `base.txt:1`", summary)
+        implement = next(p for p in fakes["deepseek"].prompts if "Implement the task" in p)
+        self.assertIn("each agent implements its own", implement)
         self.assertIn(str(run_dir / "plans" / "deepseek.md"), implement)
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", f"refs/heads/{state['branch']}"),
                          self.base, "nothing is pushed without agreement")

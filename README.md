@@ -1,6 +1,6 @@
 # cross-agent-validation
 
-Two AI agents — one in **OpenCode**, one in **Kimi Code** — each produce a candidate, review each other's with evidence, and iterate until both approve. Nothing is published until both agents approve both candidates and every check passes.
+Two AI agents — one in **OpenCode**, one in **Kimi Code** — each produce a candidate, review each other's with evidence, and iterate until both approve. Nothing is published until both agents approve both candidates and the published one passed every check.
 
 ```
 candidate/deepseek/r0 ─┐                  ┌─ both approve ─ publish
@@ -29,22 +29,22 @@ The form starts `cav pipeline` as its own process, so a run outlives the server:
 1. **Plan** — each agent writes `CAV-PLAN.md` independently, then up to 3 review rounds of the usual loop over the two plans.
 2. **Code** — both agents implement the agreed plan from the base commit, or, without agreement, each implements its own last plan. Then up to 3 review rounds over the two branches.
 3. **Agreement** — the agreed commit is pushed to origin's default branch; if that branch moved during the run it is merged first, and a conflicting merge is refused, not pushed.
-4. **No agreement** — the stage's `SUMMARY.md` (also the dashboard's *How far apart* button) lists, from the reviews and trees, the round-by-round trend, the files that still differ and each agent's blocking findings and open disagreements.
+4. **No agreement** — the stage's `SUMMARY.md` (also the dashboard's *How far apart* button) lists, from the reviews and trees, the round-by-round trend, the files that still differ, and each agent's MUST_FIX findings and notes.
 
 Each stage is an ordinary run directory (`runs\<id>\plan`, `runs\<id>\code`) with its own dashboard; the pipeline's state is `runs\<id>\pipeline.json` and its output `pipeline.log`. Defaults for now: the two agents and models below, no check commands, 90 minutes per round.
 
 ## What a run does
 
 1. **Bootstrap** — publish both starting candidates (r0) into a local bare repo (`exchange.git`), from a ref, the base commit (`solve`), or a snapshot of an uncommitted working tree. Nothing touches GitHub.
-2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* previous candidate and the other candidate's full diff against it.
-3. **Propose** — both agents run in parallel. Each reads both candidates in full, judges what it agrees with in each, and turns its worktree into **one new proposal** combining the best of both. It writes a JSON review: approval of each candidate, findings with a real path and line, and its judgement per area of the task (not per file). An agent that writes no valid review is retried once. Next round, each agent receives the two new proposals and does the same.
-4. **Monitor** — live progress in `state.json` and `events.jsonl`; an agent blocked on a human prompt is aborted, a stall is reported, and the round has a timeout.
+2. **Prepare** — neither candidate is a default. Each agent gets a worktree of *its own* candidate, a fixed checkout of both starting candidates (`rounds/rN/candidates/<agent>`), the other's diff, and a scratch folder outside its worktree. On a round that starts from branches nobody has checked yet (round 1 of `run`), the checks run on them first.
+3. **Propose** — both agents run in parallel. Each judges both starting candidates against the task only, then makes its worktree the best solution: either candidate whole, parts of each, or new work; where two versions do the same thing, the one with less code. It writes a JSON review: `approve` for each candidate by name, findings tied to a candidate with a real path and line in its checkout, and notes. An agent that writes no valid review is retried once.
+4. **Monitor** — live progress in `state.json` and `events.jsonl`; Kimi's approval prompts are answered and its questions dismissed, a stall is reported, and the round has a timeout.
 5. **Collect** — the orchestrator alone commits each worktree and pushes `candidate/<agent>/rN`. Agents never run git commands that change history.
-6. **Check** — the case's checks run on both candidates at once (an identical tree once).
-7. **Decide** — accepted when every check passes, no review has a `MUST_FIX` finding of kind `behavioral`, both agents approve both candidates, and no behavioural disagreement is left open. Otherwise the next round starts from the new candidates; a pair that repeats an earlier round stops the run.
-8. **Publish** — the approved candidate that changed least from its own original branch is published as it is: nothing is rewritten after agreement, so nothing is re-checked or re-approved. `REPORT.md` records the rounds, the differences both agents accepted, and each agent's judgement by area. `--push` fast-forwards `origin/<branch>`.
+6. **Check** — the case's checks run on both new proposals at once (an identical tree once); they gate the round that reviews them.
+7. **Decide** — accepted when both agents approve both starting candidates and those passed the checks. An independent first round (`solve`, and each pipeline stage) reviews nothing and is never accepted. Otherwise the two new proposals start the next round; a pair that repeats an earlier round stops the run.
+8. **Publish** — one of the two **reviewed starting candidates** is published, the one that changed least from its own original branch; a proposal written after the reviews is never published unreviewed. `REPORT.md` records the rounds, where the two approved candidates differ, and each agent's notes. `--push` fast-forwards `origin/<branch>` (the pipeline merges when it moved).
 
-Refusing approval requires a behavioural `MUST_FIX` finding with a real path and line, so taste does not block. Counts are derived from the findings, never trusted from the agent.
+Approval of a candidate is withheld only with a `MUST_FIX` on that candidate (wrong behaviour, an unmet part of the task, a security hole or data loss) at a real path and line, so style and wording never block. Counts are derived from the findings, never trusted from the agent.
 
 ## Watching a run
 

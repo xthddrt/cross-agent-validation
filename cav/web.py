@@ -351,11 +351,12 @@ class Home(Server):
     def post(self, handler, parts, query):
         if parts != ["api", "start"]:
             return handler.send(404, "not found", "text/plain")
+        length = int(handler.headers.get("Content-Length") or 0)
+        raw = handler.rfile.read(length)  # read first: answering early aborts the client's send
         # a JSON body cannot come from a plain cross-site form post
         if handler.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
             return handler.send(415, json.dumps({"error": "send JSON"}))
-        length = int(handler.headers.get("Content-Length") or 0)
-        body = json.loads(handler.rfile.read(length) or b"{}")
+        body = json.loads(raw or b"{}")
         try:
             run_id = self.start(body.get("repo"), body.get("prompt"))
         except ValueError as error:

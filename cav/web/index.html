@@ -452,6 +452,7 @@ function roundStatus(n) {
     if ((r && r.fin.complete) || (state.final && state.final.round === n)) return ['ok', 'agreed'];
     return isLive(n) ? ['run', 'publishing'] : ['warn', 'accepted, not published'];
   }
+  if (v === 'independent') return ['', 'independent'];
   if (v) return ['warn', 'diverged'];
   return isLive(n) ? ['run', 'running'] : ['', 'incomplete'];
 }
@@ -478,7 +479,8 @@ function steps(n) {
   const rejected = reviews.find(v => !v.ok);
   const b = r.blockers || (h && h.blockers);
   out.push({label:'Reviews', done:reviews.length === 2 && !rejected, state:rejected ? 'bad' : null,
-            sub: rejected ? 'review rejected' : b ? `${b.must_fix_total} MUST_FIX · ${b.blocking_must_fix} blocking`
+            sub: rejected ? 'review rejected' : b ? (b.must_fix_total !== undefined
+                   ? `${b.must_fix_total} MUST_FIX · ${b.blocking_must_fix} blocking` : `${b.blocking_must_fix} MUST_FIX`)
                  : reviews.length ? `${reviews.length}/2 valid` : ''});
 
   const cmds = names.flatMap(x => r.checks[x] || []);
@@ -497,9 +499,10 @@ function steps(n) {
             sub: t ? (t.differing ? differ(t.differing) : 'identical trees') : ''});
 
   const v = r.verdict || (h && h.verdict);
-  const accepted = v === 'accepted';
-  out.push({label:'Verdict', done:!!v, state:v ? (accepted ? 'good' : 'warn') : null,
-            sub: v ? (accepted ? 'both approve' : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
+  const accepted = v === 'accepted', independent = v === 'independent';
+  out.push({label:'Verdict', done:!!v, state:v ? (accepted ? 'good' : independent ? 'done' : 'warn') : null,
+            sub: v ? (accepted ? 'both approve' : independent ? 'independent round · nothing to approve yet'
+                 : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
 
   const f = r.fin;
   let fin;
@@ -800,9 +803,15 @@ function renderAgent(i) {
     const c = res.counts || {};
     chips.push(`<span class="chip mono">${esc(sha(res.commit))}</span>`);
     chips.push(`<span class="chip ${res.blocking ? 'bad' : 'ok'}">${res.blocking} blocking</span>`);
-    chips.push(`<span class="chip">MUST ${c.must_fix_total ?? '?'} · SHOULD ${c.should_fix ?? '?'} · NIT ${c.nit ?? '?'}</span>`);
-    chips.push(`<span class="chip ${res.approved ? 'ok' : 'bad'}">${res.approved ? '✓' : '✕'} own</span>`);
-    chips.push(`<span class="chip ${res.other_approved ? 'ok' : 'bad'}">${res.other_approved ? '✓' : '✕'} other</span>`);
+    chips.push(`<span class="chip">MUST ${c.must_fix ?? c.must_fix_total ?? '?'} · SHOULD ${c.should_fix ?? '?'} · NIT ${c.nit ?? '?'}</span>`);
+    if (res.approves) {
+      // a review approves both starting candidates by name; an independent round approves none
+      for (const [who, ok] of Object.entries(res.approves))
+        chips.push(`<span class="chip ${ok ? 'ok' : 'bad'}">${ok ? '✓' : '✕'} ${esc(who)}</span>`);
+    } else {
+      chips.push(`<span class="chip ${res.approved ? 'ok' : 'bad'}">${res.approved ? '✓' : '✕'} own</span>`);
+      chips.push(`<span class="chip ${res.other_approved ? 'ok' : 'bad'}">${res.other_approved ? '✓' : '✕'} other</span>`);
+    }
     const ck = ((hist(selected) || {}).checks || {})[name];
     if (ck && (ck.commands || []).length) chips.push(`<span class="chip ${ck.ok ? 'ok' : 'bad'}">checks ${ck.ok ? 'pass' : 'fail'}</span>`);
   }
@@ -841,6 +850,26 @@ function renderGates() {
     return;
   }
   const [n0, n1] = names;
+  if (b.verdict === 'independent') {
+    setHtml($('gates'), '<div class="dim">Independent round: each agent worked without seeing the other, ' +
+      'so there was nothing to approve. Next round they review each other.</div>');
+    return;
+  }
+  if (b.approvals) {
+    const both = (who) => Object.values(b.approvals[who] || {}).every(Boolean);
+    const detail = (who) => Object.entries(b.approvals[who] || {}).map(([c, ok]) => `${c} ${ok ? '✓' : '✕'}`).join(' · ');
+    const list = [
+      ['Starting candidates pass the checks', b.checks, true],
+      [`${n0} approves both starting candidates`, both(n0), true, detail(n0)],
+      [`${n1} approves both starting candidates`, both(n1), true, detail(n1)],
+      ['Publishes one of the two reviewed candidates', true, false, `${b.blocking_must_fix} MUST_FIX this round`],
+    ];
+    setHtml($('gates'), '<ul class="gates">' + list.map(([label, ok, required, d]) =>
+      `<li class="${!required ? 'info' : ok ? 'pass' : 'fail'}"><span class="i">${!required ? '·' : ok ? '✓' : '✕'}</span>` +
+      `<span>${esc(label)}</span><span class="d">${esc(d || '')}</span></li>`).join('') + '</ul>' +
+      `<div class="verdict ${b.eligible ? 'ok' : 'warn'}">${b.eligible ? 'Accepted' : 'Not yet: another round'}</div>`);
+    return;
+  }
   const ap = b.behaviour_approved || [], op = b.other_approved || [];
   const approve = (i) => `own ${ap[i] ? '✓' : '✕'} · other ${op[i] ? '✓' : '✕'}`;
   const rows = [
@@ -925,6 +954,7 @@ async function openModal(kind, round, arg) {
 }
 
 function reviewHtml(d) {
+  if (d.approve || (d.notes !== undefined && d.behavior_approved === undefined)) return reviewHtmlV2(d);
   // the orchestrator recomputes counts from the findings; the file holds the agent's own numbers
   const fs = Array.isArray(d.findings) ? d.findings : [];
   const n = (sev, kind) => fs.filter(f => f && f.severity === sev && (!kind || f.kind === kind)).length;
@@ -945,6 +975,24 @@ function reviewHtml(d) {
     [esc(x.area), esc(x.kind), esc(x.note)]));
   html += table('Areas', ['Area', 'Status', 'Kept', 'Why'], (d.areas || []).map(x =>
     [esc(x.area), esc(x.status), esc(x.kept), esc(x.why)]));
+  return html;
+}
+
+function reviewHtmlV2(d) {
+  // current format: approval of each starting candidate by name, findings tied to a candidate, notes
+  const fs = Array.isArray(d.findings) ? d.findings : [];
+  const count = (sev) => fs.filter(f => f && f.severity === sev).length;
+  const yes = (v) => v ? '<span style="color:var(--ok)">✓ approves</span>' : '<span style="color:var(--bad)">✕ withholds</span>';
+  let html = `<div class="result" style="font-size:13px;gap:16px">` +
+    (d.approve ? Object.entries(d.approve).map(([who, ok]) => `<span>${esc(who)} ${yes(ok)}</span>`).join('')
+               : '<span class="dim">independent round: no approvals</span>') +
+    `<span>MUST_FIX <b>${count('MUST_FIX')}</b></span><span>SHOULD_FIX <b>${count('SHOULD_FIX')}</b></span>` +
+    `<span>NIT <b>${count('NIT')}</b></span></div>`;
+  const sev = {MUST_FIX:'bad', SHOULD_FIX:'warn', NIT:''};
+  if (fs.length) html += `<h4>Findings</h4><table><tr><th>ID</th><th>Candidate</th><th>Severity</th><th>Where</th><th>Summary</th><th>Fix</th></tr>` +
+    fs.map(f => `<tr><td>${esc(f.id)}</td><td>${esc(f.candidate)}</td><td><span class="chip ${sev[f.severity] || ''}">${esc(f.severity)}</span></td>` +
+      `<td><span class="mono">${esc(f.path)}:${esc(f.line)}</span></td><td>${esc(f.summary)}</td><td>${esc(f.fix)}</td></tr>`).join('') + '</table>';
+  if (d.notes) html += `<h4>Notes</h4><div class="md">${md(String(d.notes))}</div>`;
   return html;
 }
 

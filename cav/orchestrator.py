@@ -181,9 +181,10 @@ class Orchestrator:
     def round(self, round_no):
         """Both candidates get equal standing: neither is a default the other must argue against.
 
-        Each agent reads both candidates in full and turns its own worktree into one new proposal
-        that combines what it agrees with from either. The two proposals are reviewed against
-        each other next round, until both agents approve. Nothing depends on agent order.
+        Each agent reviews both starting candidates and turns its own worktree into a new
+        proposal. When both approve both starting candidates, one of those reviewed candidates
+        is published; otherwise the two new proposals start the next round. An independent
+        first round (from the base) reviews nothing and cannot be accepted.
         """
         case, names = self.case, list(self.case.agents)
         self.state.update(phase=f"r{round_no}-prepare", round=round_no)
@@ -212,6 +213,7 @@ class Orchestrator:
         # committed as part of that agent's proposal.
         candidates = ({name: self.prepare_worktree(context_dir / "candidates" / name, starts[name])
                        for name in names} if phase == "reconcile" else {})
+        start_checks = self.start_checks(round_no, starts, candidates) if candidates else {}
         for name, spec in case.agents.items():
             other = case.other(name)
             scratch = self.run_dir / "scratch" / f"r{round_no}" / name
@@ -224,6 +226,7 @@ class Orchestrator:
                 "phase": phase, "own_sha": starts[name], "other_sha": starts[other],
                 "other_patch": patch, "other_review": self.previous_review(round_no, other),
                 "other_tree": str(candidates[other]) if candidates else None,
+                "own_tree": str(candidates[name]) if candidates else None,
                 "other_worktree": str(worktrees[other]), "scratch": str(scratch),
                 "own_review": self.previous_review(round_no, name), "history": self.history_line()})
             (context_dir / f"{name}-context.md").write_text(prompts[name], encoding="utf-8")
@@ -237,11 +240,12 @@ class Orchestrator:
         self.state["phase"] = f"r{round_no}-agents"
         self.save()
         self.emit("round.start", round_no, data={"phase": phase})
-        self.drive(round_no, runs, prompts, worktrees, reviews)
+        trees = candidates or None
+        self.drive(round_no, runs, prompts, worktrees, reviews, trees)
 
         results, failed = {}, []
         for name in names:
-            rev = review_mod.load(reviews[name], name, round_no, worktrees[name])
+            rev = review_mod.load(reviews[name], name, round_no, trees)
             if rev is None or not rev.valid:
                 reason = "no review written" if rev is None else f"invalid review: {rev.errors[0]}"
                 failed.append(f"{name}: {reason}")
@@ -252,8 +256,7 @@ class Orchestrator:
                                                         f"\n\nStarted from: {starts[name]}")
             self.repo.push(sha, f"candidate/{name}/r{round_no}")
             results[name] = {"commit": sha, "tree": self.repo.tree(sha), "blocking": rev.blocking,
-                             "counts": rev.counts, "approved": rev.behavior_approved,
-                             "other_approved": rev.other_approved, "open_behavioural": rev.open_behavioural}
+                             "counts": rev.counts, "approves": rev.approvals}
             self.emit("candidate.commit", round_no, name, {"commit": sha})
         if failed:
             self.state["phase"] = f"r{round_no}-failed"
@@ -270,9 +273,9 @@ class Orchestrator:
         self.emit("divergence.computed", round_no,
                   data={"identical": len(divergence["identical"]), "differing": len(divergence["differing"]),
                         "files": divergence["differing"][:20]})
-        blockers = self.blockers(results, checks)
+        blockers = self.blockers(results, start_checks, phase)
         self.state["history"].append({
-            "round": round_no, "phase": phase, "starts": starts,
+            "round": round_no, "phase": phase, "starts": starts, "start_checks": start_checks,
             "results": results, "checks": checks,
             "divergence": {"identical": len(divergence["identical"]),
                            "differing": len(divergence["differing"])},
@@ -309,7 +312,7 @@ class Orchestrator:
 
     # --------------------------------------------------------------- drive/monitor
 
-    def drive(self, round_no, runs, prompts, worktrees, reviews):
+    def drive(self, round_no, runs, prompts, worktrees, reviews, trees=None):
         """Run both agents in parallel; retry one that leaves no valid review."""
 
         def problem(name):
@@ -317,7 +320,7 @@ class Orchestrator:
                 return runs[name].state.error
             if not runs[name].state.finished:
                 return "did not finish"
-            rev = review_mod.load(reviews[name], name, round_no, worktrees[name])
+            rev = review_mod.load(reviews[name], name, round_no, trees)
             if rev is None:
                 return "no review file"
             return None if rev.valid else f"invalid review: {rev.errors[0]}"
@@ -397,13 +400,22 @@ class Orchestrator:
 
     # ------------------------------------------------------------------- checks
 
-    def run_checks(self, round_no, results, worktrees):
+    def start_checks(self, round_no, starts, candidates):
+        """Checks of the candidates under review: from the round that produced them, else run now
+        (the original branches a run starts from were never checked)."""
+        previous = next((item for item in reversed(self.state["history"]) if item.get("results")), None)
+        if previous and all(previous["results"][name]["commit"] == starts[name] for name in starts):
+            return previous["checks"]
+        trees = {name: {"tree": self.exchange.tree_of(sha)} for name, sha in starts.items()}
+        return self.run_checks(round_no, trees, candidates, folder=f"r{round_no}-start")
+
+    def run_checks(self, round_no, results, worktrees, folder=None):
         """The case's checks on both candidates at once; an identical tree is checked once."""
         if not self.case.checks:
             return {name: {"ok": True, "commands": []} for name in results}
         self.state["phase"] = f"r{round_no}-checks"
         self.save()
-        out_dir = self.run_dir / "checks" / f"r{round_no}"
+        out_dir = self.run_dir / "checks" / (folder or f"r{round_no}")
         out_dir.mkdir(parents=True, exist_ok=True)
         runners = {}
         for name, result in results.items():
@@ -442,22 +454,17 @@ class Orchestrator:
 
     # ----------------------------------------------------------------- verdict
 
-    def blockers(self, results, checks):
-        """The acceptance rule: every check passes, no behavioural MUST_FIX, both agents approve
-        both candidates, and no behavioural disagreement is left open."""
+    def blockers(self, results, start_checks, phase):
+        """The acceptance rule: both agents approve both starting candidates (approval is withheld
+        only with a MUST_FIX) and those candidates passed the checks. An independent round has
+        reviewed nothing, so it is never accepted."""
         names = list(self.case.agents)
-        item = {
-            "checks": all(check["ok"] for check in checks.values()),
-            "blocking_must_fix": sum(results[name]["blocking"] for name in names),
-            "must_fix_total": sum(results[name]["counts"].get("must_fix_total", 0) for name in names),
-            "behaviour_approved": [results[name]["approved"] for name in names],
-            "other_approved": [results[name]["other_approved"] for name in names],
-            "open_behavioural": any(results[name]["open_behavioural"] for name in names),
-            "trees_equal": results[names[0]]["tree"] == results[names[1]]["tree"],
-        }
-        item["eligible"] = (item["checks"] and not item["blocking_must_fix"]
-                            and all(item["behaviour_approved"]) and all(item["other_approved"])
-                            and not item["open_behavioural"])
+        item = {"blocking_must_fix": sum(results[name]["blocking"] for name in names),
+                "approvals": {name: results[name]["approves"] for name in names}}
+        if phase == "implement":
+            return dict(item, checks=None, eligible=False, verdict="independent")
+        item["checks"] = all(check["ok"] for check in start_checks.values())
+        item["eligible"] = item["checks"] and all(all(results[name]["approves"].values()) for name in names)
         item["verdict"] = "accepted" if item["eligible"] else "diverged"
         return item
 
@@ -503,17 +510,18 @@ class Orchestrator:
         return chosen, {"reason": reason, "changes": changes}
 
     def finalize(self, round_no):
-        """Publish exactly one of the two candidates both agents approved and whose checks passed.
-        Nothing is rewritten after agreement, so nothing needs re-checking or re-approval."""
+        """Publish one of the two starting candidates both agents approved and whose checks passed:
+        reviewed code, not a proposal written after the reviews. Nothing is rewritten after
+        agreement, so nothing needs re-checking or re-approval."""
         entry = next(item for item in self.state["history"] if item["round"] == round_no)
-        results = entry["results"]
-        chosen, publication = self.choose_publication(results)
-        commit, tree = results[chosen]["commit"], results[chosen]["tree"]
+        approved = {name: {"commit": sha, "tree": self.exchange.tree_of(sha)} for name, sha in entry["starts"].items()}
+        chosen, publication = self.choose_publication(approved)
+        commit, tree = approved[chosen]["commit"], approved[chosen]["tree"]
         self.emit("publication.selected", round_no, chosen, publication)
         self.state["phase"] = "converged"
         self.state["final"] = {"round": round_no, "commit": commit, "tree": tree, "pushed": False,
                                "published_from": {"agent": chosen, **publication},
-                               "checks": entry["checks"][chosen]["commands"]}
+                               "checks": entry["start_checks"][chosen]["commands"]}
         self.save()
         self.write_report(round_no)
         self.log(f"ACCEPTED in round {round_no}: {chosen}'s candidate {commit} ({publication['reason']})")
@@ -561,38 +569,40 @@ class Orchestrator:
     def write_report(self, round_no):
         case, final = self.case, self.state.get("final") or {}
         published = final.get("published_from") or {}
-        folder = self.run_dir / "reviews" / f"r{round_no}"
+        entry = next((item for item in self.state["history"] if item["round"] == round_no), {})
+        starts = entry.get("starts") or {}
         lines = [
             f"# Reconciliation report: {case.name}",
             "",
-            f"- Run `{self.run_dir.name}`, accepted in round {round_no} of at most {case.max_rounds}; "
-            f"both candidates weighed equally",
+            f"- Run `{self.run_dir.name}`, accepted in round {round_no} of at most {case.max_rounds}: "
+            f"both agents approved both candidates the round started from",
             f"- Published: {published.get('agent')}'s candidate, {published.get('reason')}",
             f"- Commit `{final.get('commit')}`, tree `{final.get('tree')}`",
             f"- Pushed to origin: {'yes' if final.get('pushed') else 'no'}",
-            f"- Basis: {'task + ' if case.task_prompt.strip() else ''}checks + mutual review",
             "",
             "## Rounds",
             "",
-            "| Round | Verdict | Blocking MUST_FIX | Checks | Paths differing |",
+            "| Round | Verdict | MUST_FIX | Start candidates' checks | Paths differing after |",
             "|---|---|---|---|---|",
         ]
         for item in self.state["history"]:
             gate = item.get("blockers") or {}
+            checks = gate.get("checks")
             lines.append(f"| {item['round']} | {item.get('verdict', 'failed')} "
                          f"| {gate.get('blocking_must_fix', '-')} "
-                         f"| {('pass' if gate['checks'] else 'fail') if gate else '-'} "
+                         f"| {'-' if checks is None else 'pass' if checks else 'fail'} "
                          f"| {(item.get('divergence') or {}).get('differing', '-')} |")
-        differing = self.read_json(folder / "divergence.json").get("differing") or []
-        lines += ["", "## Differences both agents accepted", ""]
-        lines += [f"- `{path}`" for path in differing[:200]] or ["None: the two candidates are identical."]
+        if len(starts) == 2:
+            names = list(starts)
+            differing = compare.compare_trees(self.exchange.path, self.exchange.tree_of(starts[names[0]]),
+                                              self.exchange.tree_of(starts[names[1]]))["differing"]
+            lines += ["", "## Where the two approved candidates differ", ""]
+            lines += [f"- `{path}`" for path in differing[:200]] or ["None: they are identical."]
+        folder = self.run_dir / "reviews" / f"r{round_no}"
         for name in case.agents:
-            areas = [item for item in self.read_json(folder / f"{name}-review.json").get("areas") or []
-                     if isinstance(item, dict)]
-            if areas:
-                lines += ["", f"## {name}'s judgement by area", ""]
-                lines += [f"- {item.get('area', '')} ({item.get('status', '')}, kept {item.get('kept', '-')}): "
-                          f"{item.get('why', '')}" for item in areas[:100]]
+            notes = self.read_json(folder / f"{name}-review.json").get("notes")
+            if notes:
+                lines += ["", f"## {name}'s notes", "", str(notes)]
         lines += ["", "## Checks on the published commit", ""]
         lines += [f"- `{c['command']}` exit {c['exit']} in {c['seconds']}s"
                   for c in final.get("checks") or []] or ["- none configured"]
@@ -610,43 +620,40 @@ class Orchestrator:
         else:
             last = history[-1]
             folder = self.run_dir / "reviews" / f"r{last['round']}"
-            lines += [f"- Stopped after round {last['round']} of at most {case.max_rounds}",
-                      f"- Last candidates: " + ", ".join(f"{name} `{last['results'][name]['commit'][:12]}`"
-                                                         for name in names), "",
-                      "## Trend", "",
-                      "| Round | Paths differing | Blocking MUST_FIX | " + " | ".join(
-                          f"{name} approves own / other" for name in names) + " | Checks |",
-                      "|---|---|---|" + "---|" * len(names) + "---|"]
             mark = lambda value: "yes" if value else "no"
+            lines += [f"- Stopped after round {last['round']} of at most {case.max_rounds}",
+                      f"- Last proposals: " + ", ".join(f"{name} `{last['results'][name]['commit'][:12]}`"
+                                                        for name in names), "",
+                      "## Trend", "",
+                      "Approvals are of the candidates each round started from.", "",
+                      "| Round | Paths differing after | MUST_FIX | " + " | ".join(
+                          f"{name} approves {' / '.join(names)}" for name in names) + " |",
+                      "|---|---|---|" + "---|" * len(names)]
             for item in history:
                 gate = item.get("blockers") or {}
-                approvals = " | ".join(f"{mark(item['results'][name]['approved'])} / "
-                                       f"{mark(item['results'][name]['other_approved'])}" for name in names)
+                approvals = item.get("results") or {}
+                cells = " | ".join(" / ".join(mark((approvals[reviewer].get("approves") or {}).get(name))
+                                              if approvals[reviewer].get("approves") else "-" for name in names)
+                                   for reviewer in names)
                 lines.append(f"| {item['round']} | {item['divergence']['differing']} "
-                             f"| {gate.get('blocking_must_fix', '-')} | {approvals} "
-                             f"| {'pass' if gate.get('checks') else 'fail'} |")
+                             f"| {gate.get('blocking_must_fix', '-')} | {cells} |")
             divergence = self.read_json(folder / "divergence.json")
             stats = divergence.get("stats") or {}
-            lines += ["", "## Files that still differ", ""]
+            lines += ["", "## Files where the last two proposals differ", ""]
             lines += [f"- `{path}` +{stats.get(path, {}).get('added', 0)} -{stats.get(path, {}).get('removed', 0)}"
                       for path in (divergence.get("differing") or [])[:200]] or ["None: the trees are identical."]
             for name in names:
                 data = self.read_json(folder / f"{name}-review.json")
-                blocking = [item for item in data.get("findings") or [] if isinstance(item, dict)
-                            and item.get("severity") == "MUST_FIX" and item.get("kind") == "behavioral"]
-                open_disagreements = [item for item in data.get("remaining_disagreements") or []
-                                      if isinstance(item, dict) and item.get("kind") == "behavioral"]
-                open_areas = [item for item in data.get("areas") or []
-                              if isinstance(item, dict) and item.get("status") == "open"]
+                blocking = [item for item in data.get("findings") or []
+                            if isinstance(item, dict) and item.get("severity") == "MUST_FIX"]
                 lines += ["", f"## {name}'s last review", ""]
-                lines += [f"- Blocking: [{item.get('id')}] `{item.get('path')}:{item.get('line')}` "
-                          f"{item.get('summary', '')} (fix: {item.get('resolution', '')})" for item in blocking]
-                lines += [f"- Open disagreement: {item.get('area', '')}: {item.get('note', '')}"
-                          for item in open_disagreements]
-                lines += [f"- Open area: {item.get('area', '')} (kept {item.get('kept', '-')}): {item.get('why', '')}"
-                          for item in open_areas]
-                if not (blocking or open_disagreements or open_areas):
-                    lines.append("- Nothing blocking or open was recorded.")
+                lines += [f"- MUST_FIX on {item.get('candidate')}'s candidate [{item.get('id')}] "
+                          f"`{item.get('path')}:{item.get('line')}` {item.get('summary', '')} "
+                          f"(fix: {item.get('fix', '')})" for item in blocking]
+                if data.get("notes"):
+                    lines.append(f"- Notes: {data['notes']}")
+                if not blocking and not data.get("notes"):
+                    lines.append("- Nothing blocking was recorded.")
         path = self.run_dir / "SUMMARY.md"
         path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.emit("summary.written", self.state.get("round"), data={"path": str(path)})
