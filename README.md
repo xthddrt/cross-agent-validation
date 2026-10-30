@@ -54,7 +54,8 @@ Refusing approval requires a behavioural `MUST_FIX` finding with a real path and
 
 - Windows with Git installed (`C:\Program Files\Git\cmd\git.exe` is used if `git` is not on `PATH`).
 - OpenCode desktop installed (its bundled `opencode-cli.exe` is used).
-- Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`).
+- Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`). Sessions run in yolo mode, and CAV approves the prompts Kimi's dangerous-command guard still raises (e.g. `rm -rf`) for its own sessions only; a question to the user still stops the agent.
+- [Ponytail](https://github.com/DietrichGebert/ponytail) in both agents: CAV runs them at level `ultra` (`PONYTAIL_LEVEL` in `cav/agents.py`). OpenCode needs the plugin in its config and gets the level through `PONYTAIL_DEFAULT_MODE`; each Kimi session activates the `ponytail:ponytail` skill with it, and a Kimi without the plugin fails the run instead of running without it.
 - Python 3.10+ (standard library only).
 
 ## Case file

@@ -392,6 +392,7 @@ function apply(e) {
       if (!text) break;
       let kind = t === 'agent.text' ? 'text' : 'think';
       if (kind === 'text' && text.startsWith(`You are ${who}, one of two`)) kind = 'prompt';
+      if (kind === 'text' && text.startsWith('User activated the skill')) break;  // shown by agent.skill
       const last = a.feed[a.feed.length - 1];
       // Kimi re-emits a part every time it grows: replace the growing message instead of repeating it.
       if (last && last.k === kind && text.startsWith(last.text)) { last.text = text; refresh(last); }
@@ -404,6 +405,8 @@ function apply(e) {
     case 'agent.tool.end':
       endTool(a, d);
       break;
+    case 'agent.skill': a.feed.push({k:'div', text:`${d.skill} ${d.args || ''} activated`}); break;
+    case 'agent.approved': a.feed.push({k:'div', text:`auto-approved: ${d.action || d.tool || 'tool call'}`}); break;
     case 'agent.step': a.steps = d.messages || a.steps; break;
     case 'agent.done': a.done = {ok:d.ok, reason:d.reason, ts}; break;
     case 'agent.retry': r.notes.push(['warn', `Retry ${d.attempt} for ${(d.agents || []).join(' and ')}: the previous attempt left no usable review`]); break;
