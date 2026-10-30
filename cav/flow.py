@@ -1,24 +1,29 @@
 """One CAV run: both agents agree on one plan, both build it, both judge the two builds.
 
-    judge     (two branches) both agents, blind, list every defect in each branch, tagged blocker or
-              minor (the run's first judge reads everything; later ones start from each build's diff)
-    confirm   each marks the other's blockers real or not; a blocker counts only if both call it
-              real. A candidate with no counted blocker, and passing checks, is the result.
-    plan      both plan the next build: the counted blockers, minors only where small. (A task
+    audit     the run's first judge: both agents, blind, list every defect in each candidate, tagged
+              blocker or minor, then look again for more in the same session
+    triage    each rates the other's blockers blocker, minor or not real; one rated lower goes back
+              to its author once with the reason. Both say blocker: it joins the ledger. Still split:
+              disputed, listed, not blocking. A candidate with no open ledger blocker, and passing
+              checks, is the result.
+    plan      both plan the next build: every open blocker, minors only where small, no new command,
+              tool, mode or state machine (a blocker needing one is deferred, and listed). (A task
               alone starts here, with a plan for the task.)
     agree     both approve or reject each plan, shown as the builders will get it (the blockers and
               minors in its base attached). A plan both approve is the plan. Otherwise both revise
               from the rejection reasons and vote again, up to 3 rounds, then a coin flip.
     build     both implement the agreed plan from the same base, separately; the checks run
-    judge     the two builds, as above, against the plan they implemented; up to 3 builds. After the
-              last: the one passing its checks, else fewer counted blockers, else the one both would
-              keep, else a coin flip. What the result still has is listed as follow-ups.
-    publish   pushed to origin's default branch unless --no-push; failing checks publish nothing
+    verify    later judges: each ledger blocker, fixed or not in each build (fixed only if both say
+              so), then what each build's diff broke, and the rest only for blockers; new blockers go
+              through triage. Up to 3 builds; after the last: the one passing its checks, else fewer
+              open blockers, else the one both would keep, else a coin flip.
+    publish   pushed to origin's default branch unless --no-push; failing checks publish nothing.
+              What the result may still have (minors, disputed or deferred blockers) is listed.
 
 No prompt names an agent or says whose anything is: candidates are X and Y (labelled at random,
 read from plain folders without .git), plans and reviews are numbered at random, candidates are
-listed in random order. Each agent keeps one session through a cycle (judge, confirm and plan, or
-plan; plan rounds; build) and starts a fresh one at the next cycle, so no agent judges builds
+listed in random order. Each agent keeps one session through a cycle (audit or verify, triage and
+plan, or plan; plan rounds; build) and starts a fresh one at the next cycle, so no agent judges builds
 knowing which is its own.
 Everything an agent reads or writes lives in a blind area outside every git repo and away from
 the run's bookkeeping; builds are plain copies that CAV commits itself, through a separate index.
@@ -47,11 +52,14 @@ PLAN_WORDS, WHY_WORDS, REAL_WORDS = prompts.PLAN_WORDS, prompts.WHY_WORDS, promp
 LABELS = ("X", "Y")
 MAX_PLAN_ROUNDS, MAX_BUILDS = 3, 3
 SEVERITIES = ("blocker", "minor")
+RATINGS = ("blocker", "minor", "not real")
+OUTCOMES = ("ledger", "minor", "disputed", "dropped")
 ATTACHED = "## Blockers to fix"
+DEFERRED = re.compile(r"(?im)^\W*deferred\W*:(.*)$")
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
-STEP_SECONDS = {"judge": 2700, "confirm": 1800, "plan": 1800, "revise": 1800, "agree": 1800, "build": 5400}
+STEP_SECONDS = {"judge": 2700, "triage": 1800, "plan": 1800, "revise": 1800, "agree": 1800, "build": 5400}
 # The agents' side of a run: outside every git repo, so no git command there finds any history.
 BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
                           or pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home()) / "cav-blind")
@@ -169,17 +177,25 @@ def hits(defect, label):
 
 
 def defect_line(item, label=True):
-    """One defect as the agents read it: no author, no confirmation."""
-    return ((f"[{item['candidate']}] " if label else "") + f"{item.get('file', '')}:{item.get('line', '')} "
-            + item["problem"] + (f" (fix: {item['fix']})" if item.get("fix") else ""))
+    """One defect as the agents read it: its ledger number if it has one, no author, no ratings."""
+    return ((f"#{item['id']} " if item.get("id") else "") + (f"[{item['candidate']}] " if label else "")
+            + f"{item.get('file', '')}:{item.get('line', '')} " + item["problem"]
+            + (f" (fix: {item['fix']})" if item.get("fix") else ""))
+
+
+def status(item):
+    """What a defect the result may still have is: the report's and the dashboard's words for it."""
+    if item.get("status"):
+        return item["status"]
+    if item.get("outcome") == "disputed":
+        return "disputed blocker: " + (item.get("defense") or "")
+    if item.get("outcome") == "minor":
+        return "blocker rated minor (fixed only if small)"
+    return "minor (fixed only if small)"
 
 
 def follow_up(item):
-    """One defect as the report shows it: severity, and whether a blocker was confirmed."""
-    status = item["severity"]
-    if status == "blocker":
-        status += ", confirmed" if item.get("confirmed") else ", refuted: " + item.get("refuted", "")
-    return f"{item.get('file', '')}:{item.get('line', '')} {item['problem']} ({status})"
+    return f"{item.get('file', '')}:{item.get('line', '')} {item['problem']} ({status(item)})"
 
 
 def _numbered(names):
@@ -208,7 +224,9 @@ class Flow:
                       "round": 0, "agents": {}, "history": [], "names": self.names, "authors": {},
                       "blind": str(self.blind)}
         self.step = 0
-        self.judged = False  # the run's first judge reads everything
+        self.judged = False  # the run's first judge audits everything
+        self.ledger, self.next_id = [], 1  # the open blockers both agents agreed, in the base being built on
+        self.follow_ups = []  # what the base built on may still have: minors, disputed and deferred blockers
         self.agents = {}
         for name, (kind, model) in models.items():
             spec = config.AgentSpec(name=name, kind=kind, model=model, thinking="high" if kind == "kimi" else None)
@@ -339,12 +357,13 @@ class Flow:
         raise RuntimeError("the final judge must decide")  # unreachable: the final judge always picks
 
     def judge(self, cycle, candidates, built_from, final):
-        """Both agents review both candidates blind, builds against the plan they implemented (`built_from`),
-        branches against the task, and tag each defect blocker or minor. Each then checks the other's
-        blockers; a blocker counts only if both call it real. A candidate with no counted blocker, and
-        passing checks, is the result. Otherwise both plan the next build from the counted blockers and
-        the minors; after the last build, the final judge keeps the passing one, else the one with fewer
-        counted blockers, else the one both would keep, else a coin flip."""
+        """Both agents judge both candidates blind, builds against the plan they implemented (`built_from`),
+        branches against the task. The run's first judge audits everything, twice; a later one checks each
+        ledger blocker, fixed or not, then what the changes broke. New blockers go through triage; those
+        both agree on join the ledger. A candidate with no open ledger blocker, and passing checks, is the
+        result. Otherwise both plan the next build from its open blockers; after the last build, the
+        final judge keeps the passing one, else the one with fewer open blockers, else the one both
+        would keep, else a coin flip."""
         folder = self.blind / "judge" / f"c{cycle}"
         folder.mkdir(parents=True, exist_ok=True)
         numbers = _numbered(self.names)
@@ -352,84 +371,133 @@ class Flow:
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
         entry = self.begin("judge", cycle=cycle,
                            candidates={label: item["commit"] for label, item in candidates.items()})
-        full = not self.judged  # the run's first judge reads everything; later ones start from the changes
+        first = not self.judged
+        ledger_file, ids = None, []
+        if not first and self.ledger:
+            ledger_file = folder / "ledger.md"
+            ledger_file.write_text("".join(f"{defect_line(item, label=False)}\n" for item in self.ledger),
+                                   encoding="utf-8")
+            ids = [str(item["id"]) for item in self.ledger]
+        target = "the plan" if built_from is not None else "the task"
         jobs = {}
         for name in self.names:
             listed = [(label, candidates[label]["folder"], self.checks_summary(candidates[label]),
-                       None if full else candidates[label].get("changes"))
+                       None if first else candidates[label].get("changes"))
                       for label in random.sample(LABELS, 2)]  # no fixed first place
-            jobs[name] = (prompts.judge(self.task, listed, replies[name], final, built_from, full), self.blind)
-        self.ask(jobs, "judge", lambda name: self.judge_problem(replies[name], final, candidates))
-        self.judged = True
+            jobs[name] = (prompts.audit(self.task, listed, replies[name], final, built_from) if first else
+                          prompts.verify(self.task, listed, replies[name], ledger_file, final, built_from), self.blind)
+        self.ask(jobs, "judge", lambda name: self.judge_problem(replies[name], final, candidates, ids))
         reviews = {name: _json(replies[name]) for name in self.names}
+        if first:  # a second look in the same session catches what the first pass skipped
+            more = {name: folder / f"more-{numbers[name]}.json" for name in self.names}
+            self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in more.items()})
+            self.ask({name: (prompts.more(more[name]), self.blind) for name in self.names}, "judge",
+                     lambda name: self.judge_problem(more[name], False, candidates, []))
+            for name in self.names:
+                reviews[name]["defects"] += _json(more[name])["defects"]
+        self.judged = True
         for name in self.names:
             for item in reviews[name]["defects"]:
-                item["by"] = name  # bookkeeping only: the agents never see it
-        self.end(entry, "reviewed", defects=[item for name in self.names for item in reviews[name]["defects"]])
+                item.update(by=name, cycle=cycle)  # bookkeeping only: the agents never see it
+        record = {"defects": [item for name in self.names for item in reviews[name]["defects"]]}
+        if ids:
+            record["fixed"] = {name: reviews[name]["fixed"] for name in self.names}
+        self.end(entry, "reviewed", **record)
 
-        entry = self.begin("confirm", cycle=cycle)
+        entry = self.begin("triage", cycle=cycle)
         blockers = {name: [item for item in reviews[name]["defects"] if item["severity"] == "blocker"]
                     for name in self.names}
-        self.confirm(folder, blockers)
-        counted = [item for name in self.names for item in blockers[name] if item["confirmed"]]
-        approvals = {name: {label: not any(hits(item, label) for item in blockers[name] if item["confirmed"])
-                            for label in LABELS} for name in self.names}
-        clear = [label for label in LABELS
-                 if not any(hits(item, label) for item in counted) and candidates[label]["checks_ok"]]
-        record = {"approvals": approvals, "blockers": len(counted),
-                  "refuted": len([item for name in self.names for item in blockers[name] if not item["confirmed"]])}
+        self.triage(folder, blockers)
+        added = [item for name in self.names for item in blockers[name] if item["outcome"] == "ledger"]
+        for item in added:
+            item["id"], self.next_id = self.next_id, self.next_id + 1
+        minors = [item for name in self.names for item in reviews[name]["defects"]
+                  if item["severity"] == "minor" or item["outcome"] in ("minor", "disputed")]
+        still = {label: [item for item in self.ledger if ids and not all(
+                     reviews[name]["fixed"][label][str(item["id"])] for name in self.names)] for label in LABELS}
+        open_ = {label: still[label] + [item for item in added if hits(item, label)] for label in LABELS}
+        clear = [label for label in LABELS if not open_[label] and candidates[label]["checks_ok"]]
+        outcomes = [item["outcome"] for name in self.names for item in blockers[name]]
+        record = {"open": {label: [item["id"] for item in open_[label]] for label in LABELS},
+                  "ledger": [{key: item.get(key) for key in ("id", "file", "line", "problem")}
+                             for item in self.ledger + added],
+                  "outcomes": {outcome: outcomes.count(outcome) for outcome in OUTCOMES if outcome in outcomes}}
         if final:
             record["prefer"] = {name: reviews[name]["prefer"] for name in self.names}
         if clear:
             result = clear[0] if len(clear) == 1 else self.smaller(candidates)
-            how = (f"no confirmed blocker in {result}" if len(clear) == 1
-                   else f"no confirmed blocker in either; {result} changes less")
+            how = (f"no open blocker in {result}" if len(clear) == 1
+                   else f"no open blocker in either; {result} changes less")
         elif final:
-            result, how = self.keep(candidates, record["prefer"], counted)
+            result, how = self.keep(candidates, record["prefer"], {label: len(open_[label]) for label in LABELS})
         else:
             self.end(entry, "rejected", **record)
-            minors = [item for name in self.names for item in reviews[name]["defects"] if item["severity"] == "minor"]
-            found = {label: {"blockers": [item for item in counted if hits(item, label)],
-                             "minors": [item for item in minors if hits(item, label)]} for label in LABELS}
+            found = {label: {"blockers": open_[label], "minors": [item for item in minors if hits(item, label)]}
+                     for label in LABELS}
             return None, self.fix_plans(cycle, folder, found), found
         self.end(entry, "accepted" if clear else "forced", how=how, **record)
-        # what the result still has: its minors, the blockers not confirmed, and (if forced) the confirmed ones
-        self.save(decided=how, open_defects=[item for name in self.names for item in reviews[name]["defects"]
-                                             if hits(item, result)])
+        for item in open_[result]:
+            item["status"] = "open blocker"
+        left = self.follow_ups + [item for item in minors if hits(item, result)] + open_[result]
+        self.save(decided=how, open_defects=[dict(item, status=status(item)) for item in left])
         return result, None, None
 
-    def confirm(self, folder, blockers):
-        """Each agent, in the session where it just judged, marks each of the other's blockers real or
-        not; marks `confirmed` on each blocker, and the reason on a refuted one."""
+    def triage(self, folder, blockers):
+        """Each agent, in the session where it just judged, rates each of the other's new blockers blocker,
+        minor or not real; a blocker rated lower goes back to its author once, with the reason. Sets
+        `outcome` on each: ledger (both say blocker), minor, dropped (both say not real) or disputed
+        (still split: it does not block, and is listed)."""
         numbers = _numbered(self.names)
         other = dict(zip(self.names, reversed(self.names)))
-        lists, replies = {}, {}
         for name in self.names:
-            theirs = blockers[other[name]]
-            if not theirs:
-                continue
-            lists[name] = folder / f"blockers-{numbers[name]}.md"
-            lists[name].write_text("".join(f"{n}. {defect_line(item)}\n" for n, item in enumerate(theirs, 1)),
-                                   encoding="utf-8")
-            replies[name] = folder / f"confirm-{numbers[name]}.json"
+            for item in blockers[name]:
+                item["outcome"] = "ledger"
+        lists = {name: blockers[other[name]] for name in self.names if blockers[other[name]]}
+        replies = self.rate(folder, "triage", numbers, lists, defect_line)
+        for name, ratings in replies.items():
+            for item, (rating, why) in zip(lists[name], ratings):
+                item["rating"], item["challenge"] = rating, why
+        challenged = {name: [item for item in blockers[name] if item.get("rating", "blocker") != "blocker"]
+                      for name in self.names}
+        challenged = {name: items for name, items in challenged.items() if items}
+        answers = self.rate(folder, "challenged", numbers, challenged,
+                            lambda item: f"{defect_line(item)}\n   Rated {item['rating']}: {item['challenge']}")
+        for name, ratings in answers.items():
+            for item, (rating, why) in zip(challenged[name], ratings):
+                if rating == "blocker":
+                    item["outcome"], item["defense"] = "disputed", why
+                else:
+                    item["outcome"] = "minor" if "minor" in (rating, item["rating"]) else "dropped"
+
+    def rate(self, folder, kind, numbers, lists, line):
+        """One rating round: each agent in `lists` rates its numbered items. Returns name -> [(rating, why)]."""
+        files, replies = {}, {}
+        for name, items in lists.items():
+            files[name] = folder / f"{kind}-{numbers[name]}.md"
+            files[name].write_text("".join(f"{n}. {line(item)}\n" for n, item in enumerate(items, 1)), encoding="utf-8")
+            replies[name] = folder / f"{kind}-{numbers[name]}.json"
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
-        if replies:
-            self.ask({name: (prompts.confirm(lists[name], replies[name]), self.blind) for name in replies}, "confirm",
-                     lambda name: self.confirm_problem(replies[name], len(blockers[other[name]])))
+        if not replies:
+            return {}
+        ask_why = "lower" if kind == "triage" else "blocker"
+        make = prompts.triage if kind == "triage" else prompts.challenged
+        self.ask({name: (make(files[name], replies[name]), self.blind) for name in replies}, "triage",
+                 lambda name: self.rating_problem(replies[name], len(lists[name]), ask_why))
+        out = {}
         for name in replies:
             data = _json(replies[name])
-            for n, item in enumerate(blockers[other[name]], 1):
-                item["confirmed"] = data["real"][str(n)]
-                if not item["confirmed"]:
-                    item["refuted"] = data["why"][str(n)]
+            out[name] = [(data["rating"][str(n)], (data.get("why") or {}).get(str(n)))
+                         for n in range(1, len(lists[name]) + 1)]
+        return out
 
     def fix_plans(self, cycle, folder, found):
-        """Both agents, still in the cycle's session, plan the next build from the counted blockers and the minors."""
+        """Both agents, still in the cycle's session, plan the next build from the open blockers and the minors."""
         defects = folder / "defects.md"
         sections = []
         for label in LABELS:
-            sections += [f"## {label}", "", "Blockers:"] + [f"- {defect_line(item)}" for item in found[label]["blockers"]]
-            sections += ["", "Minor:"] + [f"- {defect_line(item)}" for item in found[label]["minors"]] + [""]
+            sections += [f"## {label}", "", "Blockers:"] + [f"- {defect_line(item, label=False)}"
+                                                           for item in found[label]["blockers"]]
+            sections += ["", "Minor:"] + [f"- {defect_line(item, label=False)}" for item in found[label]["minors"]] + [""]
         defects.write_text("\n".join(sections), encoding="utf-8")
         numbers = _numbered(self.names)
         paths = {name: folder / f"plan-{numbers[name]}.md" for name in self.names}
@@ -474,7 +542,7 @@ class Flow:
     def agree(self, cycle, plans, candidates, found):
         """Up to `max_plan_rounds` rounds. Round 1 votes on the plans as written; each later round first
         revises them from the rejection reasons. A vote shows each plan as the builders will get it
-        (the counted blockers and the minors in its base attached, from `found`). A plan both approve
+        (the open blockers and the minors in its base attached, from `found`). A plan both approve
         is the plan (both: the shorter, then a coin flip); after the last round, a coin flip, with the
         rejections attached."""
         folder = self.blind / "agree"
@@ -522,6 +590,15 @@ class Flow:
             objections = {pick: objections.get(pick) or []}
         body = chosen.read_text(encoding="utf-8")
         label = plan_base(body) if candidates else None
+        if found and label:
+            deferred = {int(n) for line in DEFERRED.findall(body) for n in re.findall(r"#(\d+)", line)}
+            blockers = found[label]["blockers"]
+            for item in blockers:
+                if item["id"] in deferred:
+                    item["status"] = "deferred: needs a new command, tool, mode or state machine"
+            self.ledger = [item for item in blockers if item["id"] not in deferred]
+            self.follow_ups += [item for item in blockers if item["id"] in deferred] + found[label]["minors"]
+            self.save(ledger=[{key: item.get(key) for key in ("id", "file", "line", "problem")} for item in self.ledger])
         rejected = [text for texts in objections.values() for text in texts]
         if rejected:
             body += "\n## Objections to this plan (address them where they are right)\n\n" + "\n".join(
@@ -619,16 +696,15 @@ class Flow:
             return random.choice(LABELS)
         return min(LABELS, key=sizes.get)
 
-    def keep(self, candidates, prefer, counted):
+    def keep(self, candidates, prefer, sizes):
         """The last judge with no candidate clear: the passing one if only one passes its checks, else
-        the one with fewer counted blockers, else the one both would keep, else a coin flip."""
+        the one with fewer open blockers (`sizes`), else the one both would keep, else a coin flip."""
         passing = [label for label in LABELS if candidates[label]["checks_ok"]]
         if len(passing) == 1:
             return passing[0], f"no candidate was clear; only Candidate {passing[0]} passes its checks"
-        sizes = {label: sum(hits(item, label) for item in counted) for label in LABELS}
         if sizes["X"] != sizes["Y"]:
             label = min(LABELS, key=sizes.get)
-            return label, f"no candidate was clear; Candidate {label} has fewer confirmed blockers ({sizes[label]})"
+            return label, f"no candidate was clear; Candidate {label} has fewer open blockers ({sizes[label]})"
         kept = set(prefer.values())
         if len(kept) == 1:
             label = kept.pop()
@@ -639,11 +715,12 @@ class Flow:
 
     @staticmethod
     def ballot(text, candidates, found):
-        """A plan as the builders get it: the counted blockers and the minors in the base it names attached."""
+        """A plan as the builders get it: the open blockers and the minors in the base it names attached."""
         body = text.rstrip() + "\n"
         label = plan_base(body) if candidates else None
         if found and label in found:
-            for title, items in ((ATTACHED + " (both judges confirmed them)", found[label]["blockers"]),
+            for title, items in ((ATTACHED + " (both judges agreed; defer only what needs a new command, tool, mode "
+                                  "or state machine)", found[label]["blockers"]),
                                  ("## Minor defects (fix only where the fix is small)", found[label]["minors"])):
                 if items:
                     body += f"\n{title}\n\n" + "".join(f"- {defect_line(item, label=False)}\n" for item in items)
@@ -686,12 +763,20 @@ class Flow:
             return 'the plan must start with "Base: X" or "Base: Y"'
         return None
 
-    def judge_problem(self, reply, final, candidates):
+    def judge_problem(self, reply, final, candidates, ids):
+        """`ids`: the ledger blockers each candidate must be checked against, as strings."""
         data = _json(reply)
         if data is None:
             return 'write JSON with "defects": [...]'
         if final and data.get("prefer") not in LABELS:
             return '"prefer" must be "X" or "Y"'
+        if ids:
+            fixed = data.get("fixed")
+            if not isinstance(fixed, dict) or set(fixed) != set(LABELS) or any(
+                    not isinstance(fixed[label], dict) or set(fixed[label]) != set(ids)
+                    or any(not isinstance(value, bool) for value in fixed[label].values()) for label in LABELS):
+                return ('"fixed" must give, for X and for Y, true or false for each ledger blocker: '
+                        + ", ".join(ids))
         defects = data.get("defects") or []
         if not isinstance(defects, list) or any(
                 not isinstance(item, dict) or not item.get("problem") or item.get("candidate") not in (*LABELS, "both")
@@ -709,20 +794,23 @@ class Flow:
         return None
 
     @staticmethod
-    def confirm_problem(path, count):
+    def rating_problem(path, count, ask_why):
+        """A triage answer: a rating for each of `count` defects, and a reason for each rated lower than
+        blocker (`ask_why` "lower") or still a blocker ("blocker")."""
         data = _json(path)
-        real = (data or {}).get("real")
-        if not isinstance(real, dict) or set(real) != {str(n) for n in range(1, count + 1)} \
-                or any(not isinstance(value, bool) for value in real.values()):
-            return f'write JSON with "real": true or false for each of blockers 1 to {count}'
+        rating = (data or {}).get("rating")
+        if not isinstance(rating, dict) or set(rating) != {str(n) for n in range(1, count + 1)} \
+                or any(value not in RATINGS for value in rating.values()):
+            return f'write JSON with "rating": "blocker", "minor" or "not real" for each of 1 to {count}'
         why = data.get("why") or {}
         if not isinstance(why, dict):
-            return '"why" must map each blocker marked not real to the reason'
-        for number, ok in real.items():
-            if not ok and not isinstance(why.get(number), str):
-                return f'blocker {number} is marked not real without a "why"'
-            if not ok and words(why[number]) > REAL_WORDS:
-                return f'"why" for blocker {number} has {words(why[number])} words; cut it to {REAL_WORDS}'
+            return '"why" must map defect numbers to reasons'
+        for number, value in rating.items():
+            if (value == "blocker") == (ask_why == "blocker"):
+                if not isinstance(why.get(number), str):
+                    return f'defect {number} is rated {value} without a "why"'
+                if words(why[number]) > REAL_WORDS:
+                    return f'"why" for defect {number} has {words(why[number])} words; cut it to {REAL_WORDS}'
         data["why"] = why
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return None
