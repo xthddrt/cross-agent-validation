@@ -26,6 +26,8 @@ def clock(seconds):
 
 
 class Orchestrator:
+    POLL_SECONDS = 2  # how often the monitor looks at the agents; the tests' fake agents need far less
+
     def __init__(self, case, run_dir, push=False, thinking=False, resume=False, merge=False, run_id=None):
         self.case = case
         self.run_dir = pathlib.Path(run_dir).resolve()
@@ -404,7 +406,7 @@ class Orchestrator:
                         runs[name].abort()
                         runs[name].state.error = "round timeout"
                         runs[name].state.finished = True
-            time.sleep(2)
+            time.sleep(self.POLL_SECONDS)
 
     # ------------------------------------------------------------------- checks
 

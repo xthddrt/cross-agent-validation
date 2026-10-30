@@ -454,7 +454,9 @@ class ForcedChoiceTest(unittest.TestCase):
         self.assertIn("coin flip", state["final"]["forced"]["method"])
 
 
-class HomeBranchTest(HomeTest):
+class HomeBranchTest(unittest.TestCase):
+    setUp, tearDown, launches, post = HomeTest.setUp, HomeTest.tearDown, HomeTest.launches, HomeTest.post
+
     def test_start_passes_both_branches_or_refuses(self):
         for name in ("one", "two"):
             git("branch", name, cwd=self.repo)
