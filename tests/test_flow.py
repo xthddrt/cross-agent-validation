@@ -1,4 +1,4 @@
-"""The loop end to end with fake agents: judge or plan, agree, build (both), judge, publish."""
+"""The flow end to end with fake agents: judge or plan, agree rounds, one build each, judge, publish."""
 
 import json
 import pathlib
@@ -16,14 +16,13 @@ from tests.test_agents import with_origin
 
 class Fake:
     """Answers each step from what is on disk. `approve(folder)` judges a candidate, `approve_plan(text)`
-    a plan; `prefer` and `keep_plan` pick one; `base(folders)` is the candidate a plan builds on."""
+    a plan; `prefer(folders)` is the candidate it would keep; `base(folders)` the one a plan builds on."""
 
     def __init__(self, name, approve=lambda folder: True, prefer=lambda folders: "X", base=lambda folders: "X",
-                 plan_text=None, approve_plan=lambda text: True, keep_plan=lambda texts: 1):
+                 plan_text=None, approve_plan=lambda text: True):
         self.name, self.state, self.session_id = name, RunState(), None
-        self.approve, self.prefer, self.base = approve, prefer, base
-        self.plan_text = plan_text or (lambda attempt: f"{name} plan: add feature.txt.")
-        self.approve_plan, self.keep_plan = approve_plan, keep_plan
+        self.approve, self.prefer, self.base, self.approve_plan = approve, prefer, base, approve_plan
+        self.plan_text = plan_text or (lambda attempt: f"{name} plan {attempt}: add feature.txt.")
         self.prompts, self.sessions, self.plans, self.builds = [], 0, 0, 0
 
     def reset(self):
@@ -36,36 +35,36 @@ class Fake:
         if not self.session_id:
             self.session_id, self.sessions = f"s-{self.name}-{self.sessions + 1}", self.sessions + 1
         self.prompts.append(prompt)
-        if "1. Judge each candidate" in prompt:
-            folders = dict(re.findall(r"- Candidate ([XY]): (\S+) \(checks", prompt))
+        reply = re.search(r"Write to (\S+):", prompt)
+        if "Approve each candidate" in prompt:
+            folders = dict(re.findall(r"^- ([XY]): (\S+) \(checks", prompt, re.M))
             approve = {label: self.approve(pathlib.Path(folder)) for label, folder in folders.items()}
             defects = [{"candidate": label, "file": "base.txt", "line": 1, "problem": "wrong"}
                        for label, ok in approve.items() if not ok]
-            reply = re.search(r"Write JSON to (\S+):", prompt).group(1)
-            pathlib.Path(reply).write_text(json.dumps({"approve": approve, "defects": defects,
-                                                       "prefer": self.prefer(folders)}), encoding="utf-8")
-            self.write_plan(re.search(r"Write a plan to (\S+), at most", prompt).group(1),
-                            f"Base: Candidate {self.base(folders)}\n")
-        elif "Write a revised plan to" in prompt:
-            folders = dict(re.findall(r"^- Candidate ([XY]): (\S+)$", prompt, re.M))
-            self.write_plan(re.search(r"Write a revised plan to (\S+), at most", prompt).group(1),
-                            f"Base: Candidate {self.base(folders)}\n" if folders else "")
-        elif "PLANS (authors not shown)" in prompt:
-            plans = {int(n): pathlib.Path(path).read_text(encoding="utf-8")
-                     for n, path in re.findall(r"- Plan (\d): (\S+)", prompt)}
-            approve = {str(n): self.approve_plan(text) for n, text in plans.items()}
-            reply = re.search(r"Write JSON to (\S+):", prompt).group(1)
-            pathlib.Path(reply).write_text(json.dumps({
-                "approve": approve, "why": {n: "it misses a criterion" for n, ok in approve.items() if not ok},
-                "prefer": self.keep_plan(plans)}), encoding="utf-8")
+            pathlib.Path(reply.group(1)).write_text(json.dumps(
+                {"approve": approve, "defects": defects, "prefer": self.prefer(folders)}), encoding="utf-8")
+            plan = re.search(r"Then write a plan to (\S+) \(", prompt)
+            if plan:
+                self.write_plan(plan.group(1), f"Base: {self.base(folders)}\n")
+        elif "Approve each plan" in prompt:
+            plans = {n: pathlib.Path(path).read_text(encoding="utf-8")
+                     for n, path in re.findall(r"^- (\d): (\S+)$", prompt, re.M)}
+            approve = {n: self.approve_plan(text) for n, text in plans.items()}
+            pathlib.Path(reply.group(1)).write_text(json.dumps(
+                {"approve": approve, "why": {n: f"plan {n} misses a criterion" for n, ok in approve.items() if not ok}}),
+                encoding="utf-8")
+        elif "Write one revised plan to" in prompt:
+            folders = dict(re.findall(r"^- ([XY]): (\S+)$", prompt, re.M))
+            self.write_plan(re.search(r"Write one revised plan to (\S+) \(", prompt).group(1),
+                            f"Base: {self.base(folders)}\nrevised " if folders else "revised ")
         elif "Write a plan to" in prompt:
-            self.write_plan(re.search(r"Write a plan to (\S+), at most", prompt).group(1), "")
-        elif prompt.startswith("Implement this plan"):
+            self.write_plan(re.search(r"Write a plan to (\S+) \(", prompt).group(1), "")
+        elif prompt.startswith("Implement "):
             self.builds += 1
-            work = pathlib.Path(re.search(r", in (\S+)\. (?:It starts|Write)", prompt).group(1))
+            work = pathlib.Path(re.search(r"^Implement \S+ in (\S+?)(?:, a copy of [XY])?\.$", prompt, re.M).group(1))
             (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
-            pathlib.Path(re.search(r"in a few lines, to (\S+)\. Change", prompt).group(1)).write_text("built",
-                                                                                                    encoding="utf-8")
+            (work / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
+            pathlib.Path(re.search(r"what you did to (\S+)\.$", prompt, re.M).group(1)).write_text("built", encoding="utf-8")
         self.state.finished = True
         return {"ok": True, "text": "done", "reason": "completed"}
 
@@ -77,6 +76,11 @@ class Fake:
 def has(name):
     """A judge or base rule: the candidate whose folder holds this file."""
     return lambda folder: (pathlib.Path(folder) / name).exists()
+
+
+def built_by(name):
+    return lambda folder: (pathlib.Path(folder) / "feature.txt").exists() and \
+        (pathlib.Path(folder) / "feature.txt").read_text(encoding="utf-8").strip() == f"built by {name}"
 
 
 class FlowTest(unittest.TestCase):
@@ -128,12 +132,12 @@ class FlowTest(unittest.TestCase):
         fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
         code, flow = self.run_flow(fakes)
         self.assertEqual(code, 0, flow.state)
-        self.assertEqual(self.steps(flow), [("plan", "planned"), ("revise", "revised"), ("agree", "agreed"),
-                                            ("build", "built"), ("judge", "accepted")])
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
         self.assertTrue(flow.state["outcome"].startswith("merged and pushed"))
         self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
-        self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build")
-        self.assertEqual([fake.sessions for fake in fakes.values()], [5, 5], "a fresh session for every step")
+        self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build, once")
+        self.assertEqual([fake.sessions for fake in fakes.values()], [4, 4], "a fresh session for every step")
         self.assert_blind(fakes, flow)
 
     def test_a_branch_both_approve_is_the_result_at_once(self):
@@ -143,20 +147,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(code, 0, flow.state)
         self.assertEqual(self.steps(flow), [("judge", "accepted")])
         self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
-        for label in flow.state["labels"]:
-            self.assertFalse((flow.blind / "candidates" / "c1" / f"candidate-{label}" / ".git").exists())
+        self.assertNotIn("prefer", fakes["kimi"].prompts[0], "the branches' judge plans; it is not asked to pick")
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b", "note feat"))
-
-    def test_approval_decides_not_preference(self):
-        self.branches()
-        fakes = {"deepseek": Fake("deepseek", approve=has("feat-a.txt"), prefer=lambda folders: "Y"),
-                 "kimi": Fake("kimi", approve=lambda folder: True,
-                              prefer=lambda folders: next(l for l, f in folders.items() if has("feat-b.txt")(f)))}
-        code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
-        self.assertEqual(code, 0, flow.state)
-        label = self.label_of(flow, "feat-a")
-        self.assertEqual(flow.state["final"]["candidate"], label, "both approve feat-a, though neither prefers it")
-        self.assertEqual(flow.state["decided"], f"both approved Candidate {label}")
 
     def test_no_shared_approval_agrees_a_base_and_both_build_from_it(self):
         shas = self.branches()
@@ -165,55 +157,71 @@ class FlowTest(unittest.TestCase):
                  "kimi": Fake("kimi", approve=lambda f: has("feature.txt")(f) or has("feat-b.txt")(f), base=on_a)}
         code, flow = self.run_flow(fakes, branches=["feat-a", "feat-b"], push=False)
         self.assertEqual(code, 0, flow.state)
-        self.assertEqual(self.steps(flow), [("judge", "rejected"), ("revise", "revised"), ("agree", "agreed"),
-                                            ("build", "built"), ("judge", "accepted")])
-        build = flow.state["history"][3]
+        self.assertEqual(self.steps(flow), [("judge", "rejected"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
+        build = flow.state["history"][2]
         self.assertEqual(build["start"], shas["feat-a"], "both builds start from the agreed base")
         for commit in build["commits"].values():
             self.assertEqual(git("merge-base", commit, shas["feat-a"], cwd=self.work), shas["feat-a"])
-        agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
-        self.assertIn("Defects found in the base", agreed, "the judges' defects against the base go to the builders")
-        for fake in fakes.values():
-            revise = next(p for p in fake.prompts if "Write a revised plan to" in p)
-            self.assertEqual(len(re.findall(r"^- Plan \d: ", revise, re.M)), 2, "each reviser reads both plans")
-            self.assertIn("REVIEWS OF THE CANDIDATES", revise)
-            vote = next(p for p in fake.prompts if "Approve each plan" in p)
-            ballots = [pathlib.Path(path) for path in re.findall(r"^- Plan \d: (\S+)$", vote, re.M)]
-            self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
-                            "the voters see each plan as the builders will get it")
+        self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8"))
+        vote = next(p for p in fakes["kimi"].prompts if "Approve each plan" in p)
+        ballots = [pathlib.Path(path) for path in re.findall(r"^- \d: (\S+)$", vote, re.M)]
+        self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
+                        "the voters see each plan as the builders will get it")
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
-    def test_plans_without_both_approvals_go_to_the_plan_both_would_keep(self):
-        keep = lambda texts: next(n for n, text in texts.items() if "deepseek plan" in text)
-        fakes = {"deepseek": Fake("deepseek", approve_plan=lambda text: "deepseek" in text, keep_plan=keep),
-                 "kimi": Fake("kimi", approve_plan=lambda text: "kimi" in text, keep_plan=keep)}
+    def test_rejected_plans_are_revised_until_both_approve(self):
+        fakes = {name: Fake(name, approve_plan=lambda text: "revised" in text) for name in ("deepseek", "kimi")}
         code, flow = self.run_flow(fakes, push=False)
         self.assertEqual(code, 0, flow.state)
-        agreed = (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8")
-        self.assertIn("deepseek plan", agreed)
-        self.assertIn("Objections to this plan", agreed)
-        self.assertIn("both would keep plan", flow.state["plan"]["how"])
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "rejected"), ("revise", "revised"),
+                                            ("agree", "agreed"), ("build", "built"), ("judge", "accepted")])
+        revise = next(p for p in fakes["deepseek"].prompts if "Write one revised plan" in p)
+        self.assertIn("OBJECTIONS", revise)
+        self.assertIn("misses a criterion", revise, "the revisers read why each plan was rejected")
+        self.assertIn("round 2", flow.state["plan"]["how"])
 
-    def test_a_split_on_plans_is_a_coin_flip(self):
-        fakes = {"deepseek": Fake("deepseek", approve_plan=lambda text: False, keep_plan=lambda texts: 1),
-                 "kimi": Fake("kimi", approve_plan=lambda text: False, keep_plan=lambda texts: 2)}
-        with mock.patch("cav.flow.random.choice", side_effect=lambda items: 2 if tuple(items) == (1, 2) else items[0]) as flip:
-            code, flow = self.run_flow(fakes, push=False)
+    def test_no_plan_with_both_approvals_after_the_last_round_is_a_coin_flip(self):
+        fakes = {name: Fake(name, approve_plan=lambda text: False) for name in ("deepseek", "kimi")}
+        with mock.patch("cav.flow.random.choice", side_effect=lambda items: 2 if tuple(items) == (1, 2) else items[0]):
+            code, flow = self.run_flow(fakes, push=False, max_plan_rounds=3)
         self.assertEqual(code, 0, flow.state)
-        flip.assert_any_call((1, 2))
+        self.assertEqual([step for step, _ in self.steps(flow)],
+                         ["plan", "agree", "revise", "agree", "revise", "agree", "build", "judge"])
         self.assertIn("coin flip chose plan 2", flow.state["plan"]["how"])
+        self.assertIn("Objections to this plan", (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8"))
 
-    def test_the_last_judge_keeps_the_result_both_would_keep(self):
-        keep = lambda folders: next(label for label, folder in folders.items()
-                                    if (pathlib.Path(folder) / "feature.txt").read_text() == "built by kimi\n")
+    def test_the_final_judge_goes_by_approval_then_by_what_both_would_keep(self):
+        fakes = {"deepseek": Fake("deepseek", approve=built_by("kimi"), prefer=lambda folders: next(
+                     label for label, folder in folders.items() if built_by("deepseek")(folder))),
+                 "kimi": Fake("kimi")}
+        code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(git("show", f"{flow.state['final']['commit']}:feature.txt", cwd=self.work), "built by kimi",
+                         "both approve kimi's build, though deepseek would keep its own")
+        keep = lambda folders: next(label for label, folder in folders.items() if built_by("kimi")(folder))
         fakes = {name: Fake(name, approve=lambda folder: False, prefer=keep) for name in ("deepseek", "kimi")}
+        shutil.rmtree(self.tmp / "runs", ignore_errors=True)
         code, flow = self.run_flow(fakes, push=False, max_builds=2)
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)],
-                         ["plan", "revise", "agree", "build", "judge", "revise", "agree", "build", "judge"])
+                         ["plan", "agree", "build", "judge", "agree", "build", "judge"], "two build cycles, then the pick")
         self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
         self.assertEqual(git("show", f"{flow.state['final']['commit']}:feature.txt", cwd=self.work), "built by kimi")
         self.assertEqual(len(flow.state["final"]["open_defects"]), 2, "each judge's defect against it stays open")
+
+    def test_rejected_builds_go_round_again_from_an_agreed_build(self):
+        second = lambda folder: (pathlib.Path(folder) / "build-2.txt").exists()
+        fakes = {name: Fake(name, approve=second) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "rejected"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
+        first, again = flow.state["history"][2], flow.state["history"][5]
+        self.assertIn(again["start"], first["commits"].values(), "the second build starts from a first build")
+        self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c2-agreed.md").read_text(encoding="utf-8"))
+        self.assert_blind(fakes, flow)
 
     def test_failing_checks_are_never_accepted_or_pushed(self):
         fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
@@ -224,20 +232,23 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base)
 
     def test_an_over_long_plan_is_sent_back_once(self):
-        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (550 if attempt == 1 else 50)),
+        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (1050 if attempt == 1 else 50)),
                  "kimi": Fake("kimi")}
         code, flow = self.run_flow(fakes, push=False)
         self.assertEqual(code, 0, flow.state)
         retry = [p for p in fakes["deepseek"].prompts if "Write a plan to" in p][1]
-        self.assertIn("550 words; cut it to 500", retry)
+        self.assertIn("1050 words; cut it to 1000", retry)
 
     def test_answers_are_checked(self):
         self.assertEqual(Flow.plan_problem("no base here", {"X": {}, "Y": {}}),
-                         'the plan must start with "Base: Candidate X" or "Base: Candidate Y"')
+                         'the plan must start with "Base: X" or "Base: Y"')
         self.assertIsNone(Flow.plan_problem("**Base:** Candidate y\nplan", {"X": {}, "Y": {}}))
+        self.assertIsNone(Flow.plan_problem("Base: X\nplan", {"X": {}, "Y": {}}))
         reply = self.tmp / "reply.json"
-        reply.write_text(json.dumps({"approve": {"1": False, "2": True}, "prefer": 2}), encoding="utf-8")
+        reply.write_text(json.dumps({"approve": {"1": False, "2": True}}), encoding="utf-8")
         self.assertEqual(Flow.agree_problem(reply), 'plan 1 is rejected without a "why"')
+        reply.write_text(json.dumps({"approve": {"1": False, "2": True}, "why": {"1": "word " * 251}}), encoding="utf-8")
+        self.assertIn("cut it to 250", Flow.agree_problem(reply))
 
 
 if __name__ == "__main__":

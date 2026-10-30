@@ -1,97 +1,79 @@
-"""What each agent is told, step by step. Short, and the same for both agents: nothing names an
-agent or says whose anything is, and a rejection counts only with a defect or a missed criterion."""
+"""What each agent is told. Short, the same for both agents, and nothing names an agent or says whose
+anything is."""
 
 import sys
 
-PLAN_WORDS, WHY_WORDS, MAX_DEFECTS = 500, 100, 5
-HEAD = "You are one of two agents working on the task below."
-PARETO = ("the few changes that give most of the result (the 20% of the work that delivers 80% of the value), "
-          "each with what and where; what you leave out on purpose; how it is checked. Meet the task's "
-          "acceptance criteria and nothing beyond them.")
+PLAN_WORDS, WHY_WORDS = 1000, 250
+PLAN = "the fewest changes that deliver most of the result, each with what and where, and how to check them"
+BASE = 'first line "Base: X" or "Base: Y" (the candidate to build on), then '
+DEFECT = "a real defect: wrong behaviour, a missed requirement, a security hole or data loss (not style)"
 
 
 def _checks(checks):
-    return "; ".join(c.replace("{python}", f'"{sys.executable}"') for c in checks) or "none configured"
+    return "; ".join(c.replace("{python}", f'"{sys.executable}"') for c in checks)
 
 
-def _task(task):
-    return [HEAD, "", "TASK", task]
+def _head(task, candidates=(), reviews=(), plans=()):
+    """`candidates`: (label, folder, checks or None); `reviews`: files; `plans`: (number, file)."""
+    lines = ["TASK", task]
+    if candidates:
+        lines += ["", "CANDIDATES"] + [f"- {label}: {folder}" + (f" (checks: {checks})" if checks else "")
+                                       for label, folder, checks in candidates]
+    if reviews:
+        lines += ["", "REVIEWS"] + [f"- {path}" for path in sorted(map(str, reviews))]
+    if plans:
+        lines += ["", "PLANS"] + [f"- {number}: {path}" for number, path in plans]
+    return lines + [""]
 
 
 def plan(task, path):
-    return "\n".join([
-        *_task(task), "",
-        f"Write a plan to {path}, at most {PLAN_WORDS} words: {PARETO}",
-        "Don't edit code. Don't ask questions.",
-    ]) + "\n"
+    return "\n".join(_head(task) + [f"Write a plan to {path} (at most {PLAN_WORDS} words): {PLAN}."]) + "\n"
 
 
-def judge(task, candidates, reply, plan_path):
-    """`candidates`: (label, folder, checks summary), in the order to list them."""
-    return "\n".join([
-        *_task(task), "", "CANDIDATES (read-only folders)",
-        *[f"- Candidate {label}: {folder} (checks: {checks})" for label, folder, checks in candidates], "",
-        "1. Judge each candidate against the task only. Approve it unless it has a defect: wrong behaviour, an "
-        "unmet acceptance criterion, a security hole or data loss. Style and wording never block.",
-        f"2. Write JSON to {reply}:",
-        '{"approve": {"X": true|false, "Y": true|false}, "defects": [{"candidate": "X|Y", "file": "<path in that '
-        'candidate>", "line": 1, "problem": "...", "fix": "..."}], "prefer": "X|Y"}',
-        f"A rejected candidate has 1 to {MAX_DEFECTS} defects; an approved one has none. \"prefer\" is the one you "
-        "would keep if only one could be kept.",
-        f"3. Write a plan to {plan_path}, at most {PLAN_WORDS} words: first line \"Base: Candidate X\" or "
-        f"\"Base: Candidate Y\" (the candidate to build on); then what makes it meet the task, fixing its defects "
-        f"and taking what the other does better: {PARETO}",
-        "Don't edit code. Don't ask questions.",
-    ]) + "\n"
+def judge(task, candidates, reply, plan_path=None):
+    """With `plan_path` the judge also plans the build; without, it names the candidate it would keep."""
+    keep = ', "prefer": "X|Y"' if plan_path is None else ""
+    lines = _head(task, candidates) + [
+        f"Approve each candidate unless it has {DEFECT}. Write to {reply}:",
+        '{"approve": {"X": true|false, "Y": true|false}, "defects": [{"candidate": "X|Y", "file": "...", '
+        f'"line": 1, "problem": "...", "fix": "..."}}]{keep}}}',
+        "A rejected candidate gets at least one defect, an approved one none."
+        + (' "prefer" is the one you would keep.' if plan_path is None else ""),
+    ]
+    if plan_path is not None:
+        lines.append(f"Then write a plan to {plan_path} (at most {PLAN_WORDS} words): {BASE}{PLAN}, "
+                     "fixing its defects and taking what the other does better.")
+    return "\n".join(lines) + "\n"
 
 
-def _context(task, candidates, reviews, plans):
-    """The task, the candidates and their reviews, and two plans. `candidates`: (label, folder);
-    `reviews`: review files; `plans`: (number, path)."""
-    lines = _task(task)
-    if candidates:
-        lines += ["", "CANDIDATES (read-only folders)"] + [f"- Candidate {label}: {folder}" for label, folder in candidates]
-    if reviews:
-        lines += ["", "REVIEWS OF THE CANDIDATES (authors not shown)"] + [f"- {path}" for path in sorted(map(str, reviews))]
-    return lines + ["", "PLANS (authors not shown)"] + [f"- Plan {number}: {path}" for number, path in plans]
-
-
-def revise(task, candidates, reviews, plans, path):
-    base = '[first line "Base: Candidate X" or "Base: Candidate Y"]; ' if candidates else ""
-    cover = "cover the defects the reviews found in the base you choose, " if reviews else ""
-    return "\n".join([
-        *_context(task, candidates, reviews, plans), "",
-        f"Read both plans{' and the reviews' if reviews else ''}. Write a revised plan to {path}, at most "
-        f"{PLAN_WORDS} words: {base}the plan you expect both agents to approve. Keep what is right in either plan, "
-        f"fix what misses an acceptance criterion or would not work, {cover}and keep it to {PARETO}",
-        "Don't edit code. Don't ask questions.",
-    ]) + "\n"
+def revise(task, candidates, reviews, plans, objections, path):
+    """`objections`: plan number -> the reasons it was rejected."""
+    lines = _head(task, candidates, reviews, plans) + ["OBJECTIONS"]
+    lines += [f"- Plan {number}: {text}" for number, texts in sorted(objections.items()) for text in texts] + [""]
+    lines.append(f"Write one revised plan to {path} (at most {PLAN_WORDS} words) that both reviewers can approve: "
+                 f"{BASE if candidates else ''}{PLAN}.")
+    return "\n".join(lines) + "\n"
 
 
 def agree(task, candidates, reviews, plans, reply):
-    lines = _context(task, candidates, reviews, plans)
+    lines = _head(task, candidates, reviews, plans)
     if reviews:
-        lines += ["", "Each plan ends with the defects the reviews found in its base; the builders get it exactly as written."]
+        lines.append("Each plan ends with the defects found in its base, as the builders will get it.")
     lines += [
-        "", "Approve each plan unless it misses an acceptance criterion or would not work. A plan you would have "
-        "written differently is still approved; preferring the other plan is not a reason to reject one.",
-        f"Write JSON to {reply}:",
-        '{"approve": {"1": true|false, "2": true|false}, "why": {"<rejected plan number>": "<the criterion it '
-        f'misses or why it would not work, at most {WHY_WORDS} words>"}}, "prefer": 1|2}}',
-        '"prefer" is the plan you would keep if only one could be kept. Don\'t edit files. Don\'t ask questions.',
+        "Approve each plan unless it misses the task or would not work; preferring the other is not a reason. "
+        f"Write to {reply}:",
+        f'{{"approve": {{"1": true|false, "2": true|false}}, "why": {{"<rejected plan>": "<at most {WHY_WORDS} words>"}}}}',
     ]
     return "\n".join(lines) + "\n"
 
 
 def build(plan_path, work, checks, note, base_label=None):
-    start = f" It starts from Candidate {base_label}, the plan's base." if base_label else ""
-    return "\n".join([
-        f"Implement this plan: {plan_path}, in {work}.{start} Write the least code that does it.",
-        f"Run the checks: {_checks(checks)}.",
-        f"Write what you did, in a few lines, to {note}. Change only files in {work}. No git commands. "
-        "Don't ask questions.",
-    ]) + "\n"
+    lines = [f"Implement {plan_path} in {work}" + (f", a copy of {base_label}." if base_label else ".")]
+    if checks:
+        lines.append(f"Run the checks: {_checks(checks)}.")
+    lines.append(f"Write a short note of what you did to {note}.")
+    return "\n".join(lines) + "\n"
 
 
 def retry_note(problem):
-    return f"\nYour last answer was not usable: {problem}. Fix that and answer again.\n"
+    return f"\nNot usable: {problem}. Answer again.\n"
