@@ -453,6 +453,7 @@ function roundStatus(n) {
     return isLive(n) ? ['run', 'publishing'] : ['warn', 'accepted, not published'];
   }
   if (v === 'independent') return ['', 'independent'];
+  if (v === 'forced') return ['ok', 'forced choice'];
   if (v) return ['warn', 'diverged'];
   return isLive(n) ? ['run', 'running'] : ['', 'incomplete'];
 }
@@ -499,9 +500,11 @@ function steps(n) {
             sub: t ? (t.differing ? differ(t.differing) : 'identical trees') : ''});
 
   const v = r.verdict || (h && h.verdict);
-  const accepted = v === 'accepted', independent = v === 'independent';
+  const accepted = v === 'accepted' || v === 'forced', independent = v === 'independent';
+  const decision = (r.blockers || (h && h.blockers) || {}).decision;
   out.push({label:'Verdict', done:!!v, state:v ? (accepted ? 'good' : independent ? 'done' : 'warn') : null,
-            sub: v ? (accepted ? 'both approve' : independent ? 'independent round · nothing to approve yet'
+            sub: v ? (v === 'forced' ? `forced choice · ${decision ? decision.method : ''}`
+                 : accepted ? 'both approve' : independent ? 'independent round · nothing to approve yet'
                  : r.osc ? 'diverged · oscillating' : 'diverged · next round') : ''});
 
   const f = r.fin;
@@ -853,6 +856,16 @@ function renderGates() {
     return;
   }
   const [n0, n1] = names;
+  if (b.decision) {
+    const d = b.decision;
+    const pick = (who) => `Plan ${d.choices[who]} (${d.plans[d.choices[who]]}'s)`;
+    setHtml($('gates'), '<ul class="gates">' +
+      names.map(who => `<li class="info"><span class="i">·</span><span>${esc(who)} chose ${esc(pick(who))}</span></li>`).join('') +
+      `<li class="pass"><span class="i">✓</span><span>${esc(d.winner)}'s plan wins</span><span class="d">${esc(d.method)}</span></li>` +
+      `<li class="info"><span class="i">·</span><span>Defects carried into the code stage</span><span class="d">${d.defects.length}</span></li>` +
+      '</ul><div class="verdict ok">Forced choice: the plan stage ends with one plan</div>');
+    return;
+  }
   if (b.verdict === 'independent') {
     setHtml($('gates'), '<div class="dim">Independent round: each agent worked without seeing the other, ' +
       'so there was nothing to approve. Next round they review each other.</div>');
@@ -957,6 +970,12 @@ async function openModal(kind, round, arg) {
 }
 
 function reviewHtml(d) {
+  if (d.choice !== undefined) {
+    return `<div class="result" style="font-size:13px"><span>chose <b>Plan ${esc(d.choice)}</b></span></div>` +
+      (d.reason ? `<h4>Reason</h4><div class="md">${md(String(d.reason))}</div>` : '') +
+      ((d.defects || []).length ? `<h4>Defects the chosen plan must fix</h4><ul>${d.defects.map(x =>
+        `<li>${esc(x.summary)}${x.fix ? ` <span class="dim">(fix: ${esc(x.fix)})</span>` : ''}</li>`).join('')}</ul>` : '');
+  }
   if (d.approve || (d.notes !== undefined && d.behavior_approved === undefined)) return reviewHtmlV2(d);
   // the orchestrator recomputes counts from the findings; the file holds the agent's own numbers
   const fs = Array.isArray(d.findings) ? d.findings : [];

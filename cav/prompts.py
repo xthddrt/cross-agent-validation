@@ -43,7 +43,9 @@ def plan_block(agent, other, case):
         return []
     if plans.get("agreed"):
         start = (case.task or {}).get("plan_base")
-        return ["PLAN (both agents agreed on it; implement it)", f"- {files[agent]}",
+        title = ("PLAN (chosen in the plan stage; implement it, including the defects listed at its end)"
+                 if plans.get("forced") else "PLAN (both agents agreed on it; implement it)")
+        return [title, f"- {files[agent]}",
                 *([f"Your working tree starts from Candidate {start}, the plan's base."] if start else []),
                 "Judge candidates against the task and this plan. A departure from the plan is a MUST_FIX",
                 "unless the candidate's notes explain why the plan was wrong.", ""]
@@ -119,6 +121,24 @@ def round_prompt(agent, other, round_no, case, worktree, review_json, context):
     if case.checks:
         lines += ["The orchestrator then runs: " + "; ".join(c.replace("{python}", sys.executable) for c in case.checks), ""]
     lines += review_block(agent, other, round_no, review_json, reviewing, planning)
+    return "\n".join(lines) + "\n"
+
+
+def decide_prompt(agent, round_no, case, plans, decision_json):
+    """The plan stage's forced choice: two plans, blind (random order, no authors), choose one."""
+    lines = [f"You are {agent}. Two plans were written for the task below. Choose the one to implement. "
+             f"Round {round_no}.", f"Repository: {case.host_repo}", "", *task_block(case), *sources_block(case),
+             "PLANS (in random order; who wrote which is not shown)",
+             f"- Plan 1: {plans[1]}", f"- Plan 2: {plans[2]}", "",
+             "DO", "1. Read both plans and the code they refer to. Judge each against the task only.",
+             "2. Choose one. You must choose: there is no third option and no merging.",
+             "3. List the defects the plan you chose must still fix: anything that would make the code wrong "
+             "or leave part of the task undone. Leave style alone.", "",
+             "RULES", "- Change no files; only write the decision below.",
+             "- Don't ask questions; nobody is watching.", "",
+             f"DECISION: write this JSON to {decision_json}",
+             f'{{"round": {round_no}, "agent": "{agent}", "choice": 1|2, '
+             '"defects": [{"summary": "...", "fix": "..."}], "reason": "..."}']
     return "\n".join(lines) + "\n"
 
 

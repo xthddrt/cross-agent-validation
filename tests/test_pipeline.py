@@ -2,6 +2,7 @@
 
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import tempfile
@@ -21,6 +22,25 @@ from tests.test_v2 import ROUND_RE, StructuredFake, make_repo
 
 BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
             "summary": "the other candidate is wrong", "resolution": "fix it"}
+
+
+DECISION_RE = re.compile(r"DECISION: write this JSON to (.+)")
+PLAN_LINE_RE = re.compile(r"^- Plan (\d): (.+)$", re.M)
+
+
+def decide(fake, prompt, prefer=None):
+    """Answer a forced-choice round: pick the plan whose text mentions `prefer`, else Plan 1."""
+    round_no = int(ROUND_RE.search(prompt).group(1))
+    plans = {int(n): pathlib.Path(path.strip()).read_text(encoding="utf-8") for n, path in PLAN_LINE_RE.findall(prompt)}
+    choice = next((n for n, text in sorted(plans.items()) if prefer and prefer in text), 1)
+    data = {"round": round_no, "agent": fake.name, "choice": choice,
+            "defects": [{"summary": f"{fake.name} wants a test for the empty string", "fix": "add one"}],
+            "reason": "fake"}
+    path = pathlib.Path(DECISION_RE.search(prompt).group(1).strip())
+    path.write_text(json.dumps(data), encoding="utf-8")
+    fake.state.finished = True
+    fake.state.touch("finished")
+    return {"ok": True, "text": "done", "reason": "completed"}
 
 
 def is_plan(prompt):
@@ -47,6 +67,8 @@ class StageFake(StructuredFake):
 class NeverAgrees(StageFake):
     def run(self, prompt, cwd):
         self.prompts.append(prompt)
+        if DECISION_RE.search(prompt):
+            return decide(self, prompt)
         name, plan = self.name, is_plan(prompt)
         self.files = lambda r: {"CAV-PLAN.md" if plan else "feature.txt": f"{name} {r}\n"}
         self.approve, self.findings = False, [BLOCKING]
@@ -96,23 +118,27 @@ class PipelineTest(unittest.TestCase):
         files = git("--git-dir", str(self.origin), "ls-tree", "-r", "--name-only", pushed).splitlines()
         self.assertNotIn("CAV-PLAN.md", files, "the plan stays out of the pushed code")
 
-    def test_no_agreement_summarises_both_stages(self):
+    def test_a_plan_stage_without_agreement_is_forced_to_one_plan(self):
         fakes = {name: NeverAgrees(name) for name in ("deepseek", "kimi")}
         code, state = self.run_pipeline(fakes)
 
-        self.assertEqual(code, 2, state)
-        self.assertEqual(state["outcome"], "no agreement")
+        self.assertEqual(code, 2, f"the code stage still has to agree; the plan stage cannot fail to: {state}")
         run_dir = self.tmp / "runs" / "p1"
-        self.assertEqual(state["plan"]["outcome"], "disagreement")
-        self.assertTrue((run_dir / "plan" / "SUMMARY.md").exists())
-        summary = (run_dir / "code" / "SUMMARY.md").read_text(encoding="utf-8")
-        self.assertIn("feature.txt", summary)
-        self.assertIn("MUST_FIX on kimi's candidate [F-01] `base.txt:1`", summary)
+        self.assertTrue(state["plan"]["outcome"].startswith("forced:"), state["plan"])
+        plan_state = json.loads((run_dir / "plan" / "state.json").read_text(encoding="utf-8"))
+        self.assertEqual([item["round"] for item in plan_state["history"]], [1, 2, 3, 4])
+        self.assertEqual(plan_state["history"][-1]["verdict"], "forced", "round 4 decides")
+        agreed = (run_dir / "plans" / "agreed.md").read_text(encoding="utf-8")
+        self.assertIn("## Defects to fix while implementing", agreed)
+        self.assertIn("wants a test for the empty string", agreed)
         implement = next(p for p in fakes["deepseek"].prompts if "Implement the task" in p)
-        self.assertIn("each agent implements its own", implement)
-        self.assertIn(str(run_dir / "plans" / "deepseek.md"), implement)
+        self.assertIn("PLAN (chosen in the plan stage; implement it, including the defects", implement)
+        decide_prompt = next(p for p in fakes["kimi"].prompts if DECISION_RE.search(p))
+        self.assertNotIn("kimi 3", decide_prompt, "the plans are files; their text and authors are not inlined")
+        self.assertIn("who wrote which is not shown", decide_prompt)
+        self.assertTrue((run_dir / "code" / "SUMMARY.md").exists())
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", f"refs/heads/{state['branch']}"),
-                         self.base, "nothing is pushed without agreement")
+                         self.base, "nothing is pushed without agreement on the code")
 
 
 class MergeTest(unittest.TestCase):
@@ -312,13 +338,13 @@ class ReconcileTest(unittest.TestCase):
         self.assertIn("starts from Candidate X, the plan's base", implement)
         self.assertIn("A departure from the plan is a MUST_FIX", implement)
 
-    def test_no_agreed_plan_stops_before_any_code(self):
-        fakes = {name: NeverAgrees(name) for name in ("deepseek", "kimi")}
+    def test_an_unagreed_reconciliation_plan_is_forced_to_one_base(self):
+        fakes = {"deepseek": ForcedPlanFake("deepseek", "Base: Candidate X\n- deepseek\n", prefer="Candidate Y"),
+                 "kimi": ForcedPlanFake("kimi", "Base: Candidate Y\n- kimi\n", prefer="Candidate Y")}
         code, state, run_dir = self.run_pipeline(fakes)
-        self.assertEqual(code, 2, state)
-        self.assertEqual(state["outcome"], "no agreement on the plan")
-        self.assertTrue((run_dir / "plan" / "SUMMARY.md").exists())
-        self.assertFalse((run_dir / "code").exists(), "two different plans are not implemented")
+        self.assertEqual(state["plan_base"], "Y", state)
+        code_r0 = git("--git-dir", str(run_dir / "code" / "exchange.git"), "rev-parse", "candidate/kimi/r0")
+        self.assertEqual(code_r0, state["labels"]["Y"]["commit"], "both implement from the forced plan's base")
 
     def test_an_agreed_plan_must_name_its_base(self):
         fakes = {name: PlanFake(name, "- keep both\n") for name in ("deepseek", "kimi")}
@@ -329,6 +355,92 @@ class ReconcileTest(unittest.TestCase):
     def test_plan_base_line_is_read_leniently(self):
         self.assertEqual(pipeline_mod.plan_base("# Plan\n**Base:** Candidate y\n"), "Y")
         self.assertIsNone(pipeline_mod.plan_base("Base: Candidate Z"))
+
+
+class ForcedPlanFake(StructuredFake):
+    """Plan stage: writes its own plan and never approves the other's; decides for `prefer`.
+    Code stage: writes merged.txt and approves."""
+
+    def __init__(self, name, plan, prefer=None, must_fix=1):
+        super().__init__(name, None)
+        self.plan, self.prefer, self.must_fix, self.prompts = plan, prefer, must_fix, []
+
+    def run(self, prompt, cwd):
+        self.prompts.append(prompt)
+        if DECISION_RE.search(prompt):
+            return decide(self, prompt, self.prefer)
+        if is_plan(prompt):
+            self.files = lambda r: {"CAV-PLAN.md": self.plan}
+            self.approve = False
+            self.findings = [dict(BLOCKING, id=f"F-{i}") for i in range(1, self.must_fix + 1)]
+        else:
+            self.files = lambda r: {"merged.txt": f"{self.name}\n"}
+            self.approve, self.findings = True, []
+        return super().run(prompt, cwd)
+
+
+class ForcedChoiceTest(unittest.TestCase):
+    """The plan stage's last round: a blind forced choice between the two plans."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-forced-"))
+        self.repo, self.base = make_repo(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_plan_stage(self, fakes, rounds=3):
+        case = config.Case(name="forced", host_repo=self.repo, base=self.base, bootstrap="base", mode="plan",
+                           agents={"deepseek": config.AgentSpec("deepseek", "opencode"),
+                                   "kimi": config.AgentSpec("kimi", "kimi")},
+                           max_rounds=rounds, round_seconds=30, stall_seconds=5, retries=0,
+                           task={"prompt": "Plan it."})
+        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
+            orchestrator = Orchestrator(case, self.tmp / "run")
+            return orchestrator, orchestrator.run()
+
+    def plan_of(self, orchestrator, commit):
+        return git("--git-dir", str(orchestrator.exchange.path), "show", f"{commit}:CAV-PLAN.md")
+
+    def test_one_plan_both_approve_ends_the_stage(self):
+        """Approving the other's plan is enough; it need not approve both."""
+        fakes = {"deepseek": StructuredFake("deepseek", lambda r: {"CAV-PLAN.md": "deepseek plan\n"},
+                                            approve=False, findings=[BLOCKING]),
+                 "kimi": StructuredFake("kimi", lambda r: {"CAV-PLAN.md": "kimi plan\n"})}
+        orchestrator, state = self.run_plan_stage(fakes)
+        self.assertEqual(state["final"]["round"], 2)
+        self.assertEqual(state["history"][1]["blockers"]["agreed_on"], ["deepseek"])
+        self.assertEqual(self.plan_of(orchestrator, state["final"]["commit"]), "deepseek plan")
+
+    def test_same_choice_wins_and_its_defects_travel_with_it(self):
+        fakes = {name: ForcedPlanFake(name, f"{name} plan\n", prefer="kimi plan") for name in ("deepseek", "kimi")}
+        orchestrator, state = self.run_plan_stage(fakes)
+        decision = state["final"]["forced"]
+        self.assertEqual((decision["winner"], decision["method"]), ("kimi", "both chose it"))
+        self.assertEqual(self.plan_of(orchestrator, state["final"]["commit"]), "kimi plan")
+        sources = sorted(item["from"] for item in decision["defects"])
+        self.assertEqual(sources, ["deepseek", "deepseek", "kimi"],
+                         "both pickers' defects plus the round-2 MUST_FIX against the winner")
+        prompt = (orchestrator.run_dir / "rounds" / "r3" / "kimi-context.md").read_text(encoding="utf-8")
+        self.assertNotIn("deepseek's", prompt)
+        self.assertNotIn("kimi's", prompt)
+
+    def test_a_split_goes_to_the_plan_with_fewer_open_must_fix(self):
+        fakes = {"deepseek": ForcedPlanFake("deepseek", "deepseek plan\n", prefer="deepseek plan", must_fix=2),
+                 "kimi": ForcedPlanFake("kimi", "kimi plan\n", prefer="kimi plan", must_fix=1)}
+        _, state = self.run_plan_stage(fakes)
+        decision = state["final"]["forced"]
+        self.assertEqual(decision["winner"], "deepseek", "kimi's plan has 2 open MUST_FIX, deepseek's 1")
+        self.assertIn("fewer open MUST_FIX (1 vs 2)", decision["method"])
+
+    def test_a_tied_split_is_a_recorded_coin_flip(self):
+        fakes = {"deepseek": ForcedPlanFake("deepseek", "deepseek plan\n", prefer="deepseek plan"),
+                 "kimi": ForcedPlanFake("kimi", "kimi plan\n", prefer="kimi plan")}
+        with mock.patch("cav.orchestrator.random.choice", return_value="kimi") as flip:
+            _, state = self.run_plan_stage(fakes)
+        flip.assert_called_once()
+        self.assertEqual(state["final"]["forced"]["winner"], "kimi")
+        self.assertIn("coin flip", state["final"]["forced"]["method"])
 
 
 class HomeBranchTest(HomeTest):

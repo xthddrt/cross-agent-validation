@@ -4,6 +4,7 @@ import concurrent.futures
 import json
 import os
 import pathlib
+import random
 import subprocess
 import sys
 import threading
@@ -14,7 +15,7 @@ from . import compare
 from . import review as review_mod
 from .events import EventWriter
 from .gitops import GIT, IDENTITY, Exchange, Repo, git, git_ok
-from .prompts import retry_note, round_prompt
+from .prompts import PLAN_FILE, decide_prompt, retry_note, round_prompt
 
 MAX_PATCH_BYTES = 2_000_000
 
@@ -147,10 +148,14 @@ class Orchestrator:
             self.finalize(accepted["round"])
             return self.state
         for round_no in range(start, self.case.max_rounds + 1):
+            if self.deciding(round_no):
+                return self.decide(round_no)
             outcome = self.round(round_no)
             if outcome == "accepted":
                 return self.state
             if outcome == "stop":
+                if self.case.mode == "plan":
+                    return self.decide(round_no + 1)  # a repeating plan pair goes straight to the choice
                 break
         else:
             self.log(f"no agreement after {self.case.max_rounds} rounds", "ERROR")
@@ -307,12 +312,13 @@ class Orchestrator:
     def history_line(self):
         return " -> ".join(
             f"r{item['round']}: failed" if item.get("failed") else
+            f"r{item['round']}: forced choice" if item.get("verdict") == "forced" else
             f"r{item['round']}: {item['divergence']['differing']} differing paths"
             for item in self.state.get("history", []))
 
     # --------------------------------------------------------------- drive/monitor
 
-    def drive(self, round_no, runs, prompts, worktrees, reviews, trees=None):
+    def drive(self, round_no, runs, prompts, worktrees, reviews, trees=None, check=None):
         """Run both agents in parallel; retry one that leaves no valid review."""
 
         def problem(name):
@@ -320,6 +326,8 @@ class Orchestrator:
                 return runs[name].state.error
             if not runs[name].state.finished:
                 return "did not finish"
+            if check:
+                return check(name)
             rev = review_mod.load(reviews[name], name, round_no, trees)
             if rev is None:
                 return "no review file"
@@ -464,7 +472,12 @@ class Orchestrator:
         if phase == "implement":
             return dict(item, checks=None, eligible=False, verdict="independent")
         item["checks"] = all(check["ok"] for check in start_checks.values())
-        item["eligible"] = item["checks"] and all(all(results[name]["approves"].values()) for name in names)
+        if self.case.mode == "plan":
+            # one plan both agents approve is enough: approving the other's plan ends the stage
+            item["agreed_on"] = [name for name in names if all(results[r]["approves"].get(name) for r in names)]
+            item["eligible"] = item["checks"] and bool(item["agreed_on"])
+        else:
+            item["eligible"] = item["checks"] and all(all(results[name]["approves"].values()) for name in names)
         item["verdict"] = "accepted" if item["eligible"] else "diverged"
         return item
 
@@ -514,7 +527,9 @@ class Orchestrator:
         reviewed code, not a proposal written after the reviews. Nothing is rewritten after
         agreement, so nothing needs re-checking or re-approval."""
         entry = next(item for item in self.state["history"] if item["round"] == round_no)
-        approved = {name: {"commit": sha, "tree": self.exchange.tree_of(sha)} for name, sha in entry["starts"].items()}
+        agreed = (entry.get("blockers") or {}).get("agreed_on") or list(entry["starts"])
+        approved = {name: {"commit": sha, "tree": self.exchange.tree_of(sha)}
+                    for name, sha in entry["starts"].items() if name in agreed}
         chosen, publication = self.choose_publication(approved)
         commit, tree = approved[chosen]["commit"], approved[chosen]["tree"]
         self.emit("publication.selected", round_no, chosen, publication)
@@ -538,6 +553,119 @@ class Orchestrator:
             self.log("not pushed to origin; rerun with --push to publish")
         self.emit("run.end", round_no, data={"phase": "converged"})
         return "accepted"
+
+    # ------------------------------------------------------------ forced choice
+
+    def deciding(self, round_no):
+        """A plan stage's last round decides instead of reviewing again, so it always ends in one plan."""
+        return self.case.mode == "plan" and round_no == self.case.max_rounds and round_no > 1
+
+    def must_fix_against(self, round_no, candidate):
+        """The MUST_FIX findings against a candidate in a round's reviews."""
+        found = []
+        for reviewer in self.case.agents:
+            data = self.read_json(self.run_dir / "reviews" / f"r{round_no}" / f"{reviewer}-review.json")
+            found += [{"summary": item.get("summary", ""), "fix": item.get("fix", ""), "from": reviewer,
+                       "where": f"{item.get('path')}:{item.get('line')}"}
+                      for item in data.get("findings") or []
+                      if isinstance(item, dict) and item.get("severity") == "MUST_FIX"
+                      and item.get("candidate") == candidate]
+        return found
+
+    def decide(self, round_no):
+        """No plan has both approvals: each agent, in a fresh session that sees only the task and the
+        two plans (Plan 1 and 2, random order, no authors), must choose one. The same choice wins; a
+        split goes to the plan with fewer open MUST_FIX findings in the last reviews; a tie to a
+        recorded coin flip. The defects listed against the winner travel with it."""
+        case, names = self.case, list(self.case.agents)
+        self.state.update(phase=f"r{round_no}-prepare", round=round_no)
+        self.save()
+        previous = self.previous_results()
+        starts = {name: previous[name]["commit"] for name in names}
+        order = random.sample(names, len(names))  # order[0] is Plan 1
+        context_dir = self.run_dir / "rounds" / f"r{round_no}"
+        reviews_dir = self.run_dir / "reviews" / f"r{round_no}"
+        context_dir.mkdir(parents=True, exist_ok=True)
+        reviews_dir.mkdir(parents=True, exist_ok=True)
+        plans = {}
+        for number, name in enumerate(order, 1):
+            text = git("--git-dir", str(self.exchange.path), "show", f"{starts[name]}:{PLAN_FILE}", check=False)
+            path = context_dir / f"plan-{number}.md"
+            path.write_text(text + "\n", encoding="utf-8")
+            plans[number] = str(path)
+        self.emit("round.prepared", round_no, data={"starts": starts, "phase": "decide", "differing": 0})
+        self.log(f"r{round_no}: no plan has both approvals; each agent chooses between them blind")
+        runs, prompts, places, decisions = {}, {}, {}, {}
+        for name, spec in case.agents.items():
+            places[name] = self.run_dir / "scratch" / f"r{round_no}" / name
+            places[name].mkdir(parents=True, exist_ok=True)
+            decisions[name] = reviews_dir / f"{name}-review.json"
+            decisions[name].unlink(missing_ok=True)
+            prompts[name] = decide_prompt(name, round_no, case, plans, decisions[name])
+            (context_dir / f"{name}-context.md").write_text(prompts[name], encoding="utf-8")
+            agent = agent_mod.build(spec, self.run_dir / "logs" / f"r{round_no}" / f"{name}.log",
+                                    title_prefix=f"cav {case.name} r{round_no}")
+            agent.emit = lambda type_, agent_name, data, _r=round_no: self.emit(type_, _r, agent_name, data)
+            agent.thinking = self.thinking
+            agent.session_id = None
+            runs[name] = agent
+        self.state["phase"] = f"r{round_no}-agents"
+        self.save()
+        self.emit("round.start", round_no, data={"phase": "decide"})
+        self.drive(round_no, runs, prompts, places, decisions,
+                   check=lambda name: review_mod.load_decision(decisions[name], name, round_no)[1])
+
+        picks, failed = {}, []
+        for name in names:
+            data, problem = review_mod.load_decision(decisions[name], name, round_no)
+            if problem:
+                failed.append(f"{name}: {problem}")
+                self.emit("review.rejected", round_no, name, {"reason": problem})
+            else:
+                picks[name] = data
+                self.emit("review.validated", round_no, name, {"summary": f"chose Plan {data['choice']}"})
+        if failed:
+            self.state["phase"] = f"r{round_no}-failed"
+            self.state["history"].append({"round": round_no, "failed": failed})
+            self.save()
+            raise RuntimeError(f"round {round_no} failed: " + "; ".join(failed))
+
+        chosen = {name: order[picks[name]["choice"] - 1] for name in names}
+        if len(set(chosen.values())) == 1:
+            winner, method = chosen[names[0]], "both chose it"
+        else:
+            open_fix = {candidate: len(self.must_fix_against(round_no - 1, candidate)) for candidate in names}
+            fewer = sorted(names, key=lambda candidate: open_fix[candidate])
+            if open_fix[fewer[0]] != open_fix[fewer[1]]:
+                winner = fewer[0]
+                method = f"split; fewer open MUST_FIX ({open_fix[fewer[0]]} vs {open_fix[fewer[1]]})"
+            else:
+                winner = random.choice(names)
+                method = f"split, tied on open MUST_FIX ({open_fix[fewer[0]]} each); coin flip"
+        defects = [dict(item, **{"from": name}) for name in names if chosen[name] == winner
+                   for item in picks[name].get("defects") or []]
+        defects += self.must_fix_against(round_no - 1, winner)
+        decision = {"plans": {str(number): name for number, name in enumerate(order, 1)},
+                    "choices": {name: picks[name]["choice"] for name in names},
+                    "winner": winner, "method": method, "defects": defects}
+        blockers = {"verdict": "forced", "eligible": True, "checks": None, "blocking_must_fix": 0,
+                    "approvals": {}, "decision": decision}
+        self.state["history"].append({"round": round_no, "phase": "decide", "starts": starts,
+                                      "decision": decision, "blockers": blockers, "verdict": "forced",
+                                      "converged": True})
+        self.emit("convergence.evaluated", round_no, data={"verdict": "forced", "blockers": blockers})
+        self.log(f"r{round_no}: forced choice: {winner}'s plan ({method}); {len(defects)} defects carried")
+        commit = starts[winner]
+        self.state["phase"] = "converged"
+        self.state["final"] = {"round": round_no, "commit": commit, "tree": self.exchange.tree_of(commit),
+                               "pushed": False, "published_from": {"agent": winner, "reason": f"forced choice: {method}"},
+                               "checks": [], "forced": decision}
+        self.save()
+        self.write_report(round_no)
+        self.emit("publication.selected", round_no, winner, {"reason": f"forced choice: {method}"})
+        self.emit("final.complete", round_no, data={"commit": commit, "tree": self.state["final"]["tree"]})
+        self.emit("run.end", round_no, data={"phase": "converged"})
+        return self.state
 
     def push_origin(self, commit):
         branch = self.case.branch

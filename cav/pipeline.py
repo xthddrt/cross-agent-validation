@@ -1,7 +1,8 @@
 """Repo + prompt to a pushed result: both agents plan, agree on a plan, implement it, agree on code.
 
-    plan stage   each agent writes CAV-PLAN.md independently, then up to 3 review rounds
-    code stage   each implements the agreed plan (or, without agreement, its own last plan),
+    plan stage   each agent writes CAV-PLAN.md independently, then 2 review rounds; a plan both
+                 approve wins, else round 4 is a blind forced choice between the two
+    code stage   both implement the one plan the plan stage ends with (round 4 forces one),
                  then up to 3 review rounds
     agreement    the agreed commit is merged into origin's default branch and pushed
     otherwise    SUMMARY.md in the stage folder says how far apart the two candidates ended
@@ -173,7 +174,9 @@ class Pipeline:
                                    'or "Base: Candidate Y"')
             code_from = self.state["labels"][label]["commit"]
             self.save(plan_base=label)
-        self.save(plan={"outcome": "agreed" if plans["agreed"] else "disagreement",
+        forced = (plan_state.get("final") or {}).get("forced")
+        self.save(plan={"outcome": f"forced: {forced['method']}" if forced else
+                        "agreed" if plans["agreed"] else "disagreement",
                         "rounds": len(plan_state.get("history") or []), "summary": plan_state.get("summary")})
 
         self.save(stage="code")
@@ -243,9 +246,16 @@ class Pipeline:
             return body + "\n"
 
         if state.get("final"):
+            body = text(state["final"]["commit"])
+            forced = state["final"].get("forced")
+            if forced and forced.get("defects"):
+                body += ("\n## Defects to fix while implementing\n\nFound in the plan stage against this plan:\n\n"
+                         + "\n".join(f"- {item.get('summary')}" + (f" (fix: {item['fix']})" if item.get("fix") else "")
+                                      for item in forced["defects"]) + "\n")
             path = folder / "agreed.md"
-            path.write_text(text(state["final"]["commit"]), encoding="utf-8")
-            return {"agreed": True, "files": {agent: str(path) for agent in config.DEFAULT_MODELS}}
+            path.write_text(body, encoding="utf-8")
+            return {"agreed": True, "forced": bool(forced),
+                    "files": {agent: str(path) for agent in config.DEFAULT_MODELS}}
         last = next((item for item in reversed(state.get("history") or []) if item.get("results")), None)
         if not last:
             raise RuntimeError("the plan stage produced no plans")
