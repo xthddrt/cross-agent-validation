@@ -7,8 +7,10 @@
               defects in its base attached). A plan both approve is the plan. Otherwise both revise
               from the rejection reasons and vote again, up to 10 rounds, then a coin flip.
     build     both implement the agreed plan from the same base, separately; the checks run
-    judge     both judge the two builds blind: a build both approve, with passing checks, is the
-              result; else the one passing its checks, else the one both would keep, else a coin flip
+    judge     both judge the two builds blind, as above: a build both approve, with passing checks,
+              is the result; otherwise each judge writes a plan and the cycle repeats (agree, build,
+              judge), up to 5 builds. The judge after the last build keeps the one passing its
+              checks, else the one both would keep, else a coin flip.
     publish   pushed to origin's default branch unless --no-push; failing checks publish nothing
 
 No prompt names an agent or says whose anything is: candidates are X and Y (labelled at random,
@@ -39,7 +41,7 @@ from .gitops import GIT, IDENTITY, NO_WINDOW, git, git_ok
 
 PLAN_WORDS, WHY_WORDS = prompts.PLAN_WORDS, prompts.WHY_WORDS
 LABELS = ("X", "Y")
-MAX_PLAN_ROUNDS = 10
+MAX_PLAN_ROUNDS, MAX_BUILDS = 10, 5
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
@@ -165,14 +167,14 @@ def _numbered(names):
 
 class Flow:
     def __init__(self, repo_spec, task, run_dir, branches=(), checks=(), push=True, models=None,
-                 max_plan_rounds=MAX_PLAN_ROUNDS):
+                 max_plan_rounds=MAX_PLAN_ROUNDS, max_builds=MAX_BUILDS):
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.repo_spec, self.task = repo_spec, task.strip()
         self.branches, self.checks = list(branches), list(checks)
         if self.branches and len(self.branches) != 2:
             raise ValueError("give two branches to reconcile, or none")
-        self.push, self.max_plan_rounds = push, max_plan_rounds
+        self.push, self.max_plan_rounds, self.max_builds = push, max_plan_rounds, max_builds
         models = models or config.DEFAULT_MODELS
         self.names = list(models)
         self.run_id = self.run_dir.name
@@ -297,31 +299,31 @@ class Flow:
         self.blind.mkdir(parents=True, exist_ok=True)
         if git_ok("rev-parse", "--git-dir", cwd=self.blind):
             raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
-        if self.branches:
-            candidates = self.branch_candidates(repo)
-            result, plans, reviews = self.judge("branches", candidates, final=False)
-            if result:
-                return self.publish(branch, candidates[result], result)
-        else:
-            candidates, reviews = None, []
-            plans = self.plan()
-        plan_path, label = self.agree(plans, candidates, reviews)
-        builds = self.build(plan_path, candidates[label]["commit"] if candidates else base, label)
-        result, _, _ = self.judge("builds", builds, final=True)
-        return self.publish(branch, builds[result], result)
+        candidates = self.branch_candidates(repo) if self.branches else None
+        for cycle in range(1, self.max_builds + 2):
+            if candidates:
+                result, plans, reviews = self.judge(cycle, candidates, final=cycle > self.max_builds)
+                if result:
+                    return self.publish(branch, candidates[result], result)
+            else:
+                plans, reviews = self.plan(cycle), []
+            plan_path, label = self.agree(cycle, plans, candidates, reviews)
+            candidates = self.build(cycle, plan_path, candidates[label]["commit"] if candidates else base, label)
+        raise RuntimeError("the final judge must decide")  # unreachable: the final judge always picks
 
-    def judge(self, what, candidates, final):
+    def judge(self, cycle, candidates, final):
         """Both agents judge both candidates blind. A candidate both approve, with passing checks, is
-        the result. Otherwise the branches' judges have written plans; the builds' final judge
-        keeps the passing one, else the one both would keep, else a coin flip."""
-        folder = self.blind / "judge" / what
+        the result. Otherwise each judge has written a plan for the next build; after the last
+        build, the final judge keeps the passing one, else the one both would keep, else a coin flip."""
+        folder = self.blind / "judge" / f"c{cycle}"
         folder.mkdir(parents=True, exist_ok=True)
         numbers = _numbered(self.names)
         replies = {name: folder / f"review-{numbers[name]}.json" for name in self.names}
         plans = None if final else {name: folder / f"plan-{numbers[name]}.md" for name in self.names}
         self.state["authors"].update({str(path.relative_to(self.blind)): name
                                       for files in (replies, plans or {}) for name, path in files.items()})
-        entry = self.begin("judge", candidates={label: item["commit"] for label, item in candidates.items()})
+        entry = self.begin("judge", cycle=cycle,
+                           candidates={label: item["commit"] for label, item in candidates.items()})
         jobs = {}
         for name in self.names:
             listed = [(label, candidates[label]["folder"], self.checks_summary(candidates[label]))
@@ -348,28 +350,28 @@ class Flow:
         self.save(decided=how, open_defects=[item for item in defects if item["candidate"] == result])
         return result, None, None
 
-    def plan(self):
+    def plan(self, cycle):
         """No candidates yet: both write a plan for the task, separately."""
         folder = self.blind / "plans"
         folder.mkdir(exist_ok=True)
         numbers = _numbered(self.names)
-        paths = {name: folder / f"plan-{numbers[name]}.md" for name in self.names}
+        paths = {name: folder / f"c{cycle}-plan-{numbers[name]}.md" for name in self.names}
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
-        entry = self.begin("plan")
+        entry = self.begin("plan", cycle=cycle)
         self.ask({name: (prompts.plan(self.task, paths[name]), self.blind) for name in self.names}, "plan",
                  lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
                                                 if paths[name].exists() else None, None))
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
         return paths
 
-    def revise(self, number, ballots, objections, candidates, reviews):
+    def revise(self, cycle, number, ballots, objections, candidates, reviews):
         """Round `number`: both read the last two plans, the reasons they were rejected and the reviews,
         and each writes one revised plan."""
         folder = self.blind / "plans"
         numbers = _numbered(self.names)
-        paths = {name: folder / f"r{number}-revised-{numbers[name]}.md" for name in self.names}
+        paths = {name: folder / f"c{cycle}-r{number}-revised-{numbers[name]}.md" for name in self.names}
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
-        entry = self.begin("revise", plan_round=number)
+        entry = self.begin("revise", cycle=cycle, plan_round=number)
         self.ask({name: (prompts.revise(self.task, self.listing(candidates), reviews, ballots, objections, paths[name]),
                          self.blind) for name in self.names}, "revise",
                  lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
@@ -377,7 +379,7 @@ class Flow:
         self.end(entry, "revised", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
         return paths
 
-    def agree(self, plans, candidates, reviews):
+    def agree(self, cycle, plans, candidates, reviews):
         """Up to `max_plan_rounds` rounds. Round 1 votes on the plans as written; each later round first
         revises them from the rejection reasons. A vote shows each plan as the builders will get it
         (the reviews' defects in its base attached). A plan both approve is the plan (both: the
@@ -388,20 +390,20 @@ class Flow:
         ballots, objections, how = [], {}, None
         for number in range(1, self.max_plan_rounds + 1):
             if number > 1:
-                plans = self.revise(number, ballots, objections, candidates, reviews)
+                plans = self.revise(cycle, number, ballots, objections, candidates, reviews)
             texts = {name: plans[name].read_text(encoding="utf-8") for name in self.names}
             order = random.sample(self.names, 2)  # plan 1 and plan 2, at random
             ballots = []
             for n, name in enumerate(order, 1):
-                path = self.blind / "plans" / f"r{number}-ballot-{n}.md"
+                path = self.blind / "plans" / f"c{cycle}-r{number}-ballot-{n}.md"
                 path.write_text(self.ballot(texts[name], candidates, reviews), encoding="utf-8")
                 ballots.append((n, path))
             if len({text.strip() for text in texts.values()}) == 1:
                 chosen, how, objections = ballots[0][1], "the two plans are the same", {}
                 break
-            replies = {name: folder / f"r{number}-reply-{n}.json" for name, n in _numbered(self.names).items()}
+            replies = {name: folder / f"c{cycle}-r{number}-reply-{n}.json" for name, n in _numbered(self.names).items()}
             self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
-            entry = self.begin("agree", plan_round=number)
+            entry = self.begin("agree", cycle=cycle, plan_round=number)
             self.ask({name: (prompts.agree(self.task, self.listing(candidates), reviews, ballots, replies[name]),
                              self.blind) for name in self.names}, "agree", lambda name: self.agree_problem(replies[name]))
             data = {name: _json(replies[name]) for name in self.names}
@@ -430,7 +432,7 @@ class Flow:
         if rejected:
             body += "\n## Objections to this plan (address them where they are right)\n\n" + "\n".join(
                 f"- {text}" for text in rejected) + "\n"
-        path = self.blind / "plans" / "agreed.md"
+        path = self.blind / "plans" / f"c{cycle}-agreed.md"
         for copy in (path, self.run_dir / "plans" / path.name):  # the builders' copy, and the run's record
             copy.parent.mkdir(exist_ok=True)
             copy.write_text(body, encoding="utf-8")
@@ -438,22 +440,22 @@ class Flow:
         self.log(f"plan: {how}")
         return path, label
 
-    def build(self, plan_path, start, base_label):
+    def build(self, cycle, plan_path, start, base_label):
         """Both implement the plan from the same commit, separately. The two results are relabelled
-        at random for the final judge."""
+        at random for the next judge."""
         numbers = _numbered(self.names)
-        works = {name: export_tree(self.repo, start, self.blind / "build" / f"build-{numbers[name]}")
+        works = {name: export_tree(self.repo, start, self.blind / "build" / f"c{cycle}-{numbers[name]}")
                  for name in self.names}  # plain copies: no git history to read
-        notes = {name: self.blind / "notes" / f"build-{numbers[name]}.md" for name in self.names}
+        notes = {name: self.blind / "notes" / f"c{cycle}-build-{numbers[name]}.md" for name in self.names}
         for name in self.names:
             notes[name].parent.mkdir(parents=True, exist_ok=True)
-        entry = self.begin("build", start=start)
+        entry = self.begin("build", cycle=cycle, start=start)
         self.ask({name: (prompts.build(plan_path, works[name], self.checks, notes[name], base_label), works[name])
                   for name in self.names}, "build", lambda name: None if notes[name].exists() else "no note written")
-        commits = {name: self.snapshot(works[name], start, f"build {numbers[name]}") for name in self.names}
+        commits = {name: self.snapshot(works[name], start, f"cycle {cycle} build {numbers[name]}") for name in self.names}
         labels = dict(zip(random.sample(self.names, 2), LABELS))
-        builds = self.candidates("builds", {labels[name]: (commits[name], works[name]) for name in self.names})
-        self.state["authors"].update({f"builds {labels[name]}": name for name in self.names})
+        builds = self.candidates(f"c{cycle + 1}", {labels[name]: (commits[name], works[name]) for name in self.names})
+        self.state["authors"].update({f"c{cycle + 1} {labels[name]}": name for name in self.names})
         self.end(entry, "built", commits=commits,
                  checks={name: {"ok": builds[labels[name]]["checks_ok"],
                                 "commands": builds[labels[name]]["checks"]} for name in self.names})
@@ -493,7 +495,7 @@ class Flow:
         # the checks run in CAV's own copies; the agents only ever see the blind exports
         trees = {label: (item["commit"], export_tree(repo, item["commit"], self.run_dir / "checks" / label))
                  for label, item in labels.items()}
-        return self.candidates("branches", trees)
+        return self.candidates("c1", trees)
 
     def candidates(self, what, trees):
         """label -> commit, a clean plain folder to read, and its checks (run in the given folder, both at once)."""

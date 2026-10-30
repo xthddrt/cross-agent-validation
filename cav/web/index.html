@@ -595,8 +595,8 @@ function renderPipeline() {
     `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
-// a flow run (judge or plan, agree rounds, build, judge): each step is a "round"; label it by step and plan round
-const stepName = (h) => h ? `${h.step}${h.plan_round ? ' ' + h.plan_round : ''}` : '';
+// a flow run (judge or plan, agree rounds, build; repeated): each step is a "round"; label it by cycle, step and plan round
+const stepName = (h) => h ? `${h.cycle ? 'c' + h.cycle + ' ' : ''}${h.step}${h.plan_round ? ' ' + h.plan_round : ''}` : '';
 function renderTabs() {
   const nums = roundNumbers();
   const html = nums.map(n => {

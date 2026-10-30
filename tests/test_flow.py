@@ -63,6 +63,7 @@ class Fake:
             self.builds += 1
             work = pathlib.Path(re.search(r"^Implement \S+ in (\S+?)(?:, a copy of [XY])?\.$", prompt, re.M).group(1))
             (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
+            (work / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
             pathlib.Path(re.search(r"what you did to (\S+)\.$", prompt, re.M).group(1)).write_text("built", encoding="utf-8")
         self.state.finished = True
         return {"ok": True, "text": "done", "reason": "completed"}
@@ -162,7 +163,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(build["start"], shas["feat-a"], "both builds start from the agreed base")
         for commit in build["commits"].values():
             self.assertEqual(git("merge-base", commit, shas["feat-a"], cwd=self.work), shas["feat-a"])
-        self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "agreed.md").read_text(encoding="utf-8"))
+        self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8"))
         vote = next(p for p in fakes["kimi"].prompts if "Approve each plan" in p)
         ballots = [pathlib.Path(path) for path in re.findall(r"^- \d: (\S+)$", vote, re.M)]
         self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
@@ -188,7 +189,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual([step for step, _ in self.steps(flow)],
                          ["plan", "agree", "revise", "agree", "revise", "agree", "build", "judge"])
         self.assertIn("coin flip chose plan 2", flow.state["plan"]["how"])
-        self.assertIn("Objections to this plan", (flow.run_dir / "plans" / "agreed.md").read_text(encoding="utf-8"))
+        self.assertIn("Objections to this plan", (flow.run_dir / "plans" / "c1-agreed.md").read_text(encoding="utf-8"))
 
     def test_the_final_judge_goes_by_approval_then_by_what_both_would_keep(self):
         fakes = {"deepseek": Fake("deepseek", approve=built_by("kimi"), prefer=lambda folders: next(
@@ -201,15 +202,30 @@ class FlowTest(unittest.TestCase):
         keep = lambda folders: next(label for label, folder in folders.items() if built_by("kimi")(folder))
         fakes = {name: Fake(name, approve=lambda folder: False, prefer=keep) for name in ("deepseek", "kimi")}
         shutil.rmtree(self.tmp / "runs", ignore_errors=True)
-        code, flow = self.run_flow(fakes, push=False)
+        code, flow = self.run_flow(fakes, push=False, max_builds=2)
         self.assertEqual(code, 0, flow.state)
+        self.assertEqual([step for step, _ in self.steps(flow)],
+                         ["plan", "agree", "build", "judge", "agree", "build", "judge"], "two build cycles, then the pick")
         self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
         self.assertEqual(git("show", f"{flow.state['final']['commit']}:feature.txt", cwd=self.work), "built by kimi")
         self.assertEqual(len(flow.state["final"]["open_defects"]), 2, "each judge's defect against it stays open")
 
+    def test_rejected_builds_go_round_again_from_an_agreed_build(self):
+        second = lambda folder: (pathlib.Path(folder) / "build-2.txt").exists()
+        fakes = {name: Fake(name, approve=second) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, push=False)
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual(self.steps(flow), [("plan", "planned"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "rejected"), ("agree", "agreed"), ("build", "built"),
+                                            ("judge", "accepted")])
+        first, again = flow.state["history"][2], flow.state["history"][5]
+        self.assertIn(again["start"], first["commits"].values(), "the second build starts from a first build")
+        self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c2-agreed.md").read_text(encoding="utf-8"))
+        self.assert_blind(fakes, flow)
+
     def test_failing_checks_are_never_accepted_or_pushed(self):
         fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
-        code, flow = self.run_flow(fakes, checks=['{python} -c "import sys; sys.exit(1)"'])
+        code, flow = self.run_flow(fakes, checks=['{python} -c "import sys; sys.exit(1)"'], max_builds=1)
         self.assertEqual(code, 2)
         self.assertEqual(flow.state["outcome"], "checks fail")
         self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
