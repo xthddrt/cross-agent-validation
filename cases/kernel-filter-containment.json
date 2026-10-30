@@ -1,0 +1,45 @@
+{
+  "name": "kernel-filter-containment",
+  "description": "Reconcile the two independent strong-containment implementations of kernel-filter (feature/containment-v4 vs feature/strong-containment).",
+  "repo": {
+    "host": "C:\\Users\\richa\\Documents\\Default Project\\kernel-filter",
+    "base": "eff419c",
+    "branch": "main"
+  },
+  "agents": {
+    "deepseek": {
+      "kind": "opencode",
+      "model": "deepseek/deepseek-flash#high",
+      "bootstrap_ref": "origin/feature/containment-v4"
+    },
+    "kimi": {
+      "kind": "kimi",
+      "model": "kimi-code/k3.1-pro",
+      "thinking": "high",
+      "bootstrap_ref": "origin/feature/strong-containment"
+    }
+  },
+  "checks": [
+    ".\\build.cmd",
+    "build\\Release\\tool\\kfilterctl.exe self-test",
+    "build\\Release\\tool\\kfilterctl.exe check policy\\contain-policy.txt"
+  ],
+  "task": {
+    "prompt_file": "kernel-filter-containment.task.md",
+    "acceptance": [
+      ".\\build.cmd succeeds (driver, kfilterctl and probe build with /W4 /WX)",
+      "kfilterctl self-test passes and exercises the same matcher the driver uses",
+      "kfilterctl check policy\\contain-policy.txt passes",
+      "Every enforcement layer listed in the objective is implemented, or explicitly documented as not implemented",
+      "Documentation does not claim VM, Driver Verifier, signing or anti-cheat compatibility validation that was not performed"
+    ],
+    "base_behavior_invariants": [
+      "No hooks, injection, anti-cheat bypass, driver hiding or security disabling",
+      "Raw disk access and WMI module-load blocking from main (c3ea018, eff419c) are kept"
+    ]
+  },
+  "max_rounds": 3,
+  "round_seconds": 5400,
+  "stall_seconds": 1200,
+  "retries": 1
+}
