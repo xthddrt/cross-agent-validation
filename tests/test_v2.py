@@ -1,6 +1,7 @@
 """Tree comparison, review validation, acceptance, publication, events and the dashboard."""
 
 import json
+import os
 import pathlib
 import re
 import shutil
@@ -591,6 +592,63 @@ class KimiBlockingTest(unittest.TestCase):
         agent._verify_permission("yolo")
         agent._call = lambda *args, **kwargs: {"data": {}}
         agent._verify_permission("yolo")
+
+    def fake_api(self, agent, responses):
+        calls = []
+
+        def call(method, path, body=None, timeout=60):
+            calls.append((method, path, body))
+            return next(value for key, value in responses.items() if path.endswith(key))
+        agent.session_id = "s"
+        agent._call = call
+        return calls
+
+    def test_approval_is_answered_for_this_session_only(self):
+        """Kimi's dangerous-command guard asks even in yolo mode; a CAV session approves it."""
+        agent = self.agent()
+        calls = self.fake_api(agent, {
+            "/snapshot": {"data": {"pending_approvals": [
+                {"approval_id": "a1", "tool_name": "Bash", "action": "Running: rm -rf junk"}]}},
+            "/interactions/a1": {"data": {"outcome": "approved"}}})
+        self.assertEqual(agent._approve_pending(), 1)
+        self.assertEqual(calls[-1], ("POST", "/api/v1/sessions/s/interactions/a1",
+                                     {"kind": "approval", "decision": "approved", "scope": "session"}))
+
+    def test_question_is_dismissed_so_the_agent_goes_on(self):
+        agent = self.agent()
+        calls = self.fake_api(agent, {
+            "/snapshot": {"data": {"pending_questions": [
+                {"question_id": "q1", "questions": [{"question": "Which colour?"}]}]}},
+            "/interactions/q1": {"data": {"outcome": "dismissed"}}})
+        self.assertEqual(agent._dismiss_questions(), 1)
+        self.assertEqual(calls[-1], ("POST", "/api/v1/sessions/s/interactions/q1",
+                                     {"kind": "question", "dismissed": True}))
+
+    def test_ponytail_is_activated_at_the_cav_level(self):
+        agent = self.agent()
+        calls = self.fake_api(agent, {
+            "/skills": {"data": {"skills": [{"name": agent_mod.PONYTAIL_SKILL}]}},
+            ":activate": {"data": {"activated": True}},
+            "/sessions/s": {"data": {"busy": False, "last_turn_reason": "completed"}}})
+        agent._activate_ponytail()
+        self.assertIn(("POST", f"/api/v1/sessions/s/skills/{agent_mod.PONYTAIL_SKILL}:activate",
+                       {"args": agent_mod.PONYTAIL_LEVEL}), calls)
+
+    def test_missing_ponytail_fails_instead_of_running_without_it(self):
+        agent = self.agent()
+        self.fake_api(agent, {"/skills": {"data": {"skills": [{"name": "other"}]}}})
+        with self.assertRaisesRegex(RuntimeError, "ponytail"):
+            agent._activate_ponytail()
+
+    def test_opencode_runs_ponytail_at_the_cav_level(self):
+        agent = agent_mod.OpenCodeAgent(config.AgentSpec("deepseek", "opencode"), "log.txt")
+        self.assertEqual(agent._env()["PONYTAIL_DEFAULT_MODE"], agent_mod.PONYTAIL_LEVEL)
+
+    def test_opencode_session_directory_is_the_worktree(self):
+        """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
+        agent = agent_mod.OpenCodeAgent(config.AgentSpec("deepseek", "opencode"), "log.txt")
+        with mock.patch.dict(os.environ, {"PWD": "C:/somewhere/else"}):
+            self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
 
 
 class AdapterCaptureTest(unittest.TestCase):

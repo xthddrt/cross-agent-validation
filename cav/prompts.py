@@ -2,6 +2,8 @@
 
 import sys
 
+PLAN_FILE = "CAV-PLAN.md"
+
 REVIEW_SCHEMA = """{
   "round": <round number>,
   "agent": "<your name>",
@@ -28,6 +30,20 @@ def task_block(case):
     return "\n".join(lines)
 
 
+def plan_block(agent, other, case):
+    """The code stage of a pipeline: which plan each agent implements."""
+    plans = (case.task or {}).get("plans") or {}
+    files = plans.get("files") or {}
+    if not files:
+        return []
+    if plans.get("agreed"):
+        return ["PLAN TO IMPLEMENT (both agents agreed on it; read it in full)", f"- {files[agent]}", ""]
+    return ["PLANS (the two agents did not agree on one plan; each implements its own)",
+            f"- yours, which you implement: {files[agent]}",
+            f"- {other}'s, which {other} implements: {files[other]}",
+            "Judge both candidates against the original objective, not against one plan.", ""]
+
+
 def review_rules(review_json):
     return f"""REVIEW
 - Write your review as JSON to this exact path: {review_json}
@@ -46,7 +62,17 @@ def review_rules(review_json):
 
 def round_prompt(agent, other, round_no, case, worktree, review_json, context):
     phase = context.get("phase", "reconcile")
-    if phase == "implement":
+    planning = case.mode == "plan"
+    if planning and phase == "implement":
+        objective = (f"WRITE A PLAN for the original objective in {PLAN_FILE} at the root of your working "
+                     "tree. This stage produces a plan, not code: change no other file. Read the repository "
+                     "first so the plan names the real files, functions and checks it will touch. The other "
+                     "agent is planning the same task independently; you will not see their plan this round.")
+    elif planning:
+        objective = (f"WRITE ONE NEW PLAN. Read both candidates' {PLAN_FILE} in full and judge what you agree "
+                     f"with in each. Then rewrite {PLAN_FILE} in your working tree as a single plan that "
+                     "combines the best of both and meets the original objective. Change no other file.")
+    elif phase == "implement":
         objective = ("IMPLEMENT THE TASK in your working tree. The other agent is implementing the "
                      "same task independently; you will not see their attempt this round.")
     else:
@@ -63,6 +89,7 @@ def round_prompt(agent, other, round_no, case, worktree, review_json, context):
         f"Phase: {phase}",
         "",
         task_block(case),
+        *plan_block(agent, other, case),
         "CURRENT ROUND OBJECTIVE",
         objective,
         "",
@@ -72,6 +99,7 @@ def round_prompt(agent, other, round_no, case, worktree, review_json, context):
             "THE TWO CANDIDATES (equal standing: neither is the default)",
             f"- yours, which your working tree starts from: {context['own_sha']}",
             f"- {other}'s: {context['other_sha']}",
+            f"- {other}'s candidate, checked out for you to read (never edit it): {context.get('other_tree') or '(none)'}",
             f"- {other}'s candidate as a diff against your tree: {context.get('other_patch') or '(none)'}",
             f"- {other}'s previous review: {context.get('other_review') or '(none)'}",
             f"- your previous review: {context.get('own_review') or '(none)'}",
@@ -83,21 +111,41 @@ def round_prompt(agent, other, round_no, case, worktree, review_json, context):
         ]
     if context.get("history"):
         lines += ["ROUND HISTORY", context["history"], ""]
+    if planning:
+        lines += [
+            "WORK",
+            ("1. Read the code the task touches." if phase == "implement" else
+             "1. Read both plans and the code they refer to.") + " Findings need a file and a line:",
+            f"   a line of a {PLAN_FILE}, or of the code a plan is wrong about.",
+            f"2. Write your plan in {PLAN_FILE}: keep what you agree with from either plan and fix what",
+            "   is wrong. \"Behavioural\" here means what the plan would make the code do.",
+            "3. Where two plans say the same thing differently, keep the wording already in your file",
+            "   and record it as kind \"equivalent\".",
+            "",
+        ]
+    else:
+        lines += [
+            "WORK",
+            "1. Read the code of both candidates, not only the diff. Findings need a file and a line.",
+            "2. Build your proposal in your working tree: keep what you agree with from either",
+            "   candidate and fix what is wrong.",
+            "3. Where two alternatives are behaviourally equivalent, keep the form already in your tree",
+            "   and record it as kind \"equivalent\". Never rewrite equivalent code just to match.",
+            "4. Build or test if you change code.",
+            "",
+        ]
     lines += [
-        "WORK",
-        "1. Read the code of both candidates, not only the diff. Findings need a file and a line.",
-        "2. Build your proposal in your working tree: keep what you agree with from either",
-        "   candidate and fix what is wrong.",
-        "3. Where two alternatives are behaviourally equivalent, keep the form already in your tree",
-        "   and record it as kind \"equivalent\". Never rewrite equivalent code just to match.",
-        "4. Build or test if you change code.",
-        "",
         "RULES",
-        "- Edit only files inside your working tree.",
+        "- Edit only files inside your working tree, and keep it to your proposal: no copies of the",
+        f"  other candidate, notes or scratch files. Put anything temporary in {context.get('scratch') or '(none)'}.",
+        f"- Never read or edit {other}'s working tree ({context.get('other_worktree') or 'under wt/'}): {other} is",
+        "  changing it while you work. Read the other candidate only from the material above.",
+        "- Never ask the user a question: nobody is watching this run. Decide, and record your",
+        "  reasoning in the review.",
         "- Do NOT run git commit, add, push, checkout, switch, reset, merge, rebase, clean or stash.",
         "  Read-only git (status, diff, show, log) is allowed and encouraged. The orchestrator",
         "  commits and exchanges your result.",
-        "- Do not write anywhere under the run directory except your review path.",
+        "- Do not write anywhere under the run directory except your review path and scratch folder.",
         "- Never claim a test you did not run.",
         "- Finish with the review written. That file is how you are judged done.",
         "",

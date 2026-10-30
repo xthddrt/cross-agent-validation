@@ -15,6 +15,10 @@ from dataclasses import dataclass, field
 
 GIT_DIR = r"C:\Program Files\Git\cmd"
 KIMI_POLL_SECONDS = 3
+# Both agents always run under the ponytail ruleset at this level. OpenCode reads it from the
+# environment; Kimi keeps no level, so each Kimi session activates the skill with it.
+PONYTAIL_LEVEL = "ultra"
+PONYTAIL_SKILL = "ponytail:ponytail"
 
 
 def _noop(*args, **kwargs):
@@ -133,8 +137,13 @@ class OpenCodeAgent(Agent):
             except OSError:
                 pass
 
-    def _env(self):
+    def _env(self, cwd=None):
         env = os.environ.copy()
+        env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
+        if cwd:
+            # OpenCode takes the session directory from PWD, not the process directory, so an
+            # inherited PWD would put every session in the folder `cav` was started from.
+            env["PWD"] = str(cwd)
         path = env.get("PATH", "")
         if GIT_DIR.lower() not in path.lower():
             env["PATH"] = path + os.pathsep + GIT_DIR
@@ -157,7 +166,7 @@ class OpenCodeAgent(Agent):
             self.state.touch("launched")
             self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
                                           stderr=subprocess.STDOUT, text=True,
-                                          encoding="utf-8", errors="replace", env=self._env())
+                                          encoding="utf-8", errors="replace", env=self._env(cwd))
             for line in self._proc.stdout:
                 log.write(line)
                 log.flush()
@@ -198,9 +207,10 @@ class OpenCodeAgent(Agent):
         elif kind == "tool":
             tool = part.get("tool", "?")
             detail = part.get("state") or {}
-            self._event("agent.tool.start", {"tool": tool, "input": detail.get("input")})
-            self._event("agent.tool.end", {"tool": tool, "exit": _find_exit(detail),
-                                           "output_tail": (detail.get("output") or "")[-800:]})
+            call = part.get("callID") or part.get("id")
+            self._event("agent.tool.start", {"tool": tool, "call": call, "input": detail.get("input")})
+            self._event("agent.tool.end", {"tool": tool, "call": call, "exit": _find_exit(detail),
+                                           "output_tail": (detail.get("output") or "")[-4000:]})
             self.state.touch(f"tool:{tool}")
         elif kind == "step-start":
             self.state.touch("step", self.state.messages + 1)
@@ -268,7 +278,8 @@ class KimiAgent(Agent):
 
     def _messages(self):
         data = self._call("GET", f"/api/v1/sessions/{self.session_id}/messages")["data"]
-        return data.get("items", [])
+        # Kimi lists newest first; oldest first keeps events in order and the last text the last
+        return sorted(data.get("items", []), key=lambda message: message.get("created_at") or "")
 
     def _capture(self, items):
         """Emit new and updated parts; also keep the raw transcript the adapter never wrote."""
@@ -293,13 +304,16 @@ class KimiAgent(Agent):
                     self._event("agent.thinking", {"text": part.get("text") or ""})
                 elif kind == "tool_use":
                     self._event("agent.tool.start", {"tool": part.get("tool_name"),
+                                                     "call": part.get("tool_call_id"),
                                                      "input": part.get("input")})
                 elif kind == "tool_result":
                     content = part.get("output") or part.get("content") or ""
                     if not isinstance(content, str):
                         content = json.dumps(content)
+                    # Kimi lists a result before its call, so the dashboard pairs them by id
                     self._event("agent.tool.end", {"tool": part.get("tool_name"),
-                                                   "output_tail": content[-800:]})
+                                                   "call": part.get("tool_call_id"),
+                                                   "output_tail": content[-4000:]})
         self._transcript.flush()
 
     def _pending(self, detail):
@@ -307,6 +321,70 @@ class KimiAgent(Agent):
         if pending in (None, "", "none"):
             return None
         return f"waiting:{pending}"
+
+    def abort(self):
+        super().abort()
+        # Stop the turn in Kimi too: an abandoned turn keeps running, or keeps waiting on a
+        # prompt someone might approve, while a retry edits the same worktree.
+        if self.base and self.session_id:
+            try:
+                self._call("POST", f"/api/v1/sessions/{self.session_id}:abort", {}, timeout=15)
+            except RuntimeError:
+                pass
+
+    def _approve_pending(self):
+        """Approve what Kimi asks even in yolo mode (its dangerous-command guard, e.g. rm -rf).
+
+        Only this session's approvals: the guard itself stays on for every other Kimi session.
+        Returns how many were approved; a question is left alone and still blocks the run.
+        """
+        snapshot = self._call("GET", f"/api/v1/sessions/{self.session_id}/snapshot").get("data") or {}
+        approved = 0
+        for item in snapshot.get("pending_approvals") or []:
+            interaction = item.get("approval_id") or item.get("interaction_id")
+            if not interaction:
+                continue
+            self._call("POST", f"/api/v1/sessions/{self.session_id}/interactions/{interaction}",
+                       {"kind": "approval", "decision": "approved", "scope": "session"})
+            self._event("agent.approved", {"tool": item.get("tool_name"), "action": item.get("action")})
+            approved += 1
+        return approved
+
+    def _dismiss_questions(self):
+        """Nobody answers during a run: dismiss a question so Kimi decides for itself and goes on.
+
+        The round prompt already says never to ask; this covers a question asked anyway.
+        """
+        snapshot = self._call("GET", f"/api/v1/sessions/{self.session_id}/snapshot").get("data") or {}
+        dismissed = 0
+        for item in snapshot.get("pending_questions") or []:
+            interaction = item.get("question_id") or item.get("interaction_id")
+            if not interaction:
+                continue
+            self._call("POST", f"/api/v1/sessions/{self.session_id}/interactions/{interaction}",
+                       {"kind": "question", "dismissed": True})
+            asked = "; ".join(q.get("question", "") for q in item.get("questions") or [] if isinstance(q, dict))
+            self._event("agent.dismissed", {"question": asked})
+            dismissed += 1
+        return dismissed
+
+    def _activate_ponytail(self):
+        skills = self._call("GET", f"/api/v1/sessions/{self.session_id}/skills").get("data") or {}
+        names = [item.get("name") for item in (skills.get("skills") if isinstance(skills, dict) else skills) or []]
+        if PONYTAIL_SKILL not in names:
+            raise RuntimeError("the ponytail plugin is not installed in Kimi Code; CAV runs both agents "
+                               "under ponytail (install it from Kimi's plugins with "
+                               "https://github.com/DietrichGebert/ponytail)")
+        self._call("POST", f"/api/v1/sessions/{self.session_id}/skills/{PONYTAIL_SKILL}:activate",
+                   {"args": PONYTAIL_LEVEL})
+        deadline = time.time() + 180
+        while time.time() < deadline and not self._abort.is_set():
+            detail = self._call("GET", f"/api/v1/sessions/{self.session_id}")["data"]
+            if not (detail.get("busy") or detail.get("main_turn_active")) and detail.get("last_turn_reason"):
+                self._event("agent.skill", {"skill": PONYTAIL_SKILL, "args": PONYTAIL_LEVEL})
+                return
+            time.sleep(KIMI_POLL_SECONDS)
+        raise RuntimeError(f"kimi did not finish activating {PONYTAIL_SKILL} {PONYTAIL_LEVEL}")
 
     def _verify_permission(self, requested):
         """A silently different permission mode means the first tool call blocks on a human."""
@@ -349,6 +427,7 @@ class KimiAgent(Agent):
             "agent_config": self._agent_config(),
         })
         self._verify_permission(self._agent_config()["permission_mode"])
+        self._activate_ponytail()
         self._baseline = self._assistant_count()
         self._part_fingerprints = {}
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
@@ -365,7 +444,13 @@ class KimiAgent(Agent):
             count = sum(1 for m in items if m.get("role") == "assistant")
             busy = detail.get("busy", False) or detail.get("main_turn_active", False)
             waiting = self._pending(detail)
-            if waiting:
+            if waiting == "waiting:approval" and self._approve_pending():
+                self.state.touch("approved")
+                idle = 0
+            elif waiting == "waiting:question" and self._dismiss_questions():
+                self.state.touch("question dismissed")
+                idle = 0
+            elif waiting:
                 # Kimi reports busy=True while it waits for approval, so this must be checked
                 # before the busy branch: otherwise the block is invisible until the round timeout.
                 self.state.detail = waiting

@@ -10,12 +10,10 @@ from . import agents as agent_mod
 from . import config
 from .gitops import git, git_ok
 from .orchestrator import Orchestrator
-from .web import Dashboard
+from .pipeline import Pipeline
+from .web import Dashboard, Home
 
-DEFAULT_MODELS = {
-    "deepseek": ("opencode", "deepseek/deepseek-flash#high"),
-    "kimi": ("kimi", "kimi-code/k3.1-pro"),
-}
+DEFAULT_MODELS = config.DEFAULT_MODELS
 
 
 def _execute(orchestrator, dashboard, port):
@@ -108,6 +106,20 @@ def cmd_web(args):
     return 0
 
 
+def cmd_pipeline(args):
+    prompt = pathlib.Path(args.prompt_file).read_text(encoding="utf-8")
+    run_dir = args.run_dir or pathlib.Path("runs") / f"pipeline-{time.strftime('%Y%m%d-%H%M%S')}"
+    return Pipeline(args.repo, prompt, run_dir, resume=args.resume).run()
+
+
+def cmd_serve(args):
+    home = Home(port=args.port, open_browser=args.open)
+    if sys.stdout is None:  # pythonw at login has no console: keep a log instead of losing output
+        sys.stdout = sys.stderr = open(home.runs_dir / "serve.log", "a", buffering=1, encoding="utf-8")
+    home.serve_forever()
+    return 0
+
+
 def cmd_smoke(args):
     case = config.load(args.case)
     work = pathlib.Path(args.dir or (pathlib.Path("runs") / "_smoke")).resolve()
@@ -167,6 +179,18 @@ def main(argv=None):
     web.add_argument("--port", type=int, default=7717)
     web.add_argument("--open", action="store_true")
     web.set_defaults(func=cmd_web)
+
+    pipeline = sub.add_parser("pipeline", help="plan, agree on the plan, implement, agree on code, merge and push")
+    pipeline.add_argument("--repo", required=True, help="local repo path or GitHub URL")
+    pipeline.add_argument("--prompt-file", required=True)
+    pipeline.add_argument("--run-dir", default=None)
+    pipeline.add_argument("--resume", action="store_true", help="continue the pipeline in --run-dir")
+    pipeline.set_defaults(func=cmd_pipeline)
+
+    serve = sub.add_parser("serve", help="the home dashboard: every run, and a form to start a pipeline")
+    serve.add_argument("--port", type=int, default=7700)
+    serve.add_argument("--open", action="store_true")
+    serve.set_defaults(func=cmd_serve)
 
     smoke = sub.add_parser("smoke", help="check both agents answer a trivial prompt")
     smoke.add_argument("--case", required=True)

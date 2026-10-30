@@ -87,23 +87,40 @@
   .links button { background:none; border:1px solid var(--line); border-radius:6px; padding:1px 9px; font-size:12.5px; color:var(--dim); }
   .links button:hover { color:var(--accent); border-color:var(--accent); }
 
-  .feed { height:52vh; min-height:280px; overflow-y:auto; padding:10px 14px 16px; display:flex; flex-direction:column; gap:6px; }
-  .msg { background:var(--sunk); border:1px solid var(--line); border-radius:8px; padding:8px 11px; white-space:pre-wrap;
-         overflow-wrap:anywhere; max-height:16em; overflow:hidden; position:relative; cursor:pointer; }
-  .msg.open { max-height:none; }
-  .msg:not(.open).long::after { content:"click to expand"; position:absolute; left:0; right:0; bottom:0; padding:18px 11px 4px;
-                                font-size:12px; color:var(--accent); background:linear-gradient(transparent, var(--sunk) 60%); }
-  .msg .ts { display:block; font-size:11px; color:var(--dim); margin-bottom:2px; }
-  .msg.think { font-style:italic; color:var(--dim); }
-  .tool { font-family:var(--mono); font-size:12px; color:var(--dim); padding:1px 0 1px 10px; border-left:2px solid var(--line);
-          white-space:nowrap; overflow:hidden; text-overflow:ellipsis; cursor:default; }
-  .tool .t { color:var(--fg); }
-  .tool.fail { border-left-color:var(--bad); }
-  .tool.fail .x { color:var(--bad); }
-  .tool.has-out { cursor:pointer; }
-  .tool.open { white-space:normal; }
-  .tool.open pre { display:block; }
-  .tool pre { display:none; margin:4px 0 2px; white-space:pre-wrap; max-height:220px; overflow:auto; background:var(--sunk); padding:6px 8px; border-radius:6px; }
+  /* agent transcript: messages as prose, tool calls as rows that expand */
+  .feed { height:62vh; min-height:320px; overflow-y:auto; padding:12px 14px 18px; display:flex; flex-direction:column; gap:1px; font-size:13.5px; }
+  .it { min-width:0; flex:none; }
+  .it .head { display:flex; align-items:baseline; gap:8px; padding:3px 6px; border-radius:6px; min-width:0; }
+  .it.x > .head { cursor:pointer; }
+  .it.x > .head:hover { background:var(--sunk); }
+  .head .car { width:10px; flex:none; color:var(--dim); font-size:10px; display:inline-block; }
+  .it.open > .head .car { transform:rotate(90deg); }
+  .head .st { flex:none; width:12px; text-align:center; font-size:11px; }
+  .st.run::before { content:"●"; color:var(--accent); animation:pulse 1.2s infinite; }
+  .st.ok::before { content:"✓"; color:var(--ok); opacity:.7; }
+  .st.fail::before { content:"✕"; color:var(--bad); }
+  .head .verb { font-weight:600; flex:none; }
+  .head .tgt { font-family:var(--mono); font-size:12.5px; color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .head .ex { margin-left:auto; padding-left:8px; flex:none; font-size:12px; color:var(--dim); font-family:var(--mono); }
+  .it .body { margin:2px 0 8px 15px; border-left:2px solid var(--line); padding:4px 0 4px 12px; min-width:0; }
+  .body pre, .md pre { margin:4px 0; white-space:pre-wrap; overflow-wrap:anywhere; font-family:var(--mono); font-size:12px; line-height:1.5;
+                       background:var(--sunk); border:1px solid var(--line); border-radius:6px; padding:8px 10px; max-height:420px; overflow:auto; }
+  .body .note { font-size:12px; color:var(--dim); }
+  .it.text { padding:8px 6px; }
+  .it.text .when { font-size:11px; color:var(--dim); margin-bottom:2px; }
+  .md { line-height:1.6; overflow-wrap:anywhere; }
+  .md p { margin:0 0 8px; } .md p:last-child { margin-bottom:0; }
+  .md ul, .md ol { margin:0 0 8px; padding-left:22px; }
+  .md h5 { margin:10px 0 4px; font-size:14px; }
+  .md code { font-family:var(--mono); font-size:12.5px; background:var(--sunk); padding:1px 5px; border-radius:4px; }
+  .md.clip { max-height:24em; overflow:hidden; -webkit-mask-image:linear-gradient(#000 75%, transparent); mask-image:linear-gradient(#000 75%, transparent); }
+  .it.text .more { color:var(--accent); font-size:12.5px; }
+  .it.think .md { color:var(--dim); font-style:italic; }
+  .todo { list-style:none; margin:0 0 6px 24px; padding:0; font-size:13px; }
+  .todo li { display:flex; gap:8px; }
+  .todo .g { width:12px; flex:none; text-align:center; color:var(--dim); }
+  .todo .done { color:var(--dim); text-decoration:line-through; }
+  .todo .doing { color:var(--accent); }
   .divider { text-align:center; font-size:12px; color:var(--dim); margin:6px 0; display:flex; align-items:center; gap:10px; }
   .divider::before, .divider::after { content:""; flex:1; height:1px; background:var(--line); }
   .empty { color:var(--dim); font-style:italic; margin:auto; }
@@ -146,6 +163,21 @@
   .mbody h4 { margin:16px 0 6px; font-size:13px; color:var(--dim); }
   .mbody h4:first-child { margin-top:0; }
 
+  /* pipeline bar: shown when the page is a stage of a pipeline on the home server */
+  #pipe { padding:10px 16px; display:flex; flex-direction:column; gap:8px; }
+  #pipe .prow { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #pipe a { color:var(--accent); text-decoration:none; }
+  #pipe .repo { font-family:var(--mono); font-size:12.5px; color:var(--dim); overflow-wrap:anywhere; }
+  .stagetabs { display:flex; gap:6px; }
+  .stagetabs a { border:1px solid var(--line); border-radius:8px; padding:4px 12px; color:var(--fg) !important; }
+  .stagetabs a.on { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .stagetabs a.off { opacity:.45; pointer-events:none; }
+  .stagetabs span { color:var(--dim); font-size:12px; margin-left:6px; }
+  #pipe .detail { color:var(--dim); font-size:13px; overflow-wrap:anywhere; }
+  #pipe details pre { white-space:pre-wrap; overflow-wrap:anywhere; font-family:var(--mono); font-size:12.5px; background:var(--sunk);
+                      padding:8px 10px; border-radius:6px; max-height:240px; overflow:auto; margin:6px 0 0; }
+  #sumbtn { background:var(--warn-bg); color:var(--warn); border:0; border-radius:999px; padding:3px 12px; font-size:13px; font-weight:600; }
+
   @media (max-width: 1000px) {
     .agents, .agree { grid-template-columns:1fr; }
     .steps { grid-template-columns:repeat(4, 1fr); row-gap:14px; }
@@ -163,8 +195,11 @@
   <header>
     <h1 id="case">CAV</h1>
     <span class="badge" id="status">connecting</span>
+    <button id="sumbtn" hidden>How far apart</button>
     <span id="meta"></span>
   </header>
+
+  <section class="card" id="pipe" hidden></section>
 
   <nav id="tabs"></nav>
 
@@ -190,7 +225,10 @@
 </dialog>
 
 <script>
-const TOKEN = location.pathname.split('/').filter(Boolean)[0];
+// the page is mounted at /<token>/ (one run) or /<token>/run/<id>/[plan|code]/ (the home server)
+const BASE = location.pathname.replace(/\/+$/, '');
+const TOKEN = BASE.split('/').filter(Boolean)[0];
+const STAGE = BASE.match(/^(\/[^/]+\/run\/[^/]+)(?:\/(plan|code))?$/);  // [_, run base, stage]
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sha = (s) => String(s || '').slice(0, 8);
@@ -206,7 +244,7 @@ function dur(sec) {
 }
 async function api(name, query = {}) {
   try {
-    const r = await fetch(`/${TOKEN}/api/${name}?` + new URLSearchParams(query), {cache:'no-store'});
+    const r = await fetch(`${BASE}/api/${name}?` + new URLSearchParams(query), {cache:'no-store'});
     return r.ok ? await r.text() : '';
   } catch (e) { return ''; }
 }
@@ -223,7 +261,7 @@ function R(n) {
 }
 function A(r, name) {
   return r.agents[name] ||= {name, model:null, launch:null, last:null, done:null,
-                             steps:0, tools:0, texts:0, feed:[]};
+                             steps:0, tools:0, texts:0, feed:[], pending:[], early:[], unpaired:0};
 }
 function toolTarget(input) {
   if (!input || typeof input !== 'object') return '';
@@ -231,7 +269,102 @@ function toolTarget(input) {
     if (input[k]) return String(input[k]);
   return JSON.stringify(input).slice(0, 160);
 }
-function refresh(item) { if (item.el) fillItem(item.el, item); }
+// a child of a read/search group is redrawn through its group
+function refresh(item) { const top = item.parent || item; if (top.el) fillItem(top.el, top); }
+
+// --------------------------------------------------------- tool calls
+const EXPLORE = /^(read|readfile|glob|grep|list|ls|search|find|codesearch|searchfiles)$/i;
+const SHELL = /^(shell|bash|powershell|cmd|run|exec|shellexec)$/i;
+const WRITE = /^(write|writefile|createfile)$/i;
+const TODO = /^todo/i;
+const first = (o, keys) => { for (const k of keys) if (o && o[k] !== undefined && o[k] !== null) return o[k]; };
+
+// Worktree paths are long and identical on every row: show them relative to the agent's own tree.
+function shorten(text, agent) {
+  return String(text ?? '')
+    .replace(/(?:[A-Za-z]:[\\/][^"'\n<>|:*?]*?[\\/]|\bruns[\\/][^\\/"'\s]+[\\/])wt[\\/]r\d+[\\/]([A-Za-z0-9_-]+)([\\/]|(?=["'\s]|$))/g,
+             (m, who, sep) => who === agent ? (sep ? '' : '.') : `‹${who}›${sep}`)
+    .replace(/[A-Za-z]:[\\/][^"'\n<>|:*?]*?[\\/]runs[\\/][^\\/"'\s]+(?=[\\/"'\s]|$)/g, '‹run›');
+}
+
+function edits(i) {
+  const list = Array.isArray(i.edits) ? i.edits : i.edit && typeof i.edit === 'object' ? [i.edit] : [i];
+  return list.map(e => ({old:first(e, ['oldString', 'old_string', 'old_str', 'old']),
+                         new:first(e, ['newString', 'new_string', 'new_str', 'new'])}))
+             .filter(e => e.new !== undefined);
+}
+
+function toolInfo(t) {
+  const n = t.tool || 'tool', i = t.input && typeof t.input === 'object' ? t.input : {};
+  const s = (x) => shorten(x, t.agent);
+  const path = s(first(i, ['filePath', 'file_path', 'path']) || '');
+  if (TODO.test(n)) return {kind:'todo', verb:'Todos'};
+  if (SHELL.test(n)) return {kind:'shell', verb:'Run', target:s(first(i, ['command', 'cmd']) || '')};
+  if (EXPLORE.test(n)) {
+    if (/^read/i.test(n)) {
+      const from = first(i, ['offset', 'line_offset']), count = first(i, ['limit', 'n_lines']);
+      const range = from || count ? `lines ${from || 1}${count ? `–${(from || 1) + count - 1}` : '+'}` : '';
+      return {kind:'read', verb:'Read', target:path, extra:range};
+    }
+    const pattern = first(i, ['pattern', 'query', 'glob']) || '';
+    return {kind:'search', verb:'Search', target:`${pattern}${path ? `  in ${path}` : ''}`};
+  }
+  const ed = edits(i);
+  if (ed.length && (/edit|replace/i.test(n) || ed.some(e => e.old !== undefined)))
+    return {kind:'edit', verb:'Edit', target:path, edits:ed};
+  if (WRITE.test(n)) return {kind:'write', verb:'Write', target:path, content:String(first(i, ['content', 'text']) ?? '')};
+  return {kind:'other', verb:n, target:s(toolTarget(i))};
+}
+
+function addTool(a, item) {
+  // Kimi re-sends a tool call while it fills in: update the open call instead of adding another
+  const same = a.pending.find(p => item.call ? p.call === item.call
+                                             : p.tool === item.tool && toolTarget(p.input) === toolTarget(item.input));
+  if (same) { same.input = item.input; same.info = toolInfo(same); refresh(same); return; }
+  item.info = toolInfo(item);
+  a.tools++;
+  // Kimi lists a result before its call, so the result may already be waiting
+  const early = item.call ? a.early.findIndex(e => e.call === item.call) : -1;
+  if (early >= 0) finishTool(item, a.early.splice(early, 1)[0]);
+  else if (!item.call && a.unpaired > 0) { a.unpaired--; finishTool(item, null); }
+  else a.pending.push(item);
+  const last = a.feed[a.feed.length - 1];
+  if (item.info.kind === 'read' || item.info.kind === 'search') {
+    if (last && last.k === 'group') { item.parent = last; last.items.push(item); refresh(last); return; }
+    const group = {k:'group', items:[item], ts:item.ts};
+    item.parent = group;
+    a.feed.push(group);
+    return;
+  }
+  a.feed.push(item);
+}
+
+function endTool(a, d) {
+  if (d.call) {
+    const idx = a.pending.findIndex(p => p.call === d.call);
+    if (idx >= 0) finishTool(a.pending.splice(idx, 1)[0], d);
+    else a.early.push(d);
+    return;
+  }
+  if (d.tool) {
+    const idx = a.pending.findIndex(p => p.tool === d.tool);
+    if (idx >= 0) finishTool(a.pending.splice(idx, 1)[0], d);
+    return;
+  }
+  // Runs from before call ids: Kimi results name no tool and arrive in a different order
+  // from their calls, so they only mark a call finished; attaching them would show wrong output.
+  if (a.pending.length) finishTool(a.pending.shift(), null);
+  else a.unpaired++;
+}
+
+function finishTool(item, d) {
+  item.done = true;
+  if (!d) { item.unpaired = true; item.fail = false; refresh(item); return; }
+  item.exit = typeof d.exit === 'number' ? d.exit : null;
+  item.out = shorten(d.output_tail || '', item.agent);
+  item.fail = (item.exit !== null && item.exit !== 0) || /^\s*(<system>)?\s*(error|tool error)\b/i.test(item.out);
+  refresh(item);
+}
 
 function apply(e) {
   const d = e.data || {}, t = e.type, who = e.agent, ts = e.ts ? Date.parse(e.ts) : Date.now();
@@ -249,37 +382,32 @@ function apply(e) {
     case 'round.start': r.start = ts; break;
     case 'agent.launch':
       if (a.launch) a.feed.push({k:'div', text:'retry'});
+      a.pending = []; a.early = []; a.unpaired = 0;
       a.launch = ts; a.done = null; a.model = d.model || a.model;
       break;
     case 'agent.text':
     case 'agent.thinking': {
-      const text = d.text || '';
-      if (!text.trim()) break;
-      const kind = t === 'agent.text' ? 'text' : 'think';
+      // Kimi's transcript includes the injected system reminders and the round prompt itself
+      const text = (d.text || '').replace(/<system-reminder>[\s\S]*?(<\/system-reminder>|$)/g, '').trim();
+      if (!text) break;
+      let kind = t === 'agent.text' ? 'text' : 'think';
+      if (kind === 'text' && text.startsWith(`You are ${who}, one of two`)) kind = 'prompt';
+      if (kind === 'text' && text.startsWith('User activated the skill')) break;  // shown by agent.skill
       const last = a.feed[a.feed.length - 1];
       // Kimi re-emits a part every time it grows: replace the growing message instead of repeating it.
       if (last && last.k === kind && text.startsWith(last.text)) { last.text = text; refresh(last); }
       else { a.feed.push({k:kind, text, ts}); if (kind === 'text') a.texts++; }
       break;
     }
-    case 'agent.tool.start': {
-      const item = {k:'tool', tool:d.tool || 'tool', target:toolTarget(d.input), ts};
-      const last = a.feed[a.feed.length - 1];
-      if (last && last.k === 'tool' && last.exit === undefined && last.tool === item.tool && last.target === item.target) break;
-      a.feed.push(item); a.tools++;
+    case 'agent.tool.start':
+      addTool(a, {k:'tool', agent:who, tool:d.tool || 'tool', call:d.call, input:d.input, ts});
       break;
-    }
     case 'agent.tool.end':
-      for (let i = a.feed.length - 1; i >= 0; i--) {
-        const f = a.feed[i];
-        if (f.k === 'tool' && f.exit === undefined && f.tool === (d.tool || 'tool')) {
-          f.exit = typeof d.exit === 'number' ? d.exit : null;
-          f.out = d.output_tail || '';
-          refresh(f);
-          break;
-        }
-      }
+      endTool(a, d);
       break;
+    case 'agent.skill': a.feed.push({k:'div', text:`${d.skill} ${d.args || ''} activated`}); break;
+    case 'agent.approved': a.feed.push({k:'div', text:`auto-approved: ${d.action || d.tool || 'tool call'}`}); break;
+    case 'agent.dismissed': a.feed.push({k:'div', text:`question dismissed (nobody answers during a run): ${d.question || ''}`}); break;
     case 'agent.step': a.steps = d.messages || a.steps; break;
     case 'agent.done': a.done = {ok:d.ok, reason:d.reason, ts}; break;
     case 'agent.retry': r.notes.push(['warn', `Retry ${d.attempt} for ${(d.agents || []).join(' and ')}: the previous attempt left no usable review`]); break;
@@ -412,6 +540,47 @@ function renderHeader() {
     if (age > 300) html += ` · <span class="stale">no state update for ${dur(age)}</span>`;
   }
   $('meta').innerHTML = html;
+  $('sumbtn').hidden = state.phase !== 'disagreement';
+}
+
+// ------------------------------------------------------------ pipeline
+let pipe = null;
+async function pollPipeline() {
+  if (!STAGE) return;
+  try {
+    const r = await fetch(`${STAGE[1]}/api/pipeline`, {cache:'no-store'});
+    pipe = r.ok ? await r.json() : {};
+  } catch (e) { return; }
+  renderPipeline();
+}
+function renderPipeline() {
+  const el = $('pipe');
+  if (!STAGE || !pipe) return;
+  el.hidden = false;
+  const home = `<a href="/${TOKEN}/">← All runs</a>`;
+  if (!pipe.id) { setHtml(el, `<div class="prow">${home}</div>`); return; }
+  const stageText = (name) => {
+    const s = (pipe.stages || {})[name];
+    if (!s) return 'not started';
+    if (s.agreed) return 'agreed';
+    if (s.phase === 'disagreement') return 'no agreement';
+    if (/failed$/.test(s.phase || '')) return 'failed';
+    return pipe.stage === name ? `round ${s.round || 1}` : (s.phase || '');
+  };
+  const tabs = ['plan', 'code'].map((name, i) =>
+    `<a href="${STAGE[1]}/${name}/" class="${STAGE[2] === name ? 'on' : ''}${(pipe.stages || {})[name] ? '' : ' off'}">` +
+    `${i + 1} ${name === 'plan' ? 'Plan' : 'Code'}<span>${esc(stageText(name))}</span></a>`).join('');
+  let cls = 'run', text = `running · ${pipe.stage || 'starting'}`;
+  if (pipe.stage === 'failed') { cls = 'bad'; text = 'failed'; }
+  else if (pipe.stopped) { cls = 'bad'; text = 'stopped'; }
+  else if (pipe.outcome === 'merged and pushed') { cls = 'ok'; text = pipe.outcome; }
+  else if (pipe.outcome) { cls = 'warn'; text = pipe.outcome; }
+  const detail = pipe.stopped ? 'the pipeline process ended without recording an outcome; see pipeline.log' : pipe.detail;
+  setHtml(el, `<div class="prow">${home}<nav class="stagetabs">${tabs}</nav>` +
+    `<span class="badge ${cls}">${esc(text)}</span><span class="repo">${esc(pipe.repo || pipe.repo_input || '')}` +
+    `${pipe.branch ? ` → ${esc(pipe.branch)}` : ''}</span></div>` +
+    (detail ? `<div class="detail">${esc(detail)}</div>` : '') +
+    `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
 function renderTabs() {
@@ -453,8 +622,11 @@ function cardSkeleton(i) {
     `<button data-m="prompt">Prompt</button><button data-m="review">Review</button><button data-m="checks">Checks</button>` +
     `</span></div></div><div class="feed"></div>`;
   el.querySelector('.feed').addEventListener('click', (ev) => {
-    const item = ev.target.closest('.msg, .tool.has-out');
-    if (item) item.classList.toggle('open');
+    const head = ev.target.closest('.head');
+    const node = head && head.closest('.it');
+    if (!node || !node._item || !node.classList.contains('x')) return;
+    node._item.open = !node._item.open;
+    refresh(node._item);
   });
   el.querySelectorAll('[data-m]').forEach(btn => btn.onclick = () => names[i] && selected && openModal(btn.dataset.m, selected, names[i]));
   const part = (sel) => el.querySelector(sel);
@@ -463,22 +635,136 @@ function cardSkeleton(i) {
 // only touch the DOM when the content changed, so clicks and scroll positions survive the 1s tick
 function setHtml(el, html) { if (el._html !== html) { el._html = html; el.innerHTML = html; } }
 
-function fillItem(el, item) {
-  if (item.k === 'tool') {
-    const fail = typeof item.exit === 'number' && item.exit !== 0;
-    el.className = 'tool' + (fail ? ' fail' : '') + (item.out ? ' has-out' : '') + (el.classList.contains('open') ? ' open' : '');
-    el.innerHTML = `<span class="t">${esc(item.tool)}</span> ${esc(item.target)}` +
-                   (fail ? ` <span class="x">exit ${item.exit}</span>` : '') +
-                   (item.out ? `<pre>${esc(item.out)}</pre>` : '');
-  } else if (item.k === 'div') {
-    el.className = 'divider'; el.textContent = item.text;
-  } else {
-    const open = el.classList.contains('open');
-    el.className = 'msg' + (item.k === 'think' ? ' think' : '') + (open ? ' open' : '');
-    const stamp = item.ts ? new Date(item.ts).toLocaleTimeString() : '';
-    el.innerHTML = `<span class="ts">${item.k === 'think' ? 'thinking · ' : ''}${esc(stamp)}</span>${esc(item.text)}`;
-    el.classList.toggle('long', item.text.length > 700 || item.text.split('\n').length > 14);
+// Small markdown subset for agent messages: fences, headings, lists, inline code, bold.
+function md(src) {
+  const out = [], lines = String(src).split('\n');
+  let para = [], list = null;
+  const inline = (s) => esc(s).replace(/`([^`]+)`/g, '<code>$1</code>').replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>');
+  const endPara = () => { if (para.length) out.push(`<p>${para.map(inline).join('<br>')}</p>`); para = []; };
+  const endList = () => { if (list) out.push(`<${list.t}>${list.items.map(x => `<li>${inline(x)}</li>`).join('')}</${list.t}>`); list = null; };
+  for (let i = 0; i < lines.length; i++) {
+    const l = lines[i];
+    let m;
+    if (/^\s*```/.test(l)) {
+      endPara(); endList();
+      const buf = [];
+      while (++i < lines.length && !/^\s*```/.test(lines[i])) buf.push(lines[i]);
+      out.push(`<pre>${esc(buf.join('\n'))}</pre>`);
+    } else if ((m = l.match(/^#{1,6}\s+(.*)/))) { endPara(); endList(); out.push(`<h5>${inline(m[1])}</h5>`); }
+    else if ((m = l.match(/^\s*(?:[-*]|(\d+)[.)])\s+(.*)/))) {
+      endPara();
+      const t = m[1] ? 'ol' : 'ul';
+      if (list && list.t !== t) endList();
+      (list ||= {t, items:[]}).items.push(m[2]);
+    } else if (!l.trim()) { endPara(); endList(); }
+    else { endList(); para.push(l); }
   }
+  endPara(); endList();
+  return out.join('');
+}
+
+function diffHtml(oldS, newS) {
+  const a = String(oldS ?? '').split('\n'), b = String(newS ?? '').split('\n');
+  let p = 0, s = 0;
+  while (p < a.length && p < b.length && a[p] === b[p]) p++;
+  while (s < a.length - p && s < b.length - p && a[a.length - 1 - s] === b[b.length - 1 - s]) s++;
+  const rows = [];
+  for (let k = Math.max(0, p - 2); k < p; k++) rows.push(['m', '  ' + a[k]]);
+  for (let k = p; k < a.length - s; k++) rows.push(['r', '- ' + a[k]]);
+  for (let k = p; k < b.length - s; k++) rows.push(['a', '+ ' + b[k]]);
+  for (let k = a.length - s; k < Math.min(a.length, a.length - s + 2); k++) rows.push(['m', '  ' + a[k]]);
+  return {html:`<pre class="diff">${rows.map(([c, x]) => `<span class="${c}">${esc(x)}</span>`).join('\n')}</pre>`,
+          add:b.length - s - p, del:a.length - s - p};
+}
+
+const clock = (ts) => ts ? new Date(ts).toLocaleTimeString() : '';
+const isLong = (text) => text.split('\n').length > 30 || text.length > 2500;
+function head({car = true, st = '', verb = '', target = '', extra = '', title = ''}) {
+  return `<div class="head" title="${esc(title)}"><span class="car">${car ? '▶' : ''}</span>` +
+         (st ? `<span class="st ${st}"></span>` : '') +
+         `<span class="verb">${verb}</span><span class="tgt">${esc(target)}</span>` +
+         (extra ? `<span class="ex">${extra}</span>` : '') + '</div>';
+}
+function expandable(item) {
+  if (item.k === 'text') return isLong(item.text);
+  if (item.k === 'tool') return item.info.kind !== 'todo';
+  return item.k === 'group' || item.k === 'prompt' || item.k === 'think';
+}
+const itemClass = (item) => `it ${item.k}${expandable(item) ? ' x' : ''}${item.open ? ' open' : ''}`;
+
+function outHtml(t) {
+  if (!t.done) return '<div class="note">running…</div>';
+  if (t.unpaired) return '<div class="note">output not shown: this run recorded no call id to match it to</div>';
+  if (!t.out) return t.info.kind === 'edit' || t.info.kind === 'write' ? '' : '<div class="note">no output</div>';
+  const cut = t.out.length === 800 || t.out.length === 4000 ? `<div class="note">output: last ${t.out.length} characters</div>` : '';
+  return cut + `<pre>${esc(t.out)}</pre>`;
+}
+
+function toolHtml(t) {
+  const info = t.info, st = !t.done ? 'run' : t.fail ? 'fail' : 'ok';
+  const title = `${t.tool} · ${clock(t.ts)}`;
+  if (info.kind === 'todo') {
+    const todos = (t.input && (t.input.todos || t.input.items)) || [];
+    const done = todos.filter(x => /complete|done/i.test(x.status || '')).length;
+    return head({car:false, verb:'Todos', extra:`${done}/${todos.length}`, title}) +
+      `<ul class="todo">${todos.map(x => {
+        const s = x.status || '', cls = /complete|done/i.test(s) ? 'done' : /progress/i.test(s) ? 'doing' : '';
+        return `<li class="${cls}"><span class="g">${cls === 'done' ? '✓' : cls === 'doing' ? '▸' : '○'}</span>` +
+               `<span>${esc(x.title || x.content || x.text || '')}</span></li>`;
+      }).join('')}</ul>`;
+  }
+  let extra = esc(info.extra || ''), body = '';
+  if (info.kind === 'edit') {
+    const diffs = info.edits.map(e => diffHtml(e.old, e.new));
+    const add = diffs.reduce((n, d) => n + d.add, 0), del = diffs.reduce((n, d) => n + d.del, 0);
+    extra = `<span class="add">+${add}</span> <span class="del">-${del}</span>`;
+    if (t.open) body = diffs.map(d => d.html).join('');
+  } else if (info.kind === 'write') {
+    extra = `${info.content.split('\n').length} lines`;
+    if (t.open) body = `<pre>${esc(info.content)}</pre>`;
+  } else if (info.kind === 'shell') {
+    if (t.open) body = `<pre>$ ${esc(info.target)}</pre>`;
+  } else if (info.kind === 'other') {
+    if (t.open && t.input) body = `<pre>${esc(shorten(JSON.stringify(t.input, null, 2), t.agent))}</pre>`;
+  }
+  if (t.fail) extra = `<span class="del">${t.exit ? `exit ${t.exit}` : 'error'}</span>`;
+  return head({st, verb:esc(info.verb), target:info.target, extra, title}) +
+         (t.open ? `<div class="body">${body}${outHtml(t)}</div>` : '');
+}
+
+function groupHtml(g) {
+  const reads = g.items.filter(x => x.info.kind === 'read').length, searches = g.items.length - reads;
+  const parts = [reads && plural(reads, 'file') + ' read', searches && plural(searches, 'search')].filter(Boolean);
+  const st = g.items.some(x => !x.done) ? 'run' : g.items.some(x => x.fail) ? 'fail' : 'ok';
+  const latest = g.items[g.items.length - 1].info.target;
+  return head({st, verb:'Explored', target:g.open ? '' : latest, extra:esc(parts.join(' · ')), title:clock(g.ts)}) +
+    (g.open ? `<div class="body">${g.items.map((c, n) => `<div class="${itemClass(c)}" data-c="${n}">${toolHtml(c)}</div>`).join('')}</div>` : '');
+}
+
+function itemHtml(item) {
+  if (item.k === 'tool') return toolHtml(item);
+  if (item.k === 'group') return groupHtml(item);
+  if (item.k === 'prompt') {
+    return head({verb:'Prompt', target:'round instructions from the orchestrator', extra:`${item.text.split('\n').length} lines`,
+                 title:clock(item.ts)}) + (item.open ? `<div class="body"><pre>${esc(item.text)}</pre></div>` : '');
+  }
+  if (item.k === 'think') {
+    return head({verb:'Thinking', target:item.open ? '' : item.text.split('\n')[0], title:clock(item.ts)}) +
+           (item.open ? `<div class="body md">${md(item.text)}</div>` : '');
+  }
+  const long = isLong(item.text);
+  return `<div class="when">${esc(clock(item.ts))}</div><div class="md${long && !item.open ? ' clip' : ''}">${md(item.text)}</div>` +
+         (long ? `<div class="head more">${item.open ? 'Show less' : `Show all · ${item.text.split('\n').length} lines`}</div>` : '');
+}
+
+function fillItem(el, item) {
+  if (item.k === 'div') { el.className = 'divider'; el.textContent = item.text; return; }
+  // a group of one call is shown as that call
+  const shown = item.k === 'group' && item.items.length === 1 ? item.items[0] : item;
+  el._item = shown;
+  el.className = itemClass(shown);
+  el.innerHTML = itemHtml(shown);
+  if (shown.k === 'group') el.querySelectorAll('[data-c]').forEach(c => c._item = shown.items[+c.dataset.c]);
 }
 
 function renderAgent(i) {
@@ -605,13 +891,16 @@ async function renderDivergence() {
 
 // ---------------------------------------------------------------- modal
 async function openModal(kind, round, arg) {
-  const titles = {prompt:`Prompt sent to ${arg} · round ${round}`, review:`${arg}'s review · round ${round}`,
+  const titles = {summary:'How far apart the two candidates ended', prompt:`Prompt sent to ${arg} · round ${round}`, review:`${arg}'s review · round ${round}`,
                   checks:`${arg}'s checks · round ${round}`, diff:`${arg} · round ${round}`};
   $('mtitle').textContent = titles[kind];
   $('mbody').innerHTML = '<div class="dim">loading…</div>';
   $('modal').showModal();
   let html = '';
-  if (kind === 'prompt') {
+  if (kind === 'summary') {
+    const body = parse(await api('summary')) || {};
+    html = body.summary ? `<pre>${esc(body.summary)}</pre>` : '<div class="dim">No summary written.</div>';
+  } else if (kind === 'prompt') {
     const body = parse(await api('prompt', {round, agent:arg})) || {};
     html = body.prompt ? `<pre>${esc(body.prompt)}</pre>` : '<div class="dim">No prompt recorded for this round.</div>';
   } else if (kind === 'review') {
@@ -682,7 +971,7 @@ async function poll() {
 
 let lastSeq = 0;
 function connect() {
-  const es = new EventSource(`/${TOKEN}/events?after=${lastSeq}`);
+  const es = new EventSource(`${BASE}/events?after=${lastSeq}`);
   es.onmessage = (m) => {
     const e = parse(m.data);
     if (!e || (e.seq || 0) <= lastSeq) return;
@@ -694,7 +983,9 @@ function connect() {
 }
 
 cardSkeleton(0); cardSkeleton(1);
-poll(); connect();
+$('sumbtn').onclick = () => openModal('summary', selected, '');
+poll(); connect(); pollPipeline();
+setInterval(pollPipeline, 3000);
 setInterval(poll, 2000);
 setInterval(schedule, 1000);   // keeps elapsed / idle ticking
 </script>

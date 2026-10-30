@@ -14,9 +14,24 @@ py -m cav smoke  --case cases\msmon-five-phase.local.json
 py -m cav run    --case cases\msmon-five-phase.local.json [--run-dir runs\<id>] [--resume] [--push] [--dashboard]
 py -m cav solve  --repo <path> --prompt task.md [--checks C]...
 py -m cav web    --run runs\<id> [--open]
+py -m cav serve  [--port 7700] [--open]
+py -m cav pipeline --repo <path or GitHub URL> --prompt-file task.md [--run-dir runs\<id>] [--resume]
 ```
 
 On Windows use `py` rather than `python`: the bare `python` on PATH is the Microsoft Store stub.
+
+## Starting a run from the dashboard
+
+`py -m cav serve` is the home dashboard: every run under `runs\`, and a **New run** form that takes a repo (a local path, or a GitHub URL cloned to `Documents\Default Project\<repo>` or reused if that folder already has the same origin) and a prompt. Its link is fixed: the token is kept in `runs\serve.json`, which also records the URL. A Startup shortcut (`CAV dashboard.lnk`, running `pyw -m cav serve` in this folder) starts it at login; its output goes to `runs\serve.log`.
+
+The form starts `cav pipeline` as its own process, so a run outlives the server:
+
+1. **Plan** — each agent writes `CAV-PLAN.md` independently, then up to 3 review rounds of the usual loop over the two plans.
+2. **Code** — both agents implement the agreed plan from the base commit, or, without agreement, each implements its own last plan. Then up to 3 review rounds over the two branches.
+3. **Agreement** — the agreed commit is pushed to origin's default branch; if that branch moved during the run it is merged first, and a conflicting merge is refused, not pushed.
+4. **No agreement** — the stage's `SUMMARY.md` (also the dashboard's *How far apart* button) lists, from the reviews and trees, the round-by-round trend, the files that still differ and each agent's blocking findings and open disagreements.
+
+Each stage is an ordinary run directory (`runs\<id>\plan`, `runs\<id>\code`) with its own dashboard; the pipeline's state is `runs\<id>\pipeline.json` and its output `pipeline.log`. Defaults for now: the two agents and models below, no check commands, 90 minutes per round.
 
 ## What a run does
 
@@ -39,7 +54,8 @@ Refusing approval requires a behavioural `MUST_FIX` finding with a real path and
 
 - Windows with Git installed (`C:\Program Files\Git\cmd\git.exe` is used if `git` is not on `PATH`).
 - OpenCode desktop installed (its bundled `opencode-cli.exe` is used).
-- Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`).
+- Kimi Code desktop **running** (the tool talks to its local HTTP API using `~/.kimi-code/server.token`). Sessions run in yolo mode, and CAV approves the prompts Kimi's dangerous-command guard still raises (e.g. `rm -rf`) for its own sessions only. A question to the user is dismissed, so the agent decides for itself; the round prompt also tells both agents never to ask.
+- [Ponytail](https://github.com/DietrichGebert/ponytail) in both agents: CAV runs them at level `ultra` (`PONYTAIL_LEVEL` in `cav/agents.py`). OpenCode needs the plugin in its config and gets the level through `PONYTAIL_DEFAULT_MODE`; each Kimi session activates the `ponytail:ponytail` skill with it, and a Kimi without the plugin fails the run instead of running without it.
 - Python 3.10+ (standard library only).
 
 ## Case file
@@ -97,8 +113,9 @@ cav/
   compare.py       which paths the two candidates share or differ on
   orchestrator.py  bootstrap, rounds, checks, acceptance, publication, report
   events.py        append-only, redacted event log
-  web.py, web/     read-only dashboard
-  cli.py           run / solve / check / web / smoke
+  pipeline.py      repo + prompt: plan stage, code stage, merge and push
+  web.py, web/     run dashboard, and the home server that lists runs and starts pipelines
+  cli.py           run / solve / pipeline / serve / check / web / smoke
 cases/             one JSON per reconciliation
 tests/             loop tests with fake agents, plus unit tests
 ```

@@ -64,6 +64,33 @@ class LoopTest(unittest.TestCase):
         self.assertTrue((orchestrator.run_dir / "REPORT.md").exists())
         self.assertIn("finished", (orchestrator.run_dir / "run.log").read_text(encoding="utf-8"))
 
+    def test_each_round_starts_from_both_latest_proposals(self):
+        """Round N+1: each agent's tree is its own round-N proposal, and the other's round-N
+        proposal is handed over as a fixed checkout, a diff and its review, never the live tree."""
+        fakes = {name: StructuredFake(name, lambda r, name=name: {"shared.txt": f"{name} round {r}\n"},
+                                      approve=False, findings=[BLOCKING]) for name in ("deepseek", "kimi")}
+        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
+            orchestrator = Orchestrator(self.case(rounds=3), self.tmp / "run")
+            state = orchestrator.run()
+
+        run_dir = orchestrator.run_dir
+        for previous, item in zip(state["history"], state["history"][1:]):
+            n = item["round"]
+            self.assertEqual(item["starts"], {name: previous["results"][name]["commit"] for name in previous["results"]},
+                             f"round {n} starts from round {previous['round']}'s proposals")
+            for name, other in (("deepseek", "kimi"), ("kimi", "deepseek")):
+                checkout = run_dir / "rounds" / f"r{n}" / "candidates" / other
+                self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), previous["results"][other]["commit"])
+                self.assertEqual((checkout / "shared.txt").read_text(encoding="utf-8"), f"{other} round {n - 1}\n")
+                prompt = (run_dir / "rounds" / f"r{n}" / f"{name}-context.md").read_text(encoding="utf-8")
+                self.assertIn(f"- yours, which your working tree starts from: {previous['results'][name]['commit']}", prompt)
+                self.assertIn(f"- {other}'s: {previous['results'][other]['commit']}", prompt)
+                self.assertIn(str(checkout), prompt)
+                self.assertIn(str(run_dir / "reviews" / f"r{n - 1}" / f"{other}-review.json"), prompt)
+                patch = (run_dir / "rounds" / f"r{n}" / f"{name}-other.patch").read_text(encoding="utf-8")
+                self.assertIn(f"+{other} round {n - 1}", patch)
+                self.assertIn(f"-{name} round {n - 1}", patch)
+
     def test_snapshot_works_without_commits(self):
         fresh = self.tmp / "no-commits"
         fresh.mkdir()
