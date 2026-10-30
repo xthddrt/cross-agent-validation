@@ -218,6 +218,12 @@ class Home:
             record = run_dir / "rounds" / f"r{int(query.get('round', 0))}" / f"{query.get('agent', '')}-context.md"
             ok = RUN_ID.match(query.get("agent", "")) and record.is_file()
             return handler.send(200, json.dumps({"prompt": record.read_text(encoding="utf-8") if ok else ""}))
+        if rest == ["api", "file"]:  # a plan, review or note the agents wrote, read-only, from the run's blind area
+            blind = read_json(run_dir / "state.json").get("blind")
+            target = pathlib.Path(blind or "", query.get("path", "")).resolve() if blind else None
+            if not target or pathlib.Path(blind).resolve() not in target.parents or not target.is_file():
+                return handler.send(404, "not found", "text/plain")
+            return handler.send(200, target.read_text(encoding="utf-8", errors="replace"), "text/plain; charset=utf-8")
         if rest == ["events"]:
             return self.stream(handler, run_dir, int(query.get("after", 0)))
         handler.send(404, "not found", "text/plain")

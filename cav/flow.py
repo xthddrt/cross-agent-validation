@@ -138,7 +138,11 @@ class Flow:
 
     def mine(self, paths):
         """Record who wrote each numbered file: bookkeeping the agents never see."""
-        self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
+        self.state["authors"].update({self.rel(path): name for name, path in paths.items()})
+
+    def rel(self, path):
+        """A file in the blind area as the dashboard links to it."""
+        return pathlib.Path(path).relative_to(self.blind).as_posix()
 
     def ask(self, jobs, check):
         """Each named agent at once, in its session for the round; one retry for an answer `check` refuses."""
@@ -209,6 +213,7 @@ class Flow:
             # a GitHub repo's main is its default branch as fetched; a local one's, its checkout
             item["main"] = resolve_ref(item["path"], "origin/HEAD" if GITHUB.match(str(item["spec"]).strip()) else "HEAD")
         self.blind.mkdir(parents=True, exist_ok=True)
+        self.save(blind=str(self.blind))
         if git_ok("rev-parse", "--git-dir", cwd=self.blind):
             raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
         plan_path = self.blind / "plan.md"
@@ -242,14 +247,14 @@ class Flow:
             label = plan_base(fix.read_text(encoding="utf-8"))
             agreed = self.agreed_file(label, found[label])
             self.save(base=label, agreed=[blocker_line(item) for item in found[label]])
-            candidates = self.build(fix, candidates[label]["commits"], label)
+            candidates = self.build(fix, candidates[label]["commits"], label, len(found[label]))
 
     # ------------------------------------------------------------------- steps
 
     def write_plans(self, prompt, base_needed=True):
         paths = {name: self.blind / f"c{self.cycle}-plan-{n}.md" for name, n in self.numbered().items()}
         self.mine(paths)
-        entry = self.begin("plan")
+        entry = self.begin("plan", files={name: self.rel(path) for name, path in paths.items()})
         self.ask({name: prompt(paths[name]) for name in self.names},
                  lambda name: self.plan_problem(paths[name], base_needed))
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
@@ -261,7 +266,7 @@ class Flow:
             if number > 1:
                 revised = {name: self.blind / f"c{self.cycle}-revised-{number}-{n}.md" for name, n in self.numbered().items()}
                 self.mine(revised)
-                entry = self.begin("revise", vote=number)
+                entry = self.begin("revise", vote=number, files={name: self.rel(path) for name, path in revised.items()})
                 self.ask({name: prompts.revise(objections, revised[name], fixes) for name in self.names},
                          lambda name: self.plan_problem(revised[name], fixes))
                 self.end(entry, "revised")
@@ -272,10 +277,12 @@ class Flow:
             for ballot, name in zip(ballots, order):
                 ballot.write_text(paths[name].read_text(encoding="utf-8"), encoding="utf-8")
             if ballots[0].read_text(encoding="utf-8").strip() == ballots[1].read_text(encoding="utf-8").strip():
+                self.state["history"][-1]["agreed_plan"] = self.rel(ballots[0])  # the plan step that wrote them
                 return self.agreed_plan(ballots[0], "the two plans are the same")
             replies = {name: self.blind / f"c{self.cycle}-vote-{number}-{n}.json" for name, n in self.numbered().items()}
             self.mine(replies)
-            entry = self.begin("vote", vote=number, plans={str(n): name for n, name in enumerate(order, 1)})
+            entry = self.begin("vote", vote=number, plans={str(n): name for n, name in enumerate(order, 1)},
+                               ballots={str(n): self.rel(ballot) for n, ballot in enumerate(ballots, 1)})
             self.ask({name: prompts.vote(list(enumerate(ballots, 1)), replies[name], fixes)
                       for name in self.names}, lambda name: self.vote_problem(replies[name]))
             answers = {name: _json(replies[name]) for name in self.names}
@@ -285,7 +292,8 @@ class Flow:
             both = [n for n in (1, 2) if all(approvals[name][str(n)] for name in self.names)]
             if both:
                 pick = random.choice(both)  # both approved both: neither is preferred
-                self.end(entry, "agreed", approvals=approvals, how=f"both approved plan {pick}")
+                self.end(entry, "agreed", approvals=approvals, how=f"both approved plan {pick}",
+                         agreed_plan=self.rel(ballots[pick - 1]))
                 return self.agreed_plan(ballots[pick - 1], f"both approved plan {pick} in vote {number}")
             self.end(entry, "rejected", approvals=approvals, why=objections)
 
@@ -296,14 +304,15 @@ class Flow:
         self.log(f"plan: {how}")
         return path
 
-    def build(self, plan_path, start, base=None):
+    def build(self, plan_path, start, base=None, fixing=None):
         """Both implement from the same commits (repo name -> commit), separately; the results are
         relabelled at random."""
         numbers = self.numbered()
         works = {name: self.export(start, self.blind / "build" / f"c{self.cycle}-{numbers[name]}") for name in self.names}
         notes = {name: self.blind / "notes" / f"c{self.cycle}-{numbers[name]}.md" for name in self.names}
         (self.blind / "notes").mkdir(exist_ok=True)
-        entry = self.begin("build", start=start, base=base)
+        entry = self.begin("build", start=start, base=base, plan=self.rel(plan_path), fixing=fixing,
+                           notes={name: self.rel(path) for name, path in notes.items()})
         self.ask({name: prompts.build(plan_path, works[name], notes[name], base) for name in self.names},
                  lambda name: None if notes[name].exists() else "no note written")
         commits = {name: {item["name"]: self.snapshot(item["path"], works[name] / item["name"], start[item["name"]],
@@ -320,7 +329,8 @@ class Flow:
         numbers = self.numbered()
         replies = {name: self.blind / f"c{self.cycle}-review-{numbers[name]}.json" for name in self.names}
         self.mine(replies)
-        entry = self.begin("review", candidates={label: item["commits"] for label, item in candidates.items()})
+        entry = self.begin("review", candidates={label: item["commits"] for label, item in candidates.items()},
+                           files={name: self.rel(path) for name, path in replies.items()})
         self.ask({name: prompts.review(plans, [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)],
                                        replies[name], agreed) for name in self.names},
                  lambda name: self.review_problem(replies[name], candidates))
