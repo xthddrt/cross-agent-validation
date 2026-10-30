@@ -58,7 +58,7 @@
 <div class="wrap">
   <header>
     <h1>Cross-agent validation</h1>
-    <p>DeepSeek (OpenCode) and Kimi each plan, agree on a plan, implement it, and agree on the code.</p>
+    <p>DeepSeek (OpenCode) and Kimi agree on a plan, both implement it, and judge the two builds until both approve one.</p>
   </header>
 
   <section class="card">
@@ -77,7 +77,7 @@
           <input id="branch1" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/one">
           <input id="branch2" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/two">
         </div>
-        <div class="hint">With two branches the agents first judge them blind as Candidate X and Y: a branch both approve is the result; otherwise they agree on a base and a plan, and both implement it.</div>
+        <div class="hint">With two branches the agents first judge them blind as X and Y: a branch both approve is the result; otherwise they agree on a plan that names one as its base, and both implement it.</div>
       </div>
       <div class="field">
         <label for="prompt">Prompt</label>
@@ -87,10 +87,10 @@
         <button id="go" type="submit">Start run</button>
         <span class="error" id="error"></span>
       </div>
-      <p class="flow"><b>Agree</b>: both write a plan and approve or reject each; a plan both approve is used.
-        <b>Build</b>: both implement it from the same base. <b>Judge</b>: both approve or reject each result, blind;
-        one both approve is <b>merged into origin's default branch and pushed</b>. Otherwise they agree on a base and a fix plan and build again;
-        after 3 builds the result both would keep wins (a split: a coin flip).</p>
+      <p class="flow"><b>Agree</b>: both approve or reject each plan; a plan both approve is used, otherwise both revise from the
+        reasons and vote again (up to 10 rounds, then a coin flip). <b>Build</b>: both implement it from the same base.
+        <b>Judge</b>: both approve or reject each build, blind; one both approve is <b>merged into origin's default branch and pushed</b>.
+        Otherwise they plan and build again, up to 5 builds; then the one passing its checks, else the one both would keep, else a coin flip.</p>
     </form>
   </section>
 

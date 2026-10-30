@@ -137,7 +137,7 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(flow.state["outcome"].startswith("merged and pushed"))
         self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
         self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build, once")
-        self.assertEqual([fake.sessions for fake in fakes.values()], [4, 4], "a fresh session for every step")
+        self.assertEqual([fake.sessions for fake in fakes.values()], [2, 2], "one session per cycle: plan, agree and build share one; the judge of the builds starts fresh")
         self.assert_blind(fakes, flow)
 
     def test_a_branch_both_approve_is_the_result_at_once(self):
@@ -220,6 +220,7 @@ class FlowTest(unittest.TestCase):
                                             ("judge", "accepted")])
         first, again = flow.state["history"][2], flow.state["history"][5]
         self.assertIn(again["start"], first["commits"].values(), "the second build starts from a first build")
+        self.assertEqual([fake.sessions for fake in fakes.values()], [3, 3], "a fresh session at each of the 3 cycles")
         self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c2-agreed.md").read_text(encoding="utf-8"))
         self.assert_blind(fakes, flow)
 
