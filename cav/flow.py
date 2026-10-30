@@ -300,11 +300,12 @@ class Flow:
         if git_ok("rev-parse", "--git-dir", cwd=self.blind):
             raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
         candidates = self.branch_candidates(repo) if self.branches else None
+        plan_path = None  # the plan the candidates implemented; none for two branches
         for cycle in range(1, self.max_builds + 2):
             for agent in self.agents.values():
                 agent.session_id = None  # a fresh session per cycle: no agent judges builds knowing which is its own
             if candidates:
-                result, plans, reviews = self.judge(cycle, candidates, final=cycle > self.max_builds)
+                result, plans, reviews = self.judge(cycle, candidates, plan_path, final=cycle > self.max_builds)
                 if result:
                     return self.publish(branch, candidates[result], result)
             else:
@@ -313,8 +314,9 @@ class Flow:
             candidates = self.build(cycle, plan_path, candidates[label]["commit"] if candidates else base, label)
         raise RuntimeError("the final judge must decide")  # unreachable: the final judge always picks
 
-    def judge(self, cycle, candidates, final):
-        """Both agents judge both candidates blind. A candidate both approve, with passing checks, is
+    def judge(self, cycle, candidates, built_from, final):
+        """Both agents judge both candidates blind, builds against the plan they implemented (`built_from`),
+        branches against the task. A candidate both approve, with passing checks, is
         the result. Otherwise each judge has written a plan for the next build; after the last
         build, the final judge keeps the passing one, else the one both would keep, else a coin flip."""
         folder = self.blind / "judge" / f"c{cycle}"
@@ -330,7 +332,7 @@ class Flow:
         for name in self.names:
             listed = [(label, candidates[label]["folder"], self.checks_summary(candidates[label]))
                       for label in random.sample(LABELS, 2)]  # no fixed first place
-            jobs[name] = (prompts.judge(self.task, listed, replies[name], plans and plans[name]), self.blind)
+            jobs[name] = (prompts.judge(self.task, listed, replies[name], plans and plans[name], built_from), self.blind)
         self.ask(jobs, "judge", lambda name: self.judge_problem(replies[name], plans and plans[name], candidates))
         verdicts = {name: _json(replies[name]) for name in self.names}
         approvals = {name: verdicts[name]["approve"] for name in self.names}
@@ -547,7 +549,7 @@ class Flow:
         found = [item for path in reviews for item in (_json(path) or {}).get("defects") or []
                  if item.get("candidate") == label]
         if found:
-            body += ("\n## Defects found in the base (fix these too)\n\n"
+            body += ("\n## Defects found in the base (fix every one)\n\n"
                      + "\n".join(f"- {item.get('file', '')}:{item.get('line', '')} {item['problem']}"
                                  + (f" (fix: {item['fix']})" if item.get("fix") else "") for item in found) + "\n")
         return body

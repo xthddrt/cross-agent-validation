@@ -3,16 +3,19 @@
 Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) turn one task, or two branches, into one result both approve:
 
 ```
-judge   (two branches) both, blind: approve or reject each branch (a rejection needs at least one defect) and
-        write a plan (≤1000 words, first line "Base: X|Y"). A branch both approve, with passing
-        checks, is the result.
+judge   (two branches) both, blind: list every defect in each branch (a code bug, or a clear departure
+        from the task), approve a branch only if it has none, and write a plan (≤1000 words, first
+        line "Base: X|Y") that fixes every defect listed in its base. A branch both approve, with
+        passing checks, is the result.
 plan    (a task alone) both write a plan (≤1000 words)
 agree   both approve or reject each of the two plans, shown as the builders will get it (the reviews'
-        defects in its base attached); a rejection needs a reason (≤250 words). A plan both approve
-        is the plan. Otherwise both revise from the reasons and vote again: up to 10 rounds, then a
+        defects in its base attached) and reject one that misses the task, leaves a listed defect
+        unfixed or would not work, with a reason (≤250 words). A plan both approve is the plan. Otherwise both revise from the reasons and vote again: up to 10 rounds, then a
         coin flip.
-build   both implement the agreed plan from the same base, separately; the checks run
-judge   both judge the two builds blind, like two branches: a build both approve, with passing
+build   both implement the agreed plan from the same base, separately, fixing every listed defect;
+        the checks run
+judge   both judge the two builds blind, like two branches but against the plan they implemented
+        (a defect is a code bug or a clear departure from that plan): a build both approve, with passing
         checks, is the result; otherwise each judge writes a plan and it repeats (agree, build,
         judge), up to 10 builds. After the 10th: the one passing its checks, else the one both would
         keep, else a coin flip.
@@ -21,7 +24,7 @@ publish pushed to origin's default branch (merged if it moved) unless --no-push
 
 Approval moves things forward, not preference: a branch, plan or build both agents approve wins. A plan deadlock goes to more revise-and-vote rounds, not to preference; only the pick after the 10th build asks which one each would keep.
 
-**No bias toward either side.** No prompt names an agent or says whose anything is. Candidates are **X** and **Y**, labelled at random (the builds afresh) and read from plain folders exported without `.git` (so no branch name, author or commit message); plans and reviews are numbered at random; candidates are listed in random order; and each agent keeps **one session per cycle** (judge or plan, plan rounds, build), starting fresh at the next cycle, so no agent judges builds knowing which is its own. Nobody keeps a tree of their own: both builds start from the one agreed base. Everything an agent reads or writes sits in a **blind area** outside every git repo (`%LOCALAPPDATA%\cav-blind\<random>`, or `CAV_BLIND_ROOT`): plain folders only, so `git log` there finds nothing, and none of the run's bookkeeping (`state.json`, which records who wrote what). Builds are plain copies too; CAV commits them itself. Plans are Pareto: the fewest changes that deliver most of the result. Prompts are as short as they can be.
+**No bias toward either side.** No prompt names an agent or says whose anything is. Candidates are **X** and **Y**, labelled at random (the builds afresh) and read from plain folders exported without `.git` (so no branch name, author or commit message); plans and reviews are numbered at random; candidates are listed in random order; and each agent keeps **one session per cycle** (judge or plan, plan rounds, build), starting fresh at the next cycle, so no agent judges builds knowing which is its own. Nobody keeps a tree of their own: both builds start from the one agreed base. Everything an agent reads or writes sits in a **blind area** outside every git repo (`%LOCALAPPDATA%\cav-blind\<random>`, or `CAV_BLIND_ROOT`): plain folders only, so `git log` there finds nothing, and none of the run's bookkeeping (`state.json`, which records who wrote what). Builds are plain copies too; CAV commits them itself. Plans are the smallest changes that complete the task and fix every listed defect. Prompts are as short as they can be.
 
 **Two branches to reconcile** (`--branch A --branch B`, or the two fields on the dashboard form) start at judge, since one may already be acceptable to both.
 
