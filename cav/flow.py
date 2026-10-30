@@ -1,9 +1,9 @@
 """One CAV run: two agents, one result both agree has no blockers.
 
-    plan     (repo + task) both write a plan, then vote on both; a plan both approve is the plan,
+    plan     (repos + task) both write a plan, then vote on both; a plan both approve is the plan,
              otherwise both revise from the objections and vote again, until one is approved.
              Both build it; the two builds are the candidates.
-    review   (plan + two candidates) both review every agreed plan and both candidates, blind,
+    review   (plan + two sets of branches, or the builds) both review every agreed plan and both candidates, blind,
              listing only blockers: real bugs, or real departures from an agreed plan.
     confirm  each votes on the other's blockers: one both call a blocker is agreed, the rest are
              dropped. A candidate with no agreed blocker is the result, kept as branch cav/<run>.
@@ -83,20 +83,24 @@ def blocker_line(item):
 
 
 class Flow:
-    def __init__(self, repo, run_dir, task=None, plan=None, branches=(), models=None):
-        if bool(branches) != bool(plan) or (not branches and not task) or (branches and len(branches) != 2):
-            raise ValueError("give a task, or a plan and two branches")
-        self.repo_spec = repo  # a local path, or a GitHub URL cloned in run()
-        self.repo = None
+    def __init__(self, repos, run_dir, task=None, plan=None, models=None):
+        """`repos`: [{"repo": a local path or a GitHub URL, "branches": [set 1, set 2]}]; a blank branch is
+        that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`."""
+        self.repos = [{"spec": item["repo"], "branches": (list(item.get("branches") or []) + ["", ""])[:2]}
+                      for item in repos]
+        self.branched = any(ref for item in self.repos for ref in item["branches"])
+        if not self.repos or (self.branched and not plan) or (not self.branched and not task):
+            raise ValueError("give repos and a task, or repos with two sets of branches and a plan")
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
-        self.task, self.plan, self.branches = (task or "").strip(), (plan or "").strip(), list(branches)
+        self.task, self.plan = (task or "").strip(), (plan or "").strip()
         self.run_id = self.run_dir.name
         self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
         models = models or agent_mod.DEFAULT_MODELS
         self.names = list(models)
-        self.state = {"run_id": self.run_id, "repo": str(repo), "names": self.names, "phase": "starting",
+        self.state = {"run_id": self.run_id, "repo": ", ".join(str(item["spec"]) for item in self.repos),
+                      "names": self.names, "phase": "starting",
                       "round": 0, "agents": {}, "history": [], "authors": {}}
         self.step, self.cycle, self.next_id = 0, 0, 1
         self.agents = {}
@@ -197,25 +201,33 @@ class Flow:
             return 1
 
     def _run(self):
-        self.repo = resolve_repo(self.repo_spec)
+        for item in self.repos:  # each repo gets a folder name of its own inside every candidate
+            item["path"] = resolve_repo(item["spec"])
+            taken = {other.get("name") for other in self.repos}
+            item["name"] = next(name for n in itertools.count(1)
+                                for name in [item["path"].name + (f"-{n}" if n > 1 else "")] if name not in taken)
+            # a GitHub repo's main is its default branch as fetched; a local one's, its checkout
+            item["main"] = resolve_ref(item["path"], "origin/HEAD" if GITHUB.match(str(item["spec"]).strip()) else "HEAD")
         self.blind.mkdir(parents=True, exist_ok=True)
         if git_ok("rev-parse", "--git-dir", cwd=self.blind):
             raise RuntimeError(f"the agents' folder {self.blind} is inside a git repo; set CAV_BLIND_ROOT elsewhere")
         plan_path = self.blind / "plan.md"
-        if self.branches:
+        mains = {item["name"]: item["main"] for item in self.repos}
+        if self.branched:
             plan_path.write_text(self.plan + "\n", encoding="utf-8")
-            refs = dict(zip(LABELS, random.sample(self.branches, 2)))
-            commits = {label: resolve_ref(self.repo, ref) for label, ref in refs.items()}
-            self.save(labels={label: {"ref": refs[label], "commit": commits[label]} for label in LABELS})
+            order = dict(zip(LABELS, random.sample((0, 1), 2)))  # which branch set is X, at random
+            refs = {label: {item["name"]: item["branches"][order[label]] for item in self.repos} for label in LABELS}
+            commits = {label: {item["name"]: resolve_ref(item["path"], refs[label][item["name"]]) if refs[label][item["name"]]
+                               else item["main"] for item in self.repos} for label in LABELS}
+            self.save(labels={label: {name: {"ref": refs[label][name] or "(main)", "commit": commits[label][name]}
+                                      for name in mains} for label in LABELS})
             candidates = self.candidates(commits)
         else:
-            # a GitHub repo starts from its default branch as fetched; a local one from its checkout
-            base = resolve_ref(self.repo, "origin/HEAD" if GITHUB.match(str(self.repo_spec).strip()) else "HEAD")
             self.new_round()
-            code = export_tree(self.repo, base, self.blind / "code")
+            code = self.export(mains, self.blind / "code")
             paths = self.write_plans(lambda path: prompts.plan(self.task, code, path), base_needed=False)
             plan_path.write_text(self.agree(paths, fixes=False).read_text(encoding="utf-8"), encoding="utf-8")
-            candidates = self.build(plan_path, base)
+            candidates = self.build(plan_path, mains)
         plans = [plan_path]  # every plan both agents approved, in order: the code follows all of them
         agreed = None  # the agreed blockers in the base the candidates were built from
         while True:
@@ -230,7 +242,7 @@ class Flow:
             label = plan_base(fix.read_text(encoding="utf-8"))
             agreed = self.agreed_file(label, found[label])
             self.save(base=label, agreed=[blocker_line(item) for item in found[label]])
-            candidates = self.build(fix, candidates[label]["commit"], label)
+            candidates = self.build(fix, candidates[label]["commits"], label)
 
     # ------------------------------------------------------------------- steps
 
@@ -282,16 +294,17 @@ class Flow:
         return path
 
     def build(self, plan_path, start, base=None):
-        """Both implement from the same commit, separately; the results are relabelled at random."""
+        """Both implement from the same commits (repo name -> commit), separately; the results are
+        relabelled at random."""
         numbers = self.numbered()
-        works = {name: export_tree(self.repo, start, self.blind / "build" / f"c{self.cycle}-{numbers[name]}")
-                 for name in self.names}
+        works = {name: self.export(start, self.blind / "build" / f"c{self.cycle}-{numbers[name]}") for name in self.names}
         notes = {name: self.blind / "notes" / f"c{self.cycle}-{numbers[name]}.md" for name in self.names}
         (self.blind / "notes").mkdir(exist_ok=True)
         entry = self.begin("build", start=start, base=base)
         self.ask({name: prompts.build(plan_path, works[name], notes[name], base) for name in self.names},
                  lambda name: None if notes[name].exists() else "no note written")
-        commits = {name: self.snapshot(works[name], start, f"round {self.cycle} build {numbers[name]}")
+        commits = {name: {item["name"]: self.snapshot(item["path"], works[name] / item["name"], start[item["name"]],
+                                                      f"round {self.cycle} build {numbers[name]}") for item in self.repos}
                    for name in self.names}
         labels = dict(zip(random.sample(self.names, 2), LABELS))
         self.state["authors"].update({f"c{self.cycle + 1} {labels[name]}": name for name in self.names})
@@ -304,7 +317,7 @@ class Flow:
         numbers = self.numbered()
         replies = {name: self.blind / f"c{self.cycle}-review-{numbers[name]}.json" for name in self.names}
         self.mine(replies)
-        entry = self.begin("review", candidates={label: item["commit"] for label, item in candidates.items()})
+        entry = self.begin("review", candidates={label: item["commits"] for label, item in candidates.items()})
         self.ask({name: prompts.review(plans, [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)],
                                        replies[name], agreed) for name in self.names},
                  lambda name: self.review_problem(replies[name], candidates))
@@ -348,12 +361,12 @@ class Flow:
         return found
 
     def finish(self, candidates, label):
-        commit = candidates[label]["commit"]
-        branch = f"cav/{self.run_id}"
-        git("update-ref", f"refs/heads/{branch}", commit, cwd=self.repo)
-        self.save(phase="done", outcome=f"converged: branch {branch}",
-                  final={"commit": commit, "branch": branch, "candidate": label})
-        self.log(f"converged: {branch} = {commit}")
+        commits, branch = candidates[label]["commits"], f"cav/{self.run_id}"
+        for item in self.repos:
+            git("update-ref", f"refs/heads/{branch}", commits[item["name"]], cwd=item["path"])
+        self.save(phase="done", outcome=f"converged: branch {branch}" + (" in each repo" if len(self.repos) > 1 else ""),
+                  final={"commits": commits, "branch": branch, "candidate": label})
+        self.log(f"converged: {branch} = {commits}")
         return 0
 
     # ------------------------------------------------------------------- helpers
@@ -368,15 +381,21 @@ class Flow:
         path.write_text("".join(f"{blocker_line(item)}\n" for item in unique), encoding="utf-8")
         return path
 
-    def candidates(self, commits):
-        """label -> commit and a plain folder to read."""
-        folder = self.blind / "candidates" / f"c{self.cycle + 1}"
-        return {label: {"commit": commit, "folder": str(export_tree(self.repo, commit, folder / label))}
-                for label, commit in commits.items()}
+    def export(self, commits, folder):
+        """One plain folder per repo (repo name -> commit) inside `folder`."""
+        for item in self.repos:
+            export_tree(item["path"], commits[item["name"]], folder / item["name"])
+        return folder
 
-    def snapshot(self, folder, parent, what):
+    def candidates(self, commits):
+        """label -> its commits (repo name -> commit) and a plain folder to read, one folder per repo."""
+        folder = self.blind / "candidates" / f"c{self.cycle + 1}"
+        return {label: {"commits": commits[label], "folder": str(self.export(commits[label], folder / label))}
+                for label in commits}
+
+    def snapshot(self, repo, folder, parent, what):
         """Commit a plain folder on top of `parent` through a separate index: the folder never gets a .git."""
-        git_dir = git("rev-parse", "--absolute-git-dir", cwd=self.repo)
+        git_dir = git("rev-parse", "--absolute-git-dir", cwd=repo)
         index = self.run_dir / f"index-{secrets.token_hex(4)}"
         env = dict(os.environ, GIT_INDEX_FILE=str(index))
         where = ("--git-dir", git_dir, "--work-tree", str(folder))
@@ -386,10 +405,10 @@ class Flow:
             tree = git(*where, "write-tree", cwd=folder, env=env)
         finally:
             index.unlink(missing_ok=True)
-        if tree == git("rev-parse", f"{parent}^{{tree}}", cwd=self.repo):
+        if tree == git("rev-parse", f"{parent}^{{tree}}", cwd=repo):
             return parent
-        commit = git(*IDENTITY, "commit-tree", tree, "-p", parent, "-m", f"CAV {self.run_id}: {what}", cwd=self.repo)
-        git("update-ref", f"refs/cav/{self.run_id}/{what.replace(' ', '-')}", commit, cwd=self.repo)  # keep it reachable
+        commit = git(*IDENTITY, "commit-tree", tree, "-p", parent, "-m", f"CAV {self.run_id}: {what}", cwd=repo)
+        git("update-ref", f"refs/cav/{self.run_id}/{what.replace(' ', '-')}", commit, cwd=repo)  # keep it reachable
         return commit
 
     # ------------------------------------------------------------- answer checks

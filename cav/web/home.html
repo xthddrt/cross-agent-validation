@@ -31,6 +31,10 @@
   button { font:inherit; font-weight:600; background:var(--accent); color:#0d1117; border:0; border-radius:8px; padding:9px 20px; cursor:pointer; }
   button:disabled { opacity:.5; cursor:default; }
   button.stop { background:var(--bad-bg); color:var(--bad); padding:3px 12px; font-size:12px; }
+  button.add { background:var(--sunk); color:var(--accent); border:1px dashed var(--line); padding:6px 14px; margin-top:8px; }
+  button.del { background:none; color:var(--dim); padding:4px 10px; }
+  .repo { display:grid; grid-template-columns:2fr 1fr 1fr auto; gap:8px; margin-bottom:8px; }
+  @media (max-width: 700px) { .repo { grid-template-columns:1fr 1fr auto; } .repo .path { grid-column:1 / -1; } }
   .error { color:var(--bad); font-size:13px; }
   .flow { color:var(--dim); font-size:12.5px; }
   .flow b { color:var(--fg); font-weight:600; }
@@ -60,20 +64,16 @@
     <h2>New run</h2>
     <form id="form">
       <div class="field">
-        <label for="repo">Repository</label>
-        <input id="repo" list="known" autocomplete="off" spellcheck="false" placeholder="C:\Users\...\my-repo   or   https://github.com/owner/repo">
+        <label>Repositories, and optionally a branch for each in two sets</label>
+        <div id="repos"></div>
         <datalist id="known"></datalist>
+        <button type="button" id="add" class="add">+ Add repository</button>
+        <div class="hint">Leave every branch empty to start from a task. With branches, set 1 and set 2 are the two attempts to
+          reconcile; an empty branch in a set means that repo's main.</div>
       </div>
       <div class="field">
-        <label>Branches <span class="hint" style="font-weight:400">(optional: both or neither)</span></label>
-        <div style="display:flex;gap:10px;flex-wrap:wrap">
-          <input id="branch1" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/one">
-          <input id="branch2" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/two">
-        </div>
-      </div>
-      <div class="field">
-        <label for="text">Task, or the plan the two branches implement</label>
-        <textarea id="text" placeholder="No branches: what should be built. Two branches: the plan both follow."></textarea>
+        <label for="text">Task, or the plan the two branch sets implement</label>
+        <textarea id="text" placeholder="No branches: what should be built. Two branch sets: the plan both follow."></textarea>
       </div>
       <div class="actions">
         <button id="go" type="submit">Start run</button>
@@ -83,7 +83,7 @@
         <b>Review</b>: both list only blockers (real bugs, real departures from the plan) in both builds, blind, and vote on
         each other's; only blockers both agree on count. Then both plan the fixes on a base they choose, in line with every plan
         agreed before, vote until both approve one, and both build it. It repeats until a build has no agreed blocker, which
-        is kept as branch <b>cav/&lt;run&gt;</b>. Nothing is pushed.</p>
+        is kept as branch <b>cav/&lt;run&gt;</b> in each repository. Nothing is pushed.</p>
     </form>
   </section>
 
@@ -133,12 +133,27 @@ async function loadRuns() {
   $('known').innerHTML = [...new Set(runs.map(r => r.repo).filter(Boolean))].map(r => `<option value="${esc(r)}">`).join('');
 }
 
+function addRepo() {
+  const row = document.createElement('div');
+  row.className = 'repo';
+  row.innerHTML = `<input class="path" list="known" autocomplete="off" spellcheck="false" placeholder="C:\\Users\\...\\my-repo   or   https://github.com/owner/repo">` +
+    `<input class="b1" autocomplete="off" spellcheck="false" placeholder="set 1 branch">` +
+    `<input class="b2" autocomplete="off" spellcheck="false" placeholder="set 2 branch">` +
+    `<button type="button" class="del" title="Remove this repository">&times;</button>`;
+  row.querySelector('.del').onclick = () => { if ($('repos').children.length > 1) row.remove(); };
+  $('repos').appendChild(row);
+}
+$('add').onclick = addRepo;
+addRepo();
+
 $('form').addEventListener('submit', async (ev) => {
   ev.preventDefault();
   $('error').textContent = '';
   $('go').disabled = true;
   try {
-    const out = await post('start', {repo:$('repo').value, text:$('text').value, branches:[$('branch1').value, $('branch2').value]});
+    const repos = [...$('repos').children].map(row => ({repo:row.querySelector('.path').value,
+      branches:[row.querySelector('.b1').value, row.querySelector('.b2').value]}));
+    const out = await post('start', {repos, text:$('text').value});
     location.href = out.url;
   } catch (e) {
     $('error').textContent = e.message;

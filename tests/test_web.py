@@ -47,9 +47,13 @@ class HomeTest(unittest.TestCase):
                 return mock.Mock(pid=4242)
             return real(args, *rest, **options)
         with mock.patch("cav.web.subprocess.Popen", side_effect=popen):
-            run_id = self.post("start", {"repo": str(self.repo), "text": "Do the thing"})["id"]
-        self.assertIn("--task-file", launched[0])
+            run_id = self.post("start", {"repos": [{"repo": str(self.repo), "branches": ["", ""]}, {"repo": ""}],
+                                         "text": "Do the thing"})["id"]
         run_dir = self.tmp / "runs" / run_id
+        self.assertEqual(launched[0][launched[0].index("--spec") + 1], str(run_dir / "spec.json"))
+        self.assertEqual(json.loads((run_dir / "spec.json").read_text(encoding="utf-8")),
+                         {"repos": [{"repo": str(self.repo), "branches": ["", ""]}], "task": "Do the thing"},
+                         "an empty repo row is ignored; no branches means a task")
         self.assertEqual((run_dir / "input.md").read_text(encoding="utf-8").strip(), "Do the thing")
         (run_dir / "state.json").write_text(json.dumps({"phase": "review", "history": []}), encoding="utf-8")
         with mock.patch("cav.web.alive", return_value=True):
@@ -61,10 +65,13 @@ class HomeTest(unittest.TestCase):
         self.assertEqual(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["phase"], "stopped")
 
     def test_bad_requests_are_refused(self):
-        for body, error in (({"repo": str(self.tmp / "nope"), "text": "x"}, "not a git repository or GitHub URL"),
-                            ({"repo": str(self.repo), "text": "x", "branches": ["a"]}, "two different branches"),
-                            ({"repo": str(self.repo), "text": "x", "branches": ["a", "b"]}, "not found"),
-                            ({"repo": str(self.repo), "text": ""}, "give the task")):
+        repo = lambda *branches: [{"repo": str(self.repo), "branches": list(branches)}]
+        for body, error in (({"repos": [{"repo": str(self.tmp / "nope")}], "text": "x"}, "not a git repository or GitHub URL"),
+                            ({"repos": [], "text": "x"}, "at least one repository"),
+                            ({"repos": repo("a", "a"), "text": "x"}, "the two branch sets are the same"),
+                            ({"repos": repo("a", ""), "text": "x"}, "not found"),
+                            ({"repos": repo(), "text": ""}, "give the task"),
+                            ({"repos": repo("a", ""), "text": ""}, "give the plan")):
             with self.assertRaises(urllib.error.HTTPError) as caught:
                 self.post("start", body)
             self.assertIn(error, json.loads(caught.exception.read())["error"])
