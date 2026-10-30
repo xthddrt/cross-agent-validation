@@ -55,7 +55,15 @@ class HomeTest(unittest.TestCase):
                          {"repos": [{"repo": str(self.repo), "branches": ["", ""]}], "task": "Do the thing"},
                          "an empty repo row is ignored; no branches means a task")
         self.assertEqual((run_dir / "input.md").read_text(encoding="utf-8").strip(), "Do the thing")
-        (run_dir / "state.json").write_text(json.dumps({"phase": "review", "history": []}), encoding="utf-8")
+        blind = self.tmp / "blind"
+        blind.mkdir()
+        (blind / "c1-plan-1.md").write_text("the plan", encoding="utf-8")
+        (run_dir / "state.json").write_text(json.dumps({"phase": "review", "history": [], "blind": str(blind)}),
+                                            encoding="utf-8")
+        page = urllib.request.urlopen(f"{self.base}/run/{run_id}/api/file?path=c1-plan-1.md", timeout=5)
+        self.assertEqual(page.read().decode("utf-8"), "the plan", "the dashboard opens a file the agents wrote")
+        with self.assertRaises(urllib.error.HTTPError):
+            urllib.request.urlopen(f"{self.base}/run/{run_id}/api/file?path=../runs/serve.json", timeout=5)
         with mock.patch("cav.web.alive", return_value=True):
             self.assertEqual([(run["id"], run["phase"]) for run in self.get("api/runs")], [(run_id, "review")])
             self.assertEqual(self.get(f"run/{run_id}/api/state")["input"].strip(), "Do the thing")

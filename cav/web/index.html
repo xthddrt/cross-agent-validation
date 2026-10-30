@@ -402,33 +402,64 @@ function renderTabs() {
 // one commit (older runs) or repo name -> commit
 const shas = (c) => typeof c === 'string' ? sha(c) : Object.entries(c || {}).map(([repo, x]) => `${repo} ${sha(x)}`).join(', ');
 const where = (b) => `${esc(b.file || '')}${b.line ? ':' + esc(b.line) : ''}`;
+// a step's own time; the live one counts up
+const took = (h) => h.seconds !== undefined ? h.seconds : isLive(h.round) && h.started ? Date.now() / 1000 - h.started : 0;
+// a file the agents wrote, opened read-only in a new tab
+const link = (path, label) => path ? `<a href="${BASE}/api/file?path=${encodeURIComponent(path)}" target="_blank">${esc(label)}</a>` : '';
+const links = (files) => Object.entries(files || {}).map(([agent, path]) => link(path, `${agent}'s`)).join(' · ');
+const fold = (title, body) => body ? `<details><summary>${title}</summary>${body}</details>` : '';
+const blockerItem = (b) => `<li><b>${b.agreed === undefined ? 'raised' : b.agreed ? `agreed #${b.id}` : 'dropped'}</b> · ` +
+  `${esc(b.by)} · Candidate ${esc(b.candidate)} · ${where(b)} ${esc(b.problem)}` +
+  (b.why_not ? ` <span class="dim">(not a blocker: ${esc(b.why_not)})</span>` : '') + '</li>';
+
 function details(h) {
-  // what happened in one step, from state.json
+  // at most four lines on what the step is doing or decided, with links; long lists fold away below
   if (!h) return '<div class="dim">waiting for this step</div>';
-  const out = [];
-  if (h.how) out.push(esc(h.how));
-  if (h.words) out.push(`plan words: ${Object.entries(h.words).map(([a, w]) => `${esc(a)} ${w}`).join(' · ')}`);
-  if (h.plans) out.push('plans: ' + Object.entries(h.plans).map(([n, a]) => `${n} = ${esc(a)}'s`).join(' · '));
-  if (h.approvals) out.push(Object.entries(h.approvals).map(([a, v]) => `<b>${esc(a)}</b>: ` +
-    Object.entries(v).map(([k, ok]) => `plan ${esc(k)} ${ok ? 'approved' : 'rejected'}`).join(', ')).join('<br>'));
-  if (h.why) out.push('objections:<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
-    texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>');
-  if (h.base) out.push(`base: Candidate ${esc(h.base)}`);
-  if (h.commits) out.push(Object.entries(h.commits).map(([a, c]) => `<b>${esc(a)}</b> built ${esc(shas(c))}`).join('<br>'));
-  if (h.blockers) out.push(`blockers raised: ${h.blockers.length}<ul>` + h.blockers.map(b =>
-    `<li><b>${b.agreed === undefined ? 'raised' : b.agreed ? `agreed #${b.id}` : 'dropped'}</b> · ${esc(b.by)} · ` +
-    `Candidate ${esc(b.candidate)} · ${where(b)} ${esc(b.problem)}` +
-    (b.why_not ? ` <span class="dim">(not a blocker: ${esc(b.why_not)})</span>` : '') + '</li>').join('') + '</ul>');
-  if (h.agreed) out.push(Object.entries(h.agreed).map(([label, list]) => `agreed in ${esc(label)}: ${list.length ? '<ul>' +
-    list.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : 'none'}`).join('<br>'));
-  if (h.seconds !== undefined) out.push(`<span class="dim">took ${dur(h.seconds)}</span>`);
-  return out.join('<br>');
+  const lines = [h.verdict ? `<b>${esc(h.verdict)}</b> · took ${dur(h.seconds)}` : `<b>running</b> · ${dur(took(h))} so far`];
+  const more = [];
+  if (h.step === 'plan' || h.step === 'revise') {
+    lines.push('plans: ' + (links(h.files) || '…') + (h.words ? ` <span class="dim">(${Object.entries(h.words)
+      .map(([a, w]) => `${esc(a)} ${w} words`).join(', ')})</span>` : ''));
+    if (h.agreed_plan) lines.push(`the two plans were the same: ${link(h.agreed_plan, 'open the agreed plan')}`);
+  } else if (h.step === 'vote') {
+    if (h.ballots) lines.push('plans: ' + Object.entries(h.ballots).map(([n, path]) =>
+      link(path, `plan ${n}${h.plans ? ` (${h.plans[n]}'s)` : ''}`)).join(' · '));
+    if (h.approvals) lines.push('votes: ' + Object.entries(h.approvals).map(([a, v]) =>
+      `${esc(a)} ${Object.entries(v).map(([n, ok]) => `${n}${ok ? '✓' : '✕'}`).join(' ')}`).join(' · '));
+    if (h.agreed_plan) lines.push(`agreed: ${link(h.agreed_plan, 'open the agreed plan')}`);
+    else if (h.why) lines.push(`no plan has both approvals: ${plural(Object.values(h.why).flat().length, 'objection')}, so both revise`);
+    if (h.why) more.push(fold('Objections', '<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
+      texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>'));
+  } else if (h.step === 'build') {
+    lines.push((h.base ? `building on Candidate ${esc(h.base)}` : 'building from main') +
+      (h.fixing != null ? ` · ${plural(h.fixing, 'agreed blocker')} to fix` : '') + (h.plan ? ` · ${link(h.plan, 'the plan')}` : ''));
+    if (h.commits) lines.push('built: ' + Object.entries(h.commits).map(([a, c]) => `${esc(a)} ${esc(shas(c))}`).join(' · '));
+    if (h.notes && h.verdict) lines.push("builders' notes: " + links(h.notes));
+  } else if (h.step === 'review') {
+    const by = (h.blockers || []).reduce((n, b) => (n[b.by] = (n[b.by] || 0) + 1, n), {});
+    if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, n]) => `${esc(a)} ${n}`).join(' · ') || 'none'));
+    if (h.files && h.verdict) lines.push('reviews: ' + links(h.files));
+    if ((h.blockers || []).length) more.push(fold(`Blockers raised (${h.blockers.length})`, `<ul>${h.blockers.map(blockerItem).join('')}</ul>`));
+  } else if (h.step === 'confirm') {
+    const raised = (hist(h.round - 1) || {}).blockers || [];
+    const dropped = raised.filter(b => b.agreed === false).length;
+    if (h.agreed) lines.push('agreed blockers: ' + Object.entries(h.agreed).map(([l, list]) => `${esc(l)} ${list.length}`).join(' · ') +
+      (dropped ? ` · ${plural(dropped, 'blocker')} voted down` : ''));
+    if (h.agreed) lines.push(/^no blocker/.test(h.verdict || '') ? 'a candidate is clear: the run ends here'
+      : h.verdict ? 'both candidates are blocked: a fix plan comes next' : '');
+    if (h.agreed) more.push(fold('Agreed blockers', Object.entries(h.agreed).map(([l, list]) =>
+      `<div>in ${esc(l)}: ${list.length ? '<ul>' + list.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : 'none'}</div>`).join('')));
+  } else {  // a step from an older run
+    if (h.how) lines.push(esc(h.how));
+    if (h.approvals) lines.push(Object.entries(h.approvals).map(([a, v]) => `${esc(a)}: ` +
+      Object.entries(v).map(([k, ok]) => `${esc(k)} ${ok ? '✓' : '✕'}`).join(' ')).join(' · '));
+  }
+  return lines.filter(Boolean).slice(0, 4).map(line => `<div>${line}</div>`).join('') + more.join('');
 }
 
 function renderSteps() {
   // every step at a glance: what it decided and how long it took (the live one counts up)
   const all = state.history || [];
-  const took = (h) => h.seconds !== undefined ? h.seconds : isLive(h.round) && h.started ? Date.now() / 1000 - h.started : 0;
   const total = all.reduce((sum, h) => sum + took(h), 0);
   const chips = `<div class="chips">${all.map(h => `<span class="chip ${stepClass(h, h.round)}">${h.round} ${esc(stepName(h))}: ` +
     `${esc(h.verdict || (isLive(h.round) ? 'running' : '…'))} · ${dur(took(h))}</span>`).join('')}` +
