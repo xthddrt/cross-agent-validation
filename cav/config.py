@@ -5,6 +5,11 @@ import pathlib
 from dataclasses import dataclass, field
 
 BOOTSTRAP = ("refs", "base")
+# agent name -> (kind, model) when no case file names them
+DEFAULT_MODELS = {
+    "deepseek": ("opencode", "deepseek/deepseek-flash#high"),
+    "kimi": ("kimi", "kimi-code/k3.1-pro"),
+}
 # Settings that no longer exist. Silently ignoring them would let a case file claim behaviour the
 # tool does not have, so loading such a file fails and names the key.
 REMOVED = {
@@ -42,6 +47,8 @@ class Case:
     retries: int = 1
     task: dict = field(default_factory=dict)
     bootstrap: str = "refs"
+    # "plan": the candidates are a plan file, not code (the first stage of a pipeline)
+    mode: str = "code"
 
     def other(self, name):
         return next(n for n in self.agents if n != name)

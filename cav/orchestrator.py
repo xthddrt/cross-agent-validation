@@ -13,7 +13,7 @@ from . import agents as agent_mod
 from . import compare
 from . import review as review_mod
 from .events import EventWriter
-from .gitops import IDENTITY, Exchange, Repo, git, git_ok
+from .gitops import GIT, IDENTITY, Exchange, Repo, git, git_ok
 from .prompts import retry_note, round_prompt
 
 MAX_PATCH_BYTES = 2_000_000
@@ -25,18 +25,21 @@ def clock(seconds):
 
 
 class Orchestrator:
-    def __init__(self, case, run_dir, push=False, thinking=False, resume=False):
+    def __init__(self, case, run_dir, push=False, thinking=False, resume=False, merge=False, run_id=None):
         self.case = case
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.push = push
+        self.merge = merge  # on push: merge into origin's branch when it moved, instead of refusing
         self.thinking = thinking
         self.resume = resume
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.exchange = Exchange(self.run_dir / "exchange.git").ensure()
-        self.repo = Repo(case.host_repo).attach(self.exchange, self.run_dir.name)
+        # the id names this run's refs in the host repo, so two runs on one repo must not share it
+        self.run_id = run_id or self.run_dir.name
+        self.repo = Repo(case.host_repo).attach(self.exchange, self.run_id)
         self.log_path = self.run_dir / "run.log"
-        self.events = EventWriter(self.run_dir / "events.jsonl", self.run_dir.name)
-        self.state = {"case": case.name, "run_id": self.run_dir.name, "phase": "init",
+        self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
+        self.state = {"case": case.name, "run_id": self.run_id, "phase": "init",
                       "round": 0, "agents": {}, "history": []}
 
     # ---------------------------------------------------------------- plumbing
@@ -152,6 +155,7 @@ class Orchestrator:
         else:
             self.log(f"no agreement after {self.case.max_rounds} rounds", "ERROR")
         self.state["phase"] = "disagreement"
+        self.state["summary"] = str(self.write_summary())
         self.save()
         self.emit("run.end", self.case.max_rounds, data={"phase": "disagreement"})
         return self.state
@@ -505,8 +509,10 @@ class Orchestrator:
         self.log(f"ACCEPTED in round {round_no}: {chosen}'s candidate {commit} ({publication['reason']})")
         self.emit("final.complete", round_no, data={"commit": commit, "tree": tree})
         if self.push:
-            self.push_origin(commit)
+            pushed = self.push_origin(commit)
             self.state["final"]["pushed"] = True
+            if pushed != commit:
+                self.state["final"]["merge_commit"] = pushed
             self.save()
             self.write_report(round_no)
             self.emit("push.result", round_no, data={"ok": True, "branch": self.case.branch})
@@ -519,10 +525,28 @@ class Orchestrator:
         branch = self.case.branch
         if not git_ok("fetch", "origin", cwd=self.repo.path):
             raise RuntimeError("cannot fetch origin")
+        target = commit
         if not git_ok("merge-base", "--is-ancestor", f"origin/{branch}", commit, cwd=self.repo.path):
-            raise RuntimeError(f"{commit} is not a fast-forward of origin/{branch}; refusing to push")
-        git("push", "origin", f"{commit}:refs/heads/{branch}", cwd=self.repo.path)
-        self.log(f"pushed {commit[:12]} to origin/{branch}")
+            if not self.merge:
+                raise RuntimeError(f"{commit} is not a fast-forward of origin/{branch}; refusing to push")
+            target = self.merge_commit(commit, f"origin/{branch}")
+        git("push", "origin", f"{target}:refs/heads/{branch}", cwd=self.repo.path)
+        self.log(f"pushed {target[:12]} to origin/{branch}")
+        return target
+
+    def merge_commit(self, commit, upstream):
+        """origin moved during the run: merge the agreed commit into it, or refuse on a conflict."""
+        proc = subprocess.run([GIT, "merge-tree", "--write-tree", "--name-only", upstream, commit],
+                              cwd=str(self.repo.path), capture_output=True, text=True,
+                              encoding="utf-8", errors="replace")
+        lines = proc.stdout.strip().splitlines()
+        if proc.returncode != 0 or not lines:
+            conflicts = ", ".join(line for line in lines[1:] if line.strip())[:500]
+            raise RuntimeError(f"merging into {upstream} conflicts ({conflicts or proc.stderr.strip()}); not pushed")
+        sha = git(*IDENTITY, "commit-tree", lines[0], "-p", self.repo.sha(upstream), "-p", commit,
+                  "-m", f"Merge CAV run {self.run_id}", cwd=self.repo.path)
+        self.log(f"{upstream} moved during the run; merged as {sha[:12]}")
+        return sha
 
     def write_report(self, round_no):
         case, final = self.case, self.state.get("final") or {}
@@ -565,3 +589,55 @@ class Orchestrator:
         lines += ["", "Agreement and passing checks are mechanical evidence, not human approval; a green",
                   "check matrix means it builds, not that it works on real hardware.", ""]
         (self.run_dir / "REPORT.md").write_text("\n".join(lines), encoding="utf-8")
+
+    def write_summary(self):
+        """No agreement: how far apart the two candidates ended, from the reviews and the trees."""
+        case, names = self.case, list(self.case.agents)
+        history = [item for item in self.state["history"] if item.get("results")]
+        lines = [f"# No agreement: {case.name}", ""]
+        if not history:
+            lines.append("No round produced two candidates.")
+        else:
+            last = history[-1]
+            folder = self.run_dir / "reviews" / f"r{last['round']}"
+            lines += [f"- Stopped after round {last['round']} of at most {case.max_rounds}",
+                      f"- Last candidates: " + ", ".join(f"{name} `{last['results'][name]['commit'][:12]}`"
+                                                         for name in names), "",
+                      "## Trend", "",
+                      "| Round | Paths differing | Blocking MUST_FIX | " + " | ".join(
+                          f"{name} approves own / other" for name in names) + " | Checks |",
+                      "|---|---|---|" + "---|" * len(names) + "---|"]
+            mark = lambda value: "yes" if value else "no"
+            for item in history:
+                gate = item.get("blockers") or {}
+                approvals = " | ".join(f"{mark(item['results'][name]['approved'])} / "
+                                       f"{mark(item['results'][name]['other_approved'])}" for name in names)
+                lines.append(f"| {item['round']} | {item['divergence']['differing']} "
+                             f"| {gate.get('blocking_must_fix', '-')} | {approvals} "
+                             f"| {'pass' if gate.get('checks') else 'fail'} |")
+            divergence = self.read_json(folder / "divergence.json")
+            stats = divergence.get("stats") or {}
+            lines += ["", "## Files that still differ", ""]
+            lines += [f"- `{path}` +{stats.get(path, {}).get('added', 0)} -{stats.get(path, {}).get('removed', 0)}"
+                      for path in (divergence.get("differing") or [])[:200]] or ["None: the trees are identical."]
+            for name in names:
+                data = self.read_json(folder / f"{name}-review.json")
+                blocking = [item for item in data.get("findings") or [] if isinstance(item, dict)
+                            and item.get("severity") == "MUST_FIX" and item.get("kind") == "behavioral"]
+                open_disagreements = [item for item in data.get("remaining_disagreements") or []
+                                      if isinstance(item, dict) and item.get("kind") == "behavioral"]
+                open_areas = [item for item in data.get("areas") or []
+                              if isinstance(item, dict) and item.get("status") == "open"]
+                lines += ["", f"## {name}'s last review", ""]
+                lines += [f"- Blocking: [{item.get('id')}] `{item.get('path')}:{item.get('line')}` "
+                          f"{item.get('summary', '')} (fix: {item.get('resolution', '')})" for item in blocking]
+                lines += [f"- Open disagreement: {item.get('area', '')}: {item.get('note', '')}"
+                          for item in open_disagreements]
+                lines += [f"- Open area: {item.get('area', '')} (kept {item.get('kept', '-')}): {item.get('why', '')}"
+                          for item in open_areas]
+                if not (blocking or open_disagreements or open_areas):
+                    lines.append("- Nothing blocking or open was recorded.")
+        path = self.run_dir / "SUMMARY.md"
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.emit("summary.written", self.state.get("round"), data={"path": str(path)})
+        return path

@@ -163,6 +163,21 @@
   .mbody h4 { margin:16px 0 6px; font-size:13px; color:var(--dim); }
   .mbody h4:first-child { margin-top:0; }
 
+  /* pipeline bar: shown when the page is a stage of a pipeline on the home server */
+  #pipe { padding:10px 16px; display:flex; flex-direction:column; gap:8px; }
+  #pipe .prow { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  #pipe a { color:var(--accent); text-decoration:none; }
+  #pipe .repo { font-family:var(--mono); font-size:12.5px; color:var(--dim); overflow-wrap:anywhere; }
+  .stagetabs { display:flex; gap:6px; }
+  .stagetabs a { border:1px solid var(--line); border-radius:8px; padding:4px 12px; color:var(--fg) !important; }
+  .stagetabs a.on { border-color:var(--accent); box-shadow:0 0 0 1px var(--accent) inset; }
+  .stagetabs a.off { opacity:.45; pointer-events:none; }
+  .stagetabs span { color:var(--dim); font-size:12px; margin-left:6px; }
+  #pipe .detail { color:var(--dim); font-size:13px; overflow-wrap:anywhere; }
+  #pipe details pre { white-space:pre-wrap; overflow-wrap:anywhere; font-family:var(--mono); font-size:12.5px; background:var(--sunk);
+                      padding:8px 10px; border-radius:6px; max-height:240px; overflow:auto; margin:6px 0 0; }
+  #sumbtn { background:var(--warn-bg); color:var(--warn); border:0; border-radius:999px; padding:3px 12px; font-size:13px; font-weight:600; }
+
   @media (max-width: 1000px) {
     .agents, .agree { grid-template-columns:1fr; }
     .steps { grid-template-columns:repeat(4, 1fr); row-gap:14px; }
@@ -180,8 +195,11 @@
   <header>
     <h1 id="case">CAV</h1>
     <span class="badge" id="status">connecting</span>
+    <button id="sumbtn" hidden>How far apart</button>
     <span id="meta"></span>
   </header>
+
+  <section class="card" id="pipe" hidden></section>
 
   <nav id="tabs"></nav>
 
@@ -207,7 +225,10 @@
 </dialog>
 
 <script>
-const TOKEN = location.pathname.split('/').filter(Boolean)[0];
+// the page is mounted at /<token>/ (one run) or /<token>/run/<id>/[plan|code]/ (the home server)
+const BASE = location.pathname.replace(/\/+$/, '');
+const TOKEN = BASE.split('/').filter(Boolean)[0];
+const STAGE = BASE.match(/^(\/[^/]+\/run\/[^/]+)(?:\/(plan|code))?$/);  // [_, run base, stage]
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const sha = (s) => String(s || '').slice(0, 8);
@@ -223,7 +244,7 @@ function dur(sec) {
 }
 async function api(name, query = {}) {
   try {
-    const r = await fetch(`/${TOKEN}/api/${name}?` + new URLSearchParams(query), {cache:'no-store'});
+    const r = await fetch(`${BASE}/api/${name}?` + new URLSearchParams(query), {cache:'no-store'});
     return r.ok ? await r.text() : '';
   } catch (e) { return ''; }
 }
@@ -515,6 +536,47 @@ function renderHeader() {
     if (age > 300) html += ` · <span class="stale">no state update for ${dur(age)}</span>`;
   }
   $('meta').innerHTML = html;
+  $('sumbtn').hidden = state.phase !== 'disagreement';
+}
+
+// ------------------------------------------------------------ pipeline
+let pipe = null;
+async function pollPipeline() {
+  if (!STAGE) return;
+  try {
+    const r = await fetch(`${STAGE[1]}/api/pipeline`, {cache:'no-store'});
+    pipe = r.ok ? await r.json() : {};
+  } catch (e) { return; }
+  renderPipeline();
+}
+function renderPipeline() {
+  const el = $('pipe');
+  if (!STAGE || !pipe) return;
+  el.hidden = false;
+  const home = `<a href="/${TOKEN}/">← All runs</a>`;
+  if (!pipe.id) { setHtml(el, `<div class="prow">${home}</div>`); return; }
+  const stageText = (name) => {
+    const s = (pipe.stages || {})[name];
+    if (!s) return 'not started';
+    if (s.agreed) return 'agreed';
+    if (s.phase === 'disagreement') return 'no agreement';
+    if (/failed$/.test(s.phase || '')) return 'failed';
+    return pipe.stage === name ? `round ${s.round || 1}` : (s.phase || '');
+  };
+  const tabs = ['plan', 'code'].map((name, i) =>
+    `<a href="${STAGE[1]}/${name}/" class="${STAGE[2] === name ? 'on' : ''}${(pipe.stages || {})[name] ? '' : ' off'}">` +
+    `${i + 1} ${name === 'plan' ? 'Plan' : 'Code'}<span>${esc(stageText(name))}</span></a>`).join('');
+  let cls = 'run', text = `running · ${pipe.stage || 'starting'}`;
+  if (pipe.stage === 'failed') { cls = 'bad'; text = 'failed'; }
+  else if (pipe.stopped) { cls = 'bad'; text = 'stopped'; }
+  else if (pipe.outcome === 'merged and pushed') { cls = 'ok'; text = pipe.outcome; }
+  else if (pipe.outcome) { cls = 'warn'; text = pipe.outcome; }
+  const detail = pipe.stopped ? 'the pipeline process ended without recording an outcome; see pipeline.log' : pipe.detail;
+  setHtml(el, `<div class="prow">${home}<nav class="stagetabs">${tabs}</nav>` +
+    `<span class="badge ${cls}">${esc(text)}</span><span class="repo">${esc(pipe.repo || pipe.repo_input || '')}` +
+    `${pipe.branch ? ` → ${esc(pipe.branch)}` : ''}</span></div>` +
+    (detail ? `<div class="detail">${esc(detail)}</div>` : '') +
+    `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
 function renderTabs() {
@@ -825,13 +887,16 @@ async function renderDivergence() {
 
 // ---------------------------------------------------------------- modal
 async function openModal(kind, round, arg) {
-  const titles = {prompt:`Prompt sent to ${arg} · round ${round}`, review:`${arg}'s review · round ${round}`,
+  const titles = {summary:'How far apart the two candidates ended', prompt:`Prompt sent to ${arg} · round ${round}`, review:`${arg}'s review · round ${round}`,
                   checks:`${arg}'s checks · round ${round}`, diff:`${arg} · round ${round}`};
   $('mtitle').textContent = titles[kind];
   $('mbody').innerHTML = '<div class="dim">loading…</div>';
   $('modal').showModal();
   let html = '';
-  if (kind === 'prompt') {
+  if (kind === 'summary') {
+    const body = parse(await api('summary')) || {};
+    html = body.summary ? `<pre>${esc(body.summary)}</pre>` : '<div class="dim">No summary written.</div>';
+  } else if (kind === 'prompt') {
     const body = parse(await api('prompt', {round, agent:arg})) || {};
     html = body.prompt ? `<pre>${esc(body.prompt)}</pre>` : '<div class="dim">No prompt recorded for this round.</div>';
   } else if (kind === 'review') {
@@ -902,7 +967,7 @@ async function poll() {
 
 let lastSeq = 0;
 function connect() {
-  const es = new EventSource(`/${TOKEN}/events?after=${lastSeq}`);
+  const es = new EventSource(`${BASE}/events?after=${lastSeq}`);
   es.onmessage = (m) => {
     const e = parse(m.data);
     if (!e || (e.seq || 0) <= lastSeq) return;
@@ -914,7 +979,9 @@ function connect() {
 }
 
 cardSkeleton(0); cardSkeleton(1);
-poll(); connect();
+$('sumbtn').onclick = () => openModal('summary', selected, '');
+poll(); connect(); pollPipeline();
+setInterval(pollPipeline, 3000);
 setInterval(poll, 2000);
 setInterval(schedule, 1000);   // keeps elapsed / idle ticking
 </script>
