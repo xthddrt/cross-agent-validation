@@ -4,9 +4,6 @@ import json
 import pathlib
 
 SEVERITIES = ("MUST_FIX", "SHOULD_FIX", "NIT")
-FINDING_KINDS = ("behavioral", "cosmetic", "editorial")
-# "equivalent" lets an agent record a difference it accepts; only "behavioral" blocks agreement.
-DISAGREEMENT_KINDS = FINDING_KINDS + ("equivalent",)
 
 
 class Review:
@@ -29,31 +26,17 @@ class Review:
 
     @property
     def blocking(self):
-        return int(self.counts.get("blocking_must_fix") or 0)
+        return int(self.counts.get("must_fix") or 0)
 
     @property
-    def behavior_approved(self):
-        return self.data.get("behavior_approved") is True
-
-    @property
-    def other_approved(self):
-        return self.data.get("other_behavior_approved") is True
-
-    @property
-    def open_behavioural(self):
-        return any((item or {}).get("kind") == "behavioral"
-                   for item in (self.data.get("remaining_disagreements") or []))
+    def approvals(self):
+        """Candidate name -> approved; empty for an independent round, which approves nothing."""
+        approve = self.data.get("approve")
+        return {name: value is True for name, value in approve.items()} if isinstance(approve, dict) else {}
 
     def summary(self):
-        counts = self.counts
-        return (f"MUST_FIX={counts.get('must_fix_total', '?')} "
-                f"blocking={counts.get('blocking_must_fix', '?')} "
-                f"approved={self.behavior_approved}/{self.other_approved}")
-
-
-def _count(findings, severity, kind=None):
-    return sum(1 for finding in findings
-               if finding.get("severity") == severity and kind in (None, finding.get("kind")))
+        approvals = " ".join(f"{name}={'yes' if ok else 'no'}" for name, ok in self.approvals.items())
+        return f"MUST_FIX={self.blocking} approves {approvals or '-'}"
 
 
 def _line_count(path):
@@ -63,23 +46,16 @@ def _line_count(path):
         return None
 
 
-def _shape_errors(data):
-    """Reviews are agent-written: every field the orchestrator reads must have the right shape."""
-    errors = []
-    for key in ("areas", "remaining_disagreements"):
-        value = data.get(key)
-        if value is not None and (not isinstance(value, list)
-                                  or any(not isinstance(item, dict) for item in value)):
-            errors.append(f"{key} must be a list of objects")
-    return errors
+def validate(data, agent, round_no, trees=None):
+    """Errors in an agent's review; empty means valid. Fills in `counts` from the findings.
 
-
-def validate(data, agent, round_no, worktree):
-    """Errors in an agent's review; empty means valid. Fills in `counts` from the findings."""
+    `trees` maps each candidate under review to its checkout; None for an independent round,
+    whose review is notes only. Every finding names its candidate and must point at a real line
+    in that candidate's checkout, and approval is withheld only by a MUST_FIX on that candidate.
+    """
     if not isinstance(data, dict):
         return ["review is not an object"]
     errors = []
-    worktree = pathlib.Path(worktree)
     if data.get("agent") != agent:
         errors.append(f"agent is {data.get('agent')!r}, expected {agent!r}")
     try:
@@ -87,13 +63,17 @@ def validate(data, agent, round_no, worktree):
             errors.append(f"round is {data.get('round')!r}, expected {round_no}")
     except (TypeError, ValueError):
         errors.append("round missing or not an integer")
-
     findings = data.get("findings") or []
     if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
         return errors + ["findings must be a list of objects"]
-    shaped = _shape_errors(data)
-    if shaped:
-        return errors + shaped
+    if trees is None:
+        data["counts"] = {"must_fix": 0, "should_fix": 0, "nit": 0}
+        return errors
+
+    approve = data.get("approve")
+    if not isinstance(approve, dict) or set(approve) != set(trees) \
+            or any(not isinstance(value, bool) for value in approve.values()):
+        return errors + [f"approve must map exactly {sorted(trees)} to true or false"]
     ids = [finding.get("id") for finding in findings]
     if any(not isinstance(item, str) or not item for item in ids):
         errors.append("finding ids must be non-empty strings")
@@ -104,21 +84,24 @@ def validate(data, agent, round_no, worktree):
         label = finding.get("id") or "?"
         if finding.get("severity") not in SEVERITIES:
             errors.append(f"{label}: severity {finding.get('severity')!r} invalid")
-        if finding.get("kind") not in FINDING_KINDS:
-            errors.append(f"{label}: kind {finding.get('kind')!r} invalid")
+        candidate = finding.get("candidate")
+        if candidate not in trees:
+            errors.append(f"{label}: candidate must be one of {sorted(trees)}")
+            continue
         # Every finding is evidence: it must point at a real line the other agent can open.
+        root = pathlib.Path(trees[candidate]).resolve()
         path = finding.get("path")
         if not isinstance(path, str) or not path:
             errors.append(f"{label}: no valid path")
             continue
-        target = (worktree / path).resolve()
+        target = (root / path).resolve()
         try:
-            target.relative_to(worktree.resolve())
+            target.relative_to(root)
         except ValueError:
-            errors.append(f"{label}: path escapes the worktree: {path}")
+            errors.append(f"{label}: path escapes {candidate}'s candidate: {path}")
             continue
-        if not target.exists():
-            errors.append(f"{label}: path does not exist: {path}")
+        if not target.is_file():
+            errors.append(f"{label}: {path} is not a file in {candidate}'s candidate")
             continue
         try:
             line = int(finding.get("line"))
@@ -132,28 +115,20 @@ def validate(data, agent, round_no, worktree):
             errors.append(f"{label}: line {line} outside {path} (1..{count})")
 
     # Counts are derived from the findings, never trusted from the agent.
-    blocking = _count(findings, "MUST_FIX", "behavioral")
-    data["counts"] = {"must_fix_total": _count(findings, "MUST_FIX"), "blocking_must_fix": blocking,
-                      "should_fix": _count(findings, "SHOULD_FIX"), "nit": _count(findings, "NIT")}
-
-    for key in ("behavior_approved", "other_behavior_approved"):
-        if not isinstance(data.get(key), bool):
-            errors.append(f"{key} must be boolean")
-        elif data[key] is False and blocking == 0:
-            errors.append(f"{key} is false without a blocking finding")
-
-    for item in data.get("remaining_disagreements") or []:
-        kind = item.get("kind")
-        if kind not in DISAGREEMENT_KINDS:
-            errors.append(f"remaining disagreement {item.get('area')!r}: kind {kind!r} invalid")
-        if kind == "behavioral" and data.get("behavior_approved"):
-            errors.append(
-                f"remaining_disagreements lists {item.get('area')!r} as behavioural while "
-                f"behavior_approved is true; mark it equivalent, move it to areas, or withhold approval")
+    must_fix = {name: sum(1 for f in findings if f.get("severity") == "MUST_FIX" and f.get("candidate") == name)
+                for name in trees}
+    data["counts"] = {"must_fix": sum(must_fix.values()),
+                      "should_fix": sum(1 for f in findings if f.get("severity") == "SHOULD_FIX"),
+                      "nit": sum(1 for f in findings if f.get("severity") == "NIT")}
+    for name, approved in approve.items():
+        if approved and must_fix[name]:
+            errors.append(f"approves {name} but lists a MUST_FIX against it")
+        if not approved and not must_fix[name]:
+            errors.append(f"withholds approval from {name} without a MUST_FIX against it")
     return errors
 
 
-def load(path, agent, round_no, worktree):
+def load(path, agent, round_no, trees=None):
     """The agent's review, validated; None when it wrote none."""
     path = pathlib.Path(path)
     if not path.exists():
@@ -162,4 +137,4 @@ def load(path, agent, round_no, worktree):
         data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as error:
         return Review(agent, round_no, path, {}, [f"invalid JSON: {error}"])
-    return Review(agent, round_no, path, data, validate(data, agent, round_no, worktree))
+    return Review(agent, round_no, path, data, validate(data, agent, round_no, trees))

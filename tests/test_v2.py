@@ -20,7 +20,8 @@ from cav.orchestrator import Orchestrator
 from cav.web import Dashboard
 
 ROUND_RE = re.compile(r"Round (\d+)")
-REVIEW_JSON_RE = re.compile(r"review as JSON to this exact path: (.+)")
+REVIEW_JSON_RE = re.compile(r"REVIEW: write this JSON to (.+)")
+NAMES_RE = re.compile(r"You are (\w+)\. You and (\w+) ")
 
 
 def make_repo(root):
@@ -36,7 +37,11 @@ def make_repo(root):
 
 
 class StructuredFake:
-    """Writes its proposal's files and a valid JSON review."""
+    """Writes its proposal's files and a valid JSON review.
+
+    In a review round it approves its own starting candidate and, unless `approve` is false,
+    the other's; findings default to the other's candidate.
+    """
 
     def __init__(self, name, files, approve=True, findings=None):
         self.name = name
@@ -61,15 +66,11 @@ class StructuredFake:
             target = pathlib.Path(cwd) / name
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(text.encode("utf-8"))
-        data = {
-            "round": round_no,
-            "agent": self.name,
-            "behavior_approved": self.approve,
-            "other_behavior_approved": self.approve,
-            "findings": list(self.findings),
-            "areas": [],
-            "remaining_disagreements": [],
-        }
+        data = {"round": round_no, "agent": self.name, "notes": "fake"}
+        if '"approve"' in prompt:
+            other = NAMES_RE.search(prompt).group(2)
+            data["approve"] = {self.name: True, other: self.approve}
+            data["findings"] = [dict({"candidate": other}, **finding) for finding in self.findings]
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         self.state.finished = True
@@ -159,165 +160,180 @@ class CompareTest(Base):
         self.assertEqual(diff["stats"]["café.txt"], {"added": 1, "removed": 0})
 
 class ReviewValidationTest(Base):
+    def trees(self):
+        return {"deepseek": self.repo, "kimi": self.repo}
+
     def data(self, **overrides):
-        base = {
-            "round": 1, "agent": "deepseek", "counts": {
-                "must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
-            "behavior_approved": True, "other_behavior_approved": True,
-            "findings": [], "areas": [], "remaining_disagreements": [],
-        }
+        base = {"round": 1, "agent": "deepseek", "approve": {"deepseek": True, "kimi": True},
+                "findings": [], "notes": "x"}
         base.update(overrides)
         return base
 
+    def must_fix(self, candidate="kimi", **change):
+        return dict({"id": "F-01", "candidate": candidate, "severity": "MUST_FIX",
+                     "path": "base.txt", "line": 1, "summary": "wrong", "fix": "fix it"}, **change)
+
     def test_clean_review_is_valid(self):
-        self.assertEqual(review.validate(self.data(), "deepseek", 1, self.repo), [])
+        self.assertEqual(review.validate(self.data(), "deepseek", 1, self.trees()), [])
 
-    def test_counts_are_recomputed_from_findings(self):
-        data = self.data(counts={"must_fix_total": 9, "blocking_must_fix": 9,
-                                 "should_fix": 9, "nit": 9})
-        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
-        self.assertEqual(data["counts"], {"must_fix_total": 0, "blocking_must_fix": 0,
-                                          "should_fix": 0, "nit": 0})
+    def test_counts_are_derived_from_findings(self):
+        data = self.data(counts={"must_fix": 9}, approve={"deepseek": True, "kimi": False},
+                         findings=[self.must_fix(), self.must_fix(id="F-02", severity="NIT")])
+        self.assertEqual(review.validate(data, "deepseek", 1, self.trees()), [])
+        self.assertEqual(data["counts"], {"must_fix": 1, "should_fix": 0, "nit": 1})
 
-    def test_blocking_count_is_derived_from_findings(self):
-        data = self.data(
-            counts={"must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
-            behavior_approved=False, other_behavior_approved=False,
-            findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
-                       "path": "base.txt", "line": 1}])
-        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
-        self.assertEqual(data["counts"]["blocking_must_fix"], 1)
-        self.assertEqual(data["counts"]["must_fix_total"], 1)
+    def test_approval_is_withheld_only_with_a_must_fix_on_that_candidate(self):
+        errors = review.validate(self.data(approve={"deepseek": True, "kimi": False}), "deepseek", 1, self.trees())
+        self.assertTrue(any("without a MUST_FIX" in error for error in errors), errors)
+        data = self.data(findings=[self.must_fix()])
+        errors = review.validate(data, "deepseek", 1, self.trees())
+        self.assertTrue(any("approves kimi but lists a MUST_FIX" in error for error in errors), errors)
+        data = self.data(approve={"deepseek": True, "kimi": False}, findings=[self.must_fix(candidate="deepseek")])
+        self.assertTrue(review.validate(data, "deepseek", 1, self.trees()),
+                        "a MUST_FIX on one candidate does not justify refusing the other")
 
-    def test_prompt_states_the_review_rules(self):
-        text = prompts.review_rules("a.json")
-        self.assertIn("blocks agreement", text)
-        self.assertIn('no "behavioral"', text)
-        self.assertIn('"equivalent"', text)
-        self.assertIn("not per file", text)
-        self.assertNotIn('"counts"', text, "agents are not asked for numbers the orchestrator derives")
+    def test_style_findings_never_block(self):
+        data = self.data(findings=[self.must_fix(severity="SHOULD_FIX")])
+        self.assertEqual(review.validate(data, "deepseek", 1, self.trees()), [])
 
-    def test_equivalent_kind_is_allowed_for_remaining_differences(self):
-        data = self.data(remaining_disagreements=[
-            {"area": "observer summary envelope", "kind": "equivalent", "note": "both behave the same"}])
-        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
-        data = self.data(remaining_disagreements=[{"area": "x", "kind": "equivalent"}])
-        data["behavior_approved"] = True
-        self.assertEqual(review.validate(data, "deepseek", 1, self.repo), [])
+    def test_findings_point_at_a_real_line_in_their_candidate(self):
+        trees = {"deepseek": self.repo, "kimi": self.tmp}
+        data = self.data(approve={"deepseek": True, "kimi": False}, findings=[self.must_fix()])
+        self.assertTrue(any("not a file in kimi" in e for e in review.validate(data, "deepseek", 1, trees)))
+        data = self.data(approve={"deepseek": True, "kimi": False}, findings=[self.must_fix(line=99)])
+        self.assertTrue(any("outside base.txt" in e for e in review.validate(data, "deepseek", 1, self.trees())))
+        data = self.data(approve={"deepseek": True, "kimi": False}, findings=[self.must_fix(path="../x")])
+        self.assertTrue(any("escapes" in e for e in review.validate(data, "deepseek", 1, self.trees())))
 
-    def test_cited_line_must_exist(self):
-        data = self.data(findings=[{"id": "F-01", "severity": "SHOULD_FIX", "kind": "cosmetic",
-                                    "path": "base.txt", "line": 99}],
-                         counts={"must_fix_total": 0, "blocking_must_fix": 0,
-                                 "should_fix": 1, "nit": 0})
-        errors = review.validate(data, "deepseek", 1, self.repo)
-        self.assertTrue(any("outside base.txt" in error for error in errors))
+    def test_approvals_must_name_exactly_both_candidates(self):
+        for approve in ({"deepseek": True}, {"deepseek": True, "kimi": "yes"}, None,
+                        {"deepseek": True, "kimi": True, "other": True}):
+            with self.subTest(approve=approve):
+                self.assertTrue(review.validate(self.data(approve=approve), "deepseek", 1, self.trees()))
 
-    def test_refusal_without_finding_is_invalid(self):
-        data = self.data(behavior_approved=False)
-        errors = review.validate(data, "deepseek", 1, self.repo)
-        self.assertTrue(any("without a blocking finding" in error for error in errors))
-
-    def test_cosmetic_must_fix_does_not_block(self):
-        data = self.data(findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "cosmetic",
-                                    "path": "base.txt", "line": 1}],
-                         counts={"must_fix_total": 1, "blocking_must_fix": 0,
-                                 "should_fix": 0, "nit": 0})
-        result = review.Review("deepseek", 1, self.tmp / "r.json", data,
-                               review.validate(data, "deepseek", 1, self.repo))
+    def test_independent_round_review_is_notes_only(self):
+        data = {"round": 1, "agent": "deepseek", "notes": "approach"}
+        result = review.Review("deepseek", 1, self.tmp / "r.json", data, review.validate(data, "deepseek", 1))
         self.assertTrue(result.valid)
-        self.assertEqual(result.blocking, 0)
-
-    def test_finding_without_a_line_is_invalid(self):
-        data = self.data(findings=[{"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
-                                    "path": "base.txt", "summary": "wrong"}],
-                         counts={"must_fix_total": 1, "blocking_must_fix": 1,
-                                 "should_fix": 0, "nit": 0},
-                         behavior_approved=False, other_behavior_approved=False)
-        errors = review.validate(data, "deepseek", 1, self.repo)
-        self.assertTrue(any("line missing" in error for error in errors), errors)
+        self.assertEqual(result.approvals, {})
 
     def test_malformed_review_fields_are_rejected_not_crashed(self):
         cases = {
             "findings": {"findings": ["F-01"]},
-            "remaining_disagreements": {"remaining_disagreements": ["review.py"]},
-            "areas": {"areas": ["review"]},
-            "behavior_approved": {"behavior_approved": "true"},
-            "unhashable id": {"findings": [{"id": ["F-01"], "severity": "NIT", "kind": "cosmetic",
-                                            "path": "base.txt", "line": 1}],
-                              "counts": {"must_fix_total": 0, "blocking_must_fix": 0,
-                                         "should_fix": 0, "nit": 1}},
-            "path is not a string": {"findings": [{"id": "F-01", "severity": "NIT",
-                                                   "kind": "cosmetic", "path": 3, "line": 1}],
-                                     "counts": {"must_fix_total": 0, "blocking_must_fix": 0,
-                                                "should_fix": 0, "nit": 1}},
+            "unhashable id": {"findings": [{"id": ["F-01"], "candidate": "kimi", "severity": "NIT",
+                                            "path": "base.txt", "line": 1}]},
+            "path is not a string": {"findings": [{"id": "F-01", "candidate": "kimi", "severity": "NIT",
+                                                   "path": 3, "line": 1}]},
+            "no candidate": {"findings": [{"id": "F-01", "severity": "NIT", "path": "base.txt", "line": 1}]},
+            "no line": {"findings": [{"id": "F-01", "candidate": "kimi", "severity": "NIT", "path": "base.txt"}]},
+            "wrong agent": {"agent": "kimi"},
         }
         for label, overrides in cases.items():
             with self.subTest(field=label):
-                errors = review.validate(self.data(**overrides), "deepseek", 1, self.repo)
-                self.assertTrue(errors, f"{label} should be rejected")
+                self.assertTrue(review.validate(self.data(**overrides), "deepseek", 1, self.trees()),
+                                f"{label} should be rejected")
+
+    def test_prompt_states_the_review_rules(self):
+        text = "\n".join(prompts.review_block("deepseek", "kimi", 2, "a.json", reviewing=True, planning=False))
+        self.assertIn('"approve": {"deepseek": true|false, "kimi": true|false}', text)
+        self.assertIn("never block", text)
+        self.assertNotIn('"counts"', text, "agents are not asked for numbers the orchestrator derives")
+
+
+class ApprovesFrom(StructuredFake):
+    """Withholds approval of the other candidate (with a MUST_FIX) before round `first`."""
+
+    def __init__(self, name, files, first):
+        super().__init__(name, files)
+        self.first = first
+
+    def run(self, prompt, cwd):
+        early = int(ROUND_RE.search(prompt).group(1)) < self.first
+        self.approve = not early
+        self.findings = [{"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
+                          "summary": "wrong", "fix": "fix"}] if early else []
+        return super().run(prompt, cwd)
 
 
 class AcceptanceTest(Base):
-    def test_mutual_approval_accepts_different_trees(self):
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}),
-        }
-        orchestrator, state = self.run_with(self.case(), fakes)
+    def branch(self, name, files):
+        git("checkout", "-q", "-B", name, self.base, cwd=self.repo)
+        for path, text in files.items():
+            (self.repo / path).write_bytes(text.encode())
+        git("add", "-A", cwd=self.repo)
+        git("commit", "-q", "-m", name, cwd=self.repo)
+        sha = git("rev-parse", "HEAD", cwd=self.repo)
+        git("checkout", "-q", "--detach", self.base, cwd=self.repo)
+        return sha
+
+    def two_starts(self, **overrides):
+        starts = {"deepseek": self.branch("ds", {"shared.txt": "deepseek\n"}),
+                  "kimi": self.branch("km", {"shared.txt": "kimi\n"})}
+        case = self.case(**overrides)
+        for name, sha in starts.items():
+            case.agents[name].bootstrap_ref = sha
+        return case, starts
+
+    def test_mutual_approval_publishes_a_reviewed_starting_candidate(self):
+        """What is published is a candidate both agents reviewed, not a proposal written after."""
+        case, starts = self.two_starts(max_rounds=1)
+        fakes = {name: StructuredFake(name, lambda r: {"shared.txt": "rewritten after review\n"})
+                 for name in ("deepseek", "kimi")}
+        orchestrator, state = self.run_with(case, fakes)
         self.assertEqual(state["phase"], "converged")
         self.assertEqual(state["history"][-1]["verdict"], "accepted")
         published = state["final"]["published_from"]["agent"]
-        self.assertEqual(state["final"]["tree"], state["history"][-1]["results"][published]["tree"],
-                         "acceptance publishes one of the two approved trees unchanged")
+        self.assertEqual(state["final"]["commit"], starts[published])
+        self.assertNotIn(state["final"]["commit"],
+                         [result["commit"] for result in state["history"][-1]["results"].values()])
         self.assertIn("shared.txt", (orchestrator.run_dir / "REPORT.md").read_text(encoding="utf-8"))
-        for gone in ("WAIVED.md", "TASK.md", "signoff", "final"):
-            self.assertFalse((orchestrator.run_dir / gone).exists(), gone)
-
-    def test_approved_candidate_is_published_without_another_agent_round(self):
-        """Nothing is rewritten after agreement, so there is nothing to re-check or re-approve."""
-        fakes = {
-            "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "value   \n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "value\n"}),
-        }
-        _, state = self.run_with(self.case(max_rounds=1), fakes)
-        published = state["final"]["published_from"]["agent"]
-        self.assertEqual(state["final"]["commit"], state["history"][-1]["results"][published]["commit"])
         self.assertEqual(sum(fake.calls for fake in fakes.values()), 2, "one agent run each, no confirmation")
 
+    def test_original_branches_are_checked_before_they_can_be_accepted(self):
+        check = "{python} -c \"import sys; sys.exit(open('shared.txt').read() != 'kimi\\n')\""
+        case, starts = self.two_starts(max_rounds=1, checks=[check])
+        fakes = {name: StructuredFake(name, lambda r: {"shared.txt": "kimi\n"}) for name in ("deepseek", "kimi")}
+        _, state = self.run_with(case, fakes)
+        entry = state["history"][0]
+        self.assertEqual({name: c["ok"] for name, c in entry["start_checks"].items()},
+                         {"deepseek": False, "kimi": True})
+        self.assertEqual(entry["verdict"], "diverged", "an approved candidate that fails the checks is not accepted")
+
     def test_publication_prefers_the_candidate_closest_to_its_original(self):
-        """Neither agent is a default: the one that needed fewer changes is published, whichever
-        is listed first."""
+        """Neither agent is a default: of the two approved candidates, the one that changed less
+        from its original branch is published, whichever agent is listed first."""
         for first in ("deepseek", "kimi"):
             with self.subTest(listed_first=first):
                 self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-v2-"))
                 self.repo, self.base = make_repo(self.tmp)
                 fakes = {
-                    "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "a\nb\nc\n",
-                                                                       "more.txt": "x\n"}),
-                    "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "a\n"}),
+                    "deepseek": ApprovesFrom("deepseek", lambda r: {"shared.txt": "a\nb\nc\n", "more.txt": "x\n"}
+                                             if r == 1 else {}, first=2),
+                    "kimi": ApprovesFrom("kimi", lambda r: {"shared.txt": "a\n"} if r == 1 else {}, first=2),
                 }
-                case = self.case(max_rounds=1)
+                case = self.case(max_rounds=2)
                 order = [first] + [name for name in case.agents if name != first]
                 case.agents = {name: case.agents[name] for name in order}
                 _, state = self.run_with(case, fakes)
+                self.assertEqual(state["final"]["round"], 2)
                 published = state["final"]["published_from"]
                 self.assertEqual(published["agent"], "kimi")
+                self.assertEqual(state["final"]["commit"], state["history"][0]["results"]["kimi"]["commit"],
+                                 "round 2 approved round 1's proposals, so one of those is published")
                 self.assertEqual(published["changes"]["kimi"], {"lines_changed": 1, "files_changed": 1})
                 self.assertEqual(published["changes"]["deepseek"], {"lines_changed": 4, "files_changed": 2})
-                self.assertIn("fewest changes", published["reason"])
 
     def test_refusal_with_finding_blocks_publication(self):
-        finding = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral",
-                   "path": "shared.txt", "line": 1, "summary": "wrong", "resolution": "fix"}
+        finding = {"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
+                   "summary": "wrong", "fix": "fix"}
         fakes = {
             "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "deepseek\n"}),
-            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"},
-                                   approve=False, findings=[finding]),
+            "kimi": StructuredFake("kimi", lambda r: {"shared.txt": "kimi\n"}, approve=False, findings=[finding]),
         }
         orchestrator, state = self.run_with(self.case(max_rounds=1), fakes)
         self.assertEqual(state["phase"], "disagreement")
         self.assertFalse((orchestrator.run_dir / "REPORT.md").exists())
+        self.assertTrue((orchestrator.run_dir / "SUMMARY.md").exists())
         self.assertIsNone(state.get("final"))
 
     def test_refusal_without_finding_fails_the_round(self):
@@ -348,8 +364,7 @@ class AcceptanceTest(Base):
         stale = self.tmp / "run" / "reviews" / "r1" / "kimi-review.json"
         stale.parent.mkdir(parents=True)
         stale.write_text(json.dumps({
-            "round": 1, "agent": "kimi", "behavior_approved": True, "other_behavior_approved": True,
-            "counts": {"must_fix_total": 0, "blocking_must_fix": 0, "should_fix": 0, "nit": 0},
+            "round": 1, "agent": "kimi", "approve": {"deepseek": True, "kimi": True},
             "findings": []}), encoding="utf-8")
         fakes = {
             "deepseek": StructuredFake("deepseek", lambda r: {"shared.txt": "same\n"}),
@@ -366,6 +381,8 @@ class AcceptanceTest(Base):
         case = self.case(bootstrap="base", max_rounds=1)
         orchestrator, state = self.run_with(case, fakes)
         self.assertEqual(state["history"][0]["phase"], "implement")
+        self.assertEqual(state["history"][0]["verdict"], "independent", "an unreviewed round is never accepted")
+        self.assertIsNone(state.get("final"))
         for name in ("deepseek", "kimi"):
             self.assertEqual(orchestrator.exchange.sha(f"candidate/{name}/r0"), self.base)
 
@@ -441,7 +458,7 @@ class IsolationTest(Base):
         self.assertIn("kimi.txt", (rounds / "deepseek-other.patch").read_text(encoding="utf-8"))
         self.assertIn("deepseek.txt", (rounds / "kimi-other.patch").read_text(encoding="utf-8"))
         prompt = (rounds / "deepseek-context.md").read_text(encoding="utf-8")
-        self.assertIn("equal standing", prompt)
+        self.assertIn(str(rounds / "candidates" / "kimi"), prompt)
         self.assertNotIn("baseline", prompt.lower())
 
 
@@ -472,8 +489,8 @@ class UnitTest(Base):
         self.assertEqual(state["history"][0]["starts"], {"deepseek": self.base, "kimi": kimi_ref})
         for name in ("deepseek", "kimi"):
             prompt = (orchestrator.run_dir / "rounds" / "r1" / f"{name}-context.md").read_text(encoding="utf-8")
-            self.assertIn("WRITE ONE NEW PROPOSAL", prompt)
-            self.assertNotIn("CF-01", prompt, "no per-file decisions are asked for")
+            self.assertIn("Judge each against the task only", prompt)
+            self.assertNotIn("yours", prompt, "candidates are named by agent, not by ownership")
 
     def test_removed_settings_are_rejected(self):
         for key, value in (("canonical_agent", "deepseek"), ("carry_forward_limit", 20),
@@ -488,22 +505,22 @@ class UnitTest(Base):
                 config.load(path)
 
     def test_acceptance_rule(self):
-        """Checks pass, no behavioural MUST_FIX, both approve both, nothing behavioural left open."""
+        """Both approve both starting candidates and those passed the checks; an independent
+        round is never accepted."""
         orchestrator = Orchestrator(self.case(), self.tmp / "rule")
 
-        def verdict(**change):
-            results = {name: {"tree": name, "blocking": 0, "counts": {"must_fix_total": 0},
-                              "approved": True, "other_approved": True, "open_behavioural": False,
-                              "unexplained": []} for name in ("deepseek", "kimi")}
-            results["kimi"].update(change)
-            checks = {name: {"ok": change.get("checks", True)} for name in results}
-            return orchestrator.blockers(results, checks)["verdict"]
+        def verdict(phase="reconcile", checks=True, **approves):
+            results = {name: {"blocking": 0, "approves": {"deepseek": True, "kimi": True}}
+                       for name in ("deepseek", "kimi")}
+            results["kimi"]["approves"].update(approves)
+            start_checks = {name: {"ok": checks} for name in results}
+            return orchestrator.blockers(results, start_checks, phase)["verdict"]
 
         self.assertEqual(verdict(), "accepted", "different trees are fine when both approve")
-        for change in ({"checks": False}, {"blocking": 1}, {"approved": False},
-                       {"other_approved": False}, {"open_behavioural": True}):
-            with self.subTest(**change):
-                self.assertEqual(verdict(**change), "diverged")
+        self.assertEqual(verdict(checks=False), "diverged")
+        self.assertEqual(verdict(deepseek=False), "diverged")
+        self.assertEqual(verdict(kimi=False), "diverged", "approving your own candidate is not enough")
+        self.assertEqual(verdict(phase="implement"), "independent", "nothing was reviewed in round 1")
 
     def test_task_prompt_and_file_are_exclusive(self):
         path = self.tmp / "case.json"

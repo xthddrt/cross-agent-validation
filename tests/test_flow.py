@@ -14,7 +14,7 @@ from cav.gitops import Repo, git, git_ok
 from cav.orchestrator import Orchestrator
 from tests.test_v2 import ROUND_RE, StructuredFake, make_repo
 
-BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "kind": "behavioral", "path": "shared.txt", "line": 1,
+BLOCKING = {"id": "F-01", "severity": "MUST_FIX", "path": "base.txt", "line": 1,
             "summary": "the other candidate is wrong", "resolution": "fix it"}
 
 
@@ -54,13 +54,14 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(state["phase"], "converged")
         self.assertEqual(len(state["history"]), 2)
         self.assertFalse(state["history"][0]["converged"], "a blocking finding stops round 1")
-        self.assertFalse(state["history"][0]["blockers"]["trees_equal"])
         self.assertEqual(state["history"][0]["divergence"]["differing"], 1,
                          "round 2 starts from two proposals that differ in one path")
         self.assertTrue(state["history"][1]["converged"])
         final = state["final"]
-        self.assertEqual(final["tree"], state["history"][1]["results"]["kimi"]["tree"])
-        self.assertEqual(git("show", f"{final['commit']}:shared.txt", cwd=self.repo).strip(), "agreed")
+        published = final["published_from"]["agent"]
+        self.assertEqual(final["commit"], state["history"][0]["results"][published]["commit"],
+                         "round 2 approved round 1's proposals, so one of those is published")
+        self.assertEqual(git("show", f"{final['commit']}:shared.txt", cwd=self.repo).strip(), published)
         self.assertTrue((orchestrator.run_dir / "REPORT.md").exists())
         self.assertIn("finished", (orchestrator.run_dir / "run.log").read_text(encoding="utf-8"))
 
@@ -83,8 +84,8 @@ class LoopTest(unittest.TestCase):
                 self.assertEqual(git("rev-parse", "HEAD", cwd=checkout), previous["results"][other]["commit"])
                 self.assertEqual((checkout / "shared.txt").read_text(encoding="utf-8"), f"{other} round {n - 1}\n")
                 prompt = (run_dir / "rounds" / f"r{n}" / f"{name}-context.md").read_text(encoding="utf-8")
-                self.assertIn(f"- yours, which your working tree starts from: {previous['results'][name]['commit']}", prompt)
-                self.assertIn(f"- {other}'s: {previous['results'][other]['commit']}", prompt)
+                self.assertIn(f"- {name}: {previous['results'][name]['commit']} (your working tree starts here", prompt)
+                self.assertIn(f"- {other}: {previous['results'][other]['commit']} (checkout: {checkout}", prompt)
                 self.assertIn(str(checkout), prompt)
                 self.assertIn(str(run_dir / "reviews" / f"r{n - 1}" / f"{other}-review.json"), prompt)
                 patch = (run_dir / "rounds" / f"r{n}" / f"{name}-other.patch").read_text(encoding="utf-8")
