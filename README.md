@@ -7,9 +7,11 @@ judge   both, blind and separately: approve or reject each of the two candidates
         defect), name the one they would keep, and write a plan (≤500 words) whose first line names
         the candidate to build on. A candidate both approve, with passing checks, is the result.
 plan    with no candidates yet (a task on a repo): both write a plan (≤500 words), separately
-agree   both approve or reject each of the two plans (a rejection needs a missed acceptance criterion
-        or a reason it would not work, ≤100 words). A plan both approve is the plan; otherwise the
-        plan both would keep, else a coin flip.
+revise  both read both plans (no authors) and the reviews, and each writes a revised plan (≤500 words)
+agree   both approve or reject each revised plan, shown exactly as the builders will get it (the
+        reviews' defects in its base attached); a rejection needs a missed acceptance criterion or a
+        reason it would not work, ≤100 words. A plan both approve is the plan; otherwise the plan
+        both would keep, else a coin flip.
 build   both implement the agreed plan from the same base, separately; the checks run. The two
         results are the next judge's candidates.
 publish a candidate both approve; after 3 builds, the one both would keep (a split: a coin flip).

@@ -5,9 +5,11 @@
              500 words) whose first line names the candidate to build on. A candidate both
              approve, with passing checks, is the result.
     plan     a task with no candidates yet: both write a plan, separately
-    agree    both read the two plans (no authors) and approve or reject each (a rejection needs
-             a missed acceptance criterion or a reason it would not work). A plan both approve
-             is the plan; otherwise the plan both would keep, or a coin flip.
+    revise   both read both plans (no authors) and the reviews, and each writes a revised plan
+    agree    both approve or reject each revised plan, shown as the builders will get it (with
+             the reviews' defects in its base attached); a rejection needs a missed acceptance
+             criterion or a reason it would not work. A plan both approve is the plan; otherwise
+             the plan both would keep, or a coin flip.
     build    both implement the agreed plan from the same base, separately; the checks run, and
              the two results are the next judge's candidates
     publish  a candidate both approve; after the last build, the one both would keep (a split
@@ -48,7 +50,7 @@ MAX_BUILDS = 3
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*candidate\s+([XY])\b")
 CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home() / "Documents" / "Default Project")
 GITHUB = re.compile(r"^(?:https?://github\.com/|git@github\.com:)([\w.-]+)/([\w.-]+?)(?:\.git)?/?$", re.I)
-STEP_SECONDS = {"judge": 2700, "plan": 1800, "agree": 1800, "build": 5400}
+STEP_SECONDS = {"judge": 2700, "plan": 1800, "revise": 1800, "agree": 1800, "build": 5400}
 # The agents' side of a run: outside every git repo, so no git command there finds any history.
 BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
                           or pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home()) / "cav-blind")
@@ -367,24 +369,51 @@ class Flow:
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
         return paths
 
+    def revise(self, cycle, plans, candidates, reviews):
+        """Both read both plans (no authors) and the reviews, and each writes a revised plan, so no
+        plan goes to the vote before its writer has seen everything the voters will see."""
+        folder = self.blind / "plans"
+        folder.mkdir(exist_ok=True)
+        numbers = _numbered(self.names)
+        paths = {name: folder / f"c{cycle}-revised-{numbers[name]}.md" for name in self.names}
+        self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
+        listed = sorted((int(re.search(r"-(\d)\.md$", path.name).group(1)), path) for path in plans.values())
+        entry = self.begin("revise", cycle)
+        self.ask({name: (prompts.revise(self.task, self.listing(candidates), reviews, listed, paths[name]), self.blind)
+                  for name in self.names}, "revise",
+                 lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
+                                                if paths[name].exists() else None, candidates))
+        self.end(entry, "revised", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
+        return paths
+
     def agree(self, cycle, plans, candidates, reviews):
-        """Both approve or reject each plan. A plan both approve is the plan (both: the shorter, then
-        a coin flip); none: the plan both would keep, or a coin flip. The rejections and the
-        reviews' defects against its base go with it to the builders."""
+        """Two different plans are first revised by both agents; then both approve or reject each
+        revised plan, read exactly as the builders will get it (with the reviews' defects in its
+        base attached). A plan both approve is the plan (both: the shorter, then a coin flip); none:
+        the plan both would keep, or a coin flip, and the rejections go with it to the builders."""
+        def same():
+            return len({plans[name].read_text(encoding="utf-8").strip() for name in self.names}) == 1
+
+        if not same():
+            plans = self.revise(cycle, plans, candidates, reviews)
         texts = {name: plans[name].read_text(encoding="utf-8") for name in self.names}
-        numbers = {int(re.search(r"plan-(\d)", plans[name].name).group(1)): name for name in self.names}
+        numbers = {int(re.search(r"-(\d)\.md$", plans[name].name).group(1)): name for name in self.names}
+        ballots = {name: self.ballot(texts[name], candidates, reviews) for name in self.names}
         folder = self.blind / "agree"
         folder.mkdir(exist_ok=True)
         entry = self.begin("agree", cycle)
-        if len(set(text.strip() for text in texts.values())) == 1:
+        if same():
             chosen, how, objections, approvals = numbers[1], "the two plans are the same", [], {}
         else:
+            listed = []
+            for n in (1, 2):
+                path = self.blind / "plans" / f"c{cycle}-ballot-{n}.md"
+                path.write_text(ballots[numbers[n]], encoding="utf-8")
+                listed.append((n, path))
             replies = {name: folder / f"c{cycle}-reply-{n}.json" for name, n in _numbered(self.names).items()}
             self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in replies.items()})
-            listed = [(n, plans[numbers[n]]) for n in (1, 2)]
-            sources = ([(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)]
-                       if candidates else [])
-            self.ask({name: (prompts.agree(self.task, sources, reviews, listed, replies[name]), self.blind)
+            self.ask({name: (prompts.agree(self.task, self.listing(candidates), reviews, listed, replies[name]),
+                             self.blind)
                       for name in self.names}, "agree", lambda name: self.agree_problem(replies[name]))
             data = {name: _json(replies[name]) for name in self.names}
             approvals = {name: data[name]["approve"] for name in self.names}
@@ -405,14 +434,8 @@ class Flow:
             number = next(n for n, name in numbers.items() if name == chosen)
             objections = [data[name]["why"][str(number)] for name in self.names
                           if not approvals[name][str(number)]]
-        body = texts[chosen].rstrip() + "\n"
+        body = ballots[chosen]
         label = plan_base(body) if candidates else None
-        found = [item for path in reviews for item in (_json(path) or {}).get("defects") or []
-                 if item.get("candidate") == label]
-        if found:
-            body += ("\n## Defects found in the base (fix these too)\n\n"
-                     + "\n".join(f"- {item.get('file', '')}:{item.get('line', '')} {item['problem']}"
-                                 + (f" (fix: {item['fix']})" if item.get("fix") else "") for item in found) + "\n")
         if objections:
             body += "\n## Objections to this plan (address them where they are right)\n\n" + "\n".join(
                 f"- {text}" for text in objections) + "\n"
@@ -517,6 +540,24 @@ class Flow:
             return label, f"no candidate had both approvals; both would keep Candidate {label}"
         label = random.choice(LABELS)
         return label, f"no candidate had both approvals and they would keep different ones; coin flip chose Candidate {label}"
+
+    @staticmethod
+    def listing(candidates):
+        """The candidates' folders for a prompt, in random order; none without candidates."""
+        return [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)] if candidates else []
+
+    @staticmethod
+    def ballot(text, candidates, reviews):
+        """A plan as the builders get it: the reviews' defects in the base it names are attached."""
+        body = text.rstrip() + "\n"
+        label = plan_base(body) if candidates else None
+        found = [item for path in reviews for item in (_json(path) or {}).get("defects") or []
+                 if item.get("candidate") == label]
+        if found:
+            body += ("\n## Defects found in the base (fix these too)\n\n"
+                     + "\n".join(f"- {item.get('file', '')}:{item.get('line', '')} {item['problem']}"
+                                 + (f" (fix: {item['fix']})" if item.get("fix") else "") for item in found) + "\n")
+        return body
 
     def snapshot(self, folder, parent, what):
         """Commit a plain folder on top of `parent` through a separate index: the folder never gets a

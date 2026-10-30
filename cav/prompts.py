@@ -45,14 +45,33 @@ def judge(task, candidates, reply, plan_path):
     ]) + "\n"
 
 
-def agree(task, candidates, reviews, plans, reply):
-    """`candidates`: (label, folder); `reviews`: review files; `plans`: (number, path)."""
+def _context(task, candidates, reviews, plans):
+    """The task, the candidates and their reviews, and two plans. `candidates`: (label, folder);
+    `reviews`: review files; `plans`: (number, path)."""
     lines = _task(task)
     if candidates:
         lines += ["", "CANDIDATES (read-only folders)"] + [f"- Candidate {label}: {folder}" for label, folder in candidates]
     if reviews:
         lines += ["", "REVIEWS OF THE CANDIDATES (authors not shown)"] + [f"- {path}" for path in sorted(map(str, reviews))]
-    lines += ["", "PLANS (authors not shown)"] + [f"- Plan {number}: {path}" for number, path in plans]
+    return lines + ["", "PLANS (authors not shown)"] + [f"- Plan {number}: {path}" for number, path in plans]
+
+
+def revise(task, candidates, reviews, plans, path):
+    base = '[first line "Base: Candidate X" or "Base: Candidate Y"]; ' if candidates else ""
+    cover = "cover the defects the reviews found in the base you choose, " if reviews else ""
+    return "\n".join([
+        *_context(task, candidates, reviews, plans), "",
+        f"Read both plans{' and the reviews' if reviews else ''}. Write a revised plan to {path}, at most "
+        f"{PLAN_WORDS} words: {base}the plan you expect both agents to approve. Keep what is right in either plan, "
+        f"fix what misses an acceptance criterion or would not work, {cover}and keep it to {PARETO}",
+        "Don't edit code. Don't ask questions.",
+    ]) + "\n"
+
+
+def agree(task, candidates, reviews, plans, reply):
+    lines = _context(task, candidates, reviews, plans)
+    if reviews:
+        lines += ["", "Each plan ends with the defects the reviews found in its base; the builders get it exactly as written."]
     lines += [
         "", "Approve each plan unless it misses an acceptance criterion or would not work. A plan you would have "
         "written differently is still approved; preferring the other plan is not a reason to reject one.",
