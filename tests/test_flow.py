@@ -37,7 +37,7 @@ class Fake:
             self.folders = {}  # what this session has seen: a later prompt in the cycle does not repeat it
         self.prompts.append(prompt)
         reply = re.search(r"Write to (\S+):", prompt)
-        if "Approve each candidate" in prompt:
+        if "\nCANDIDATES\n" in prompt:
             folders = self.folders = dict(re.findall(r"^- ([XY]): (\S+) \(checks", prompt, re.M))
             approve = {label: self.approve(pathlib.Path(folder)) for label, folder in folders.items()}
             defects = [{"candidate": label, "file": "base.txt", "line": 1, "problem": "wrong"}
@@ -65,7 +65,7 @@ class Fake:
                                           prompt, re.M).group(1))
             (work / "feature.txt").write_text(f"built by {self.name}\n", encoding="utf-8")
             (work / f"build-{self.builds}.txt").write_text(self.name, encoding="utf-8")
-            pathlib.Path(re.search(r"what you did to (\S+)\.$", prompt, re.M).group(1)).write_text("built", encoding="utf-8")
+            pathlib.Path(re.search(r"^Write a note to (\S+):", prompt, re.M).group(1)).write_text("built", encoding="utf-8")
         self.state.finished = True
         return {"ok": True, "text": "done", "reason": "completed"}
 
@@ -152,6 +152,8 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.steps(flow), [("judge", "accepted")])
         self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
         self.assertNotIn("prefer", fakes["kimi"].prompts[0], "the branches' judge plans; it is not asked to pick")
+        self.assertNotIn("\nPLAN", fakes["kimi"].prompts[0], "branches follow no plan")
+        self.assertIn("clear departure from the task", fakes["kimi"].prompts[0])
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b", "note feat"))
 
     def test_no_shared_approval_agrees_a_base_and_both_build_from_it(self):
@@ -173,6 +175,7 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
                         "the voters see each plan as the builders will get it")
         self.assertIn("REVIEWS", vote, "the first vote lists both reviews; each judge has written only one")
+        self.assertIn("leaves a listed defect unfixed", vote)
         for fake in fakes.values():
             self.assertEqual(sum(p.startswith("TASK") for p in fake.prompts), fake.sessions,
                              "the task is given once per session, in the cycle's first prompt")
@@ -230,6 +233,13 @@ class FlowTest(unittest.TestCase):
         self.assertIn(again["start"], first["commits"].values(), "the second build starts from a first build")
         self.assertEqual([fake.sessions for fake in fakes.values()], [3, 3], "a fresh session at each of the 3 cycles")
         self.assertIn("Defects found in the base", (flow.run_dir / "plans" / "c2-agreed.md").read_text(encoding="utf-8"))
+        judges = [p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p]
+        self.assertEqual([pathlib.Path(re.search(r"^PLAN \(both candidates implement it\)\n- (\S+)$", p, re.M).group(1)).name
+                          for p in judges], ["c1-agreed.md", "c2-agreed.md"], "builds are judged against their plan")
+        self.assertIn("clear departure from the plan", judges[0])
+        builds = [p for p in fakes["kimi"].prompts if p.startswith("Implement ")]
+        self.assertNotIn("Fix every defect", builds[0], "the first build's plan has no defects attached")
+        self.assertIn("Fix every defect listed at its end", builds[1])
         self.assert_blind(fakes, flow)
 
     def test_failing_checks_are_never_accepted_or_pushed(self):
