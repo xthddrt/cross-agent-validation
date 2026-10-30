@@ -58,7 +58,7 @@
 <div class="wrap">
   <header>
     <h1>Cross-agent validation</h1>
-    <p>DeepSeek (OpenCode) and Kimi agree on a plan, both implement it, and judge the two builds until both approve one.</p>
+    <p>DeepSeek (OpenCode) and Kimi agree on a plan, both implement it, and judge the two builds until one has no blocker both confirm.</p>
   </header>
 
   <section class="card">
@@ -77,7 +77,7 @@
           <input id="branch1" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/one">
           <input id="branch2" style="flex:1;min-width:200px" autocomplete="off" spellcheck="false" placeholder="feature/two">
         </div>
-        <div class="hint">With two branches the agents first judge them blind as X and Y: a branch both approve is the result; otherwise they agree on a plan that names one as its base, and both implement it.</div>
+        <div class="hint">With two branches the agents first judge them blind as X and Y: a branch with no blocker both confirm is the result; otherwise they agree on a plan that names one as its base, and both implement it.</div>
       </div>
       <div class="field">
         <label for="prompt">Prompt</label>
@@ -87,10 +87,11 @@
         <button id="go" type="submit">Start run</button>
         <span class="error" id="error"></span>
       </div>
-      <p class="flow"><b>Agree</b>: both approve or reject each plan; a plan both approve is used, otherwise both revise from the
-        reasons and vote again (up to 10 rounds, then a coin flip). <b>Build</b>: both implement it from the same base.
-        <b>Judge</b>: both approve or reject each build, blind; one both approve is <b>merged into origin's default branch and pushed</b>.
-        Otherwise they plan and build again, up to 10 builds; then the one passing its checks, else the one both would keep, else a coin flip.</p>
+      <p class="flow"><b>Judge</b>: both list every defect, blocker or minor, blind; each checks the other's blockers, and only
+        blockers both call real hold a candidate back. <b>Agree</b>: both approve or reject each plan (up to 3 rounds, then a coin flip).
+        <b>Build</b>: both implement it from the same base. A build with no confirmed blocker is <b>merged into origin's default branch
+        and pushed</b>; otherwise they plan and build again, up to 3 builds; then the one passing its checks, else fewer confirmed
+        blockers, else the one both would keep, else a coin flip. Minors and refuted blockers are listed as follow-ups.</p>
     </form>
   </section>
 
