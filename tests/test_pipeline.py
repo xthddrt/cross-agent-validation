@@ -247,5 +247,105 @@ class HomeTest(unittest.TestCase):
         self.assertEqual(Home(self.tmp / "runs").token, self.home.token)
 
 
+class PlanFake(StructuredFake):
+    """Writes the given plan in the plan stage and `merged.txt` in the code stage; approves all."""
+
+    def __init__(self, name, plan):
+        super().__init__(name, None)
+        self.plan, self.prompts = plan, []
+
+    def run(self, prompt, cwd):
+        self.prompts.append(prompt)
+        plan = is_plan(prompt)
+        self.files = lambda r: {"CAV-PLAN.md": self.plan} if plan else {"merged.txt": f"{self.name}\n"}
+        return super().run(prompt, cwd)
+
+
+class ReconcileTest(unittest.TestCase):
+    """Two branches: a blind reconciliation plan first, then both implement from the plan's base."""
+
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-recon-"))
+        self.work, self.origin, self.base = with_origin(self.tmp)
+        self.shas = {}
+        for name in ("feat-a", "feat-b"):
+            git("checkout", "-q", "-b", name, self.base, cwd=self.work)
+            (self.work / f"{name}.txt").write_text(f"{name}\n", encoding="utf-8")
+            git("add", "-A", cwd=self.work)
+            git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", f"secret author note {name}",
+                cwd=self.work)
+            self.shas[name] = git("rev-parse", "HEAD", cwd=self.work)
+        git("checkout", "-q", "master", cwd=self.work)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def run_pipeline(self, fakes):
+        with mock.patch("cav.agents.build", side_effect=lambda spec, log_path, title_prefix="": fakes[spec.name]):
+            pipeline = Pipeline(str(self.work), "Reconcile the two branches.", self.tmp / "runs" / "p1",
+                                branches=["feat-a", "feat-b"])
+            code = pipeline.run()
+        return code, pipeline.state, self.tmp / "runs" / "p1"
+
+    def test_blind_plan_then_both_implement_from_the_agreed_base(self):
+        fakes = {name: PlanFake(name, "Base: Candidate X\n- keep X\n") for name in ("deepseek", "kimi")}
+        code, state, run_dir = self.run_pipeline(fakes)
+
+        self.assertEqual(code, 0, state)
+        self.assertEqual(state["outcome"], "merged and pushed")
+        labels = state["labels"]
+        self.assertEqual({item["commit"] for item in labels.values()}, set(self.shas.values()))
+        for label, item in labels.items():
+            folder = run_dir / "sources" / f"candidate-{label}"
+            self.assertFalse((folder / ".git").exists(), "no history: authors and messages would identify it")
+            self.assertTrue((folder / f"{item['ref']}.txt").exists())
+        plan_r0 = git("--git-dir", str(run_dir / "plan" / "exchange.git"), "rev-parse", "candidate/kimi/r0")
+        self.assertEqual(plan_r0, self.base, "the plan is written in the branches' common ancestor")
+        code_r0 = git("--git-dir", str(run_dir / "code" / "exchange.git"), "rev-parse", "candidate/kimi/r0")
+        self.assertEqual(code_r0, labels["X"]["commit"], "both implement from the base the plan names")
+        for fake in fakes.values():
+            for prompt in fake.prompts:
+                self.assertIn("Candidate X:", prompt)
+                for leak in ("feat-a", "feat-b", "secret author note"):
+                    self.assertNotIn(leak, prompt)
+        implement = next(p for p in fakes["kimi"].prompts if "Implement the task" in p)
+        self.assertIn("starts from Candidate X, the plan's base", implement)
+        self.assertIn("A departure from the plan is a MUST_FIX", implement)
+
+    def test_no_agreed_plan_stops_before_any_code(self):
+        fakes = {name: NeverAgrees(name) for name in ("deepseek", "kimi")}
+        code, state, run_dir = self.run_pipeline(fakes)
+        self.assertEqual(code, 2, state)
+        self.assertEqual(state["outcome"], "no agreement on the plan")
+        self.assertTrue((run_dir / "plan" / "SUMMARY.md").exists())
+        self.assertFalse((run_dir / "code").exists(), "two different plans are not implemented")
+
+    def test_an_agreed_plan_must_name_its_base(self):
+        fakes = {name: PlanFake(name, "- keep both\n") for name in ("deepseek", "kimi")}
+        code, state, _ = self.run_pipeline(fakes)
+        self.assertEqual(code, 1)
+        self.assertIn("names no base", state["detail"])
+
+    def test_plan_base_line_is_read_leniently(self):
+        self.assertEqual(pipeline_mod.plan_base("# Plan\n**Base:** Candidate y\n"), "Y")
+        self.assertIsNone(pipeline_mod.plan_base("Base: Candidate Z"))
+
+
+class HomeBranchTest(HomeTest):
+    def test_start_passes_both_branches_or_refuses(self):
+        for name in ("one", "two"):
+            git("branch", name, cwd=self.repo)
+        for branches, code in ((["one"], 400), (["one", "missing"], 400), (["one", "one"], 400)):
+            patch, launched = self.launches()
+            with patch, self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post({"repo": str(self.repo), "prompt": "x", "branches": branches})
+            self.assertEqual(caught.exception.code, code, branches)
+            self.assertEqual(launched, [])
+        patch, launched = self.launches()
+        with patch:
+            self.post({"repo": str(self.repo), "prompt": "x", "branches": ["one", "two"]}).close()
+        self.assertEqual(launched[0][-4:], ["--branch", "one", "--branch", "two"])
+
+
 if __name__ == "__main__":
     unittest.main()

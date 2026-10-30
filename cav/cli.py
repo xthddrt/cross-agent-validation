@@ -109,7 +109,7 @@ def cmd_web(args):
 def cmd_pipeline(args):
     prompt = pathlib.Path(args.prompt_file).read_text(encoding="utf-8")
     run_dir = args.run_dir or pathlib.Path("runs") / f"pipeline-{time.strftime('%Y%m%d-%H%M%S')}"
-    return Pipeline(args.repo, prompt, run_dir, resume=args.resume).run()
+    return Pipeline(args.repo, prompt, run_dir, resume=args.resume, branches=args.branch, checks=args.check).run()
 
 
 def cmd_serve(args):
@@ -185,6 +185,9 @@ def main(argv=None):
     pipeline.add_argument("--prompt-file", required=True)
     pipeline.add_argument("--run-dir", default=None)
     pipeline.add_argument("--resume", action="store_true", help="continue the pipeline in --run-dir")
+    pipeline.add_argument("--branch", action="append", default=[],
+                          help="a branch to reconcile; give two, or none to plan from scratch")
+    pipeline.add_argument("--check", action="append", default=[], help="a check command for the code stage")
     pipeline.set_defaults(func=cmd_pipeline)
 
     serve = sub.add_parser("serve", help="the home dashboard: every run, and a form to start a pipeline")

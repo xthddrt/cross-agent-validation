@@ -286,7 +286,7 @@ class Home(Server):
                 info = self.pipeline_info(path)
                 item = {"kind": "pipeline", "repo": info.get("repo") or info.get("repo_input"),
                         "prompt": info["prompt"][:400], **{key: info.get(key) for key in
-                        ("stage", "outcome", "detail", "stopped", "stages", "branch")}}
+                        ("stage", "outcome", "detail", "stopped", "stages", "branch", "labels")}}
             else:
                 state = read_json(path / "state.json")
                 item = {"kind": "run", "case": state.get("case"), "phase": state.get("phase"),
@@ -294,15 +294,22 @@ class Home(Server):
             out.append(dict(item, id=path.name, updated=max(stamps)))
         return sorted(out, key=lambda item: item["updated"], reverse=True)
 
-    def start(self, repo, prompt):
+    def start(self, repo, prompt, branches=()):
         """Start a pipeline as its own process, so it outlives this server."""
         repo, prompt = (repo or "").strip(), (prompt or "").strip()
+        branches = [item.strip() for item in branches or () if item and item.strip()]
+        if len(branches) not in (0, 2):
+            raise ValueError("give both branches to reconcile, or neither")
+        if len(set(branches)) != len(branches):
+            raise ValueError("the two branches are the same")
         if not repo:
             raise ValueError("give a local repo path or a GitHub URL")
         if not prompt:
             raise ValueError("the prompt is empty")
         if not pipeline_mod.is_github(repo):
-            pipeline_mod.resolve_repo(repo)  # a bad local path is refused here; a clone happens in the run
+            local = pipeline_mod.resolve_repo(repo)  # a bad path is refused here; a clone happens in the run
+            for ref in branches:
+                pipeline_mod.resolve_ref(local, ref)
         slug = re.sub(r"[^\w.-]+", "-", pipeline_mod.repo_name(repo)).strip("-.") or "repo"
         run_id = f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
         while (self.runs_dir / run_id).exists():
@@ -320,7 +327,8 @@ class Home(Server):
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         with open(run_dir / "pipeline.log", "ab") as log:
             subprocess.Popen([str(python), "-m", "cav", "pipeline", "--repo", repo,
-                              "--prompt-file", str(run_dir / "prompt.md"), "--run-dir", str(run_dir)],
+                              "--prompt-file", str(run_dir / "prompt.md"), "--run-dir", str(run_dir),
+                              *[arg for ref in branches for arg in ("--branch", ref)]],
                              cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                              env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
                              creationflags=flags, start_new_session=os.name != "nt")
@@ -358,7 +366,7 @@ class Home(Server):
             return handler.send(415, json.dumps({"error": "send JSON"}))
         body = json.loads(raw or b"{}")
         try:
-            run_id = self.start(body.get("repo"), body.get("prompt"))
+            run_id = self.start(body.get("repo"), body.get("prompt"), body.get("branches") or ())
         except ValueError as error:
             return handler.send(400, json.dumps({"error": str(error)}))
         handler.send(200, json.dumps({"id": run_id, "url": f"/{self.token}/run/{run_id}/"}))

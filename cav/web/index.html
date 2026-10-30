@@ -583,6 +583,9 @@ function renderPipeline() {
     `<span class="badge ${cls}">${esc(text)}</span><span class="repo">${esc(pipe.repo || pipe.repo_input || '')}` +
     `${pipe.branch ? ` → ${esc(pipe.branch)}` : ''}</span></div>` +
     (detail ? `<div class="detail">${esc(detail)}</div>` : '') +
+    (pipe.labels ? `<div class="detail">Reconciling (agents see only the labels): ` +
+      Object.entries(pipe.labels).map(([l, v]) => `Candidate ${esc(l)} = ${esc(v.ref)} ${esc(sha(v.commit))}`).join(' · ') +
+      (pipe.plan_base ? ` · agreed base: Candidate ${esc(pipe.plan_base)}` : '') + `</div>` : '') +
     `<details><summary>Prompt</summary><pre>${esc(pipe.prompt || '')}</pre></details>`);
 }
 
