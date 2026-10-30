@@ -7,11 +7,10 @@
              blockers: real bugs, or real departures from the plan.
     confirm  each votes on the other's blockers: one both call a blocker is agreed, the rest are
              dropped. A candidate with no agreed blocker is the result, kept as branch cav/<run>.
-    fix      after the first review only: both plan the fix of every agreed blocker on a base they
-             choose, voting and revising as above until one plan is approved.
-    rebuild  both fix the agreed blockers, separately, from one base: the fix plan's after the first
-             review, later the candidate with fewer agreed blockers. Then review again: the agreed
-             blockers are checked, new ones can be raised, and both must agree on each.
+    fix      after every review with no clear candidate: both plan the fix of every agreed blocker
+             on a base they choose, in line with every plan agreed before, voting and revising as
+             above until one plan is approved; both build it. Then review again: the agreed blockers
+             are checked, new ones can be raised, and both must agree on each.
 
 No prompt names an agent or says whose anything is: candidates are X and Y, labelled at random and
 read from plain folders without .git; files are numbered at random; candidates are listed in random
@@ -217,6 +216,7 @@ class Flow:
             paths = self.write_plans(lambda path: prompts.plan(self.task, code, path), base_needed=False)
             plan_path.write_text(self.agree(paths, fixes=False).read_text(encoding="utf-8"), encoding="utf-8")
             candidates = self.build(plan_path, base)
+        plans = [plan_path]  # every plan both agents approved, in order: the code follows all of them
         agreed = None  # the agreed blockers in the base the candidates were built from
         while True:
             self.new_round()
@@ -224,17 +224,13 @@ class Flow:
             clear = [label for label in LABELS if not found[label]]
             if clear:
                 return self.finish(candidates, random.choice(clear))
-            if agreed is None:  # the first review: plan the fix, and its base
-                both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
-                fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, path)), fixes=True)
-                label, build_plan = plan_base(fix.read_text(encoding="utf-8")), fix
-            else:
-                counts = {label: len(found[label]) for label in LABELS}
-                label = min(LABELS, key=counts.get) if counts["X"] != counts["Y"] else random.choice(LABELS)
-                build_plan = plan_path
+            both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
+            fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path)), fixes=True)
+            plans.append(fix)
+            label = plan_base(fix.read_text(encoding="utf-8"))
             agreed = self.agreed_file(label, found[label])
             self.save(base=label, agreed=[blocker_line(item) for item in found[label]])
-            candidates = self.build(build_plan, candidates[label]["commit"], label, agreed)
+            candidates = self.build(fix, candidates[label]["commit"], label)
 
     # ------------------------------------------------------------------- steps
 
@@ -285,7 +281,7 @@ class Flow:
         self.log(f"plan: {how}")
         return path
 
-    def build(self, plan_path, start, base=None, blockers=None):
+    def build(self, plan_path, start, base=None):
         """Both implement from the same commit, separately; the results are relabelled at random."""
         numbers = self.numbered()
         works = {name: export_tree(self.repo, start, self.blind / "build" / f"c{self.cycle}-{numbers[name]}")
@@ -293,7 +289,7 @@ class Flow:
         notes = {name: self.blind / "notes" / f"c{self.cycle}-{numbers[name]}.md" for name in self.names}
         (self.blind / "notes").mkdir(exist_ok=True)
         entry = self.begin("build", start=start, base=base)
-        self.ask({name: prompts.build(plan_path, works[name], notes[name], base, blockers) for name in self.names},
+        self.ask({name: prompts.build(plan_path, works[name], notes[name], base) for name in self.names},
                  lambda name: None if notes[name].exists() else "no note written")
         commits = {name: self.snapshot(works[name], start, f"round {self.cycle} build {numbers[name]}")
                    for name in self.names}

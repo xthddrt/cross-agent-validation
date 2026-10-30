@@ -35,15 +35,19 @@ def confirm(blockers, reply):
             f'{{"blocker": {{"1": true|false, ...}}, "why": {{"<not one>": "<at most {WHY_WORDS} words, citing the code>"}}}}\n')
 
 
-def fix_plan(blockers, path):
-    return (f"AGREED BLOCKERS\n- {blockers}\n\n"
-            f"Write a plan to {path} to fix every agreed blocker in one candidate {PLAN}.{BASE}\n")
+def fix_plan(blockers, plans, path):
+    """`plans`: every plan both agents approved so far, oldest first."""
+    return (f"AGREED BLOCKERS\n- {blockers}\n\nAGREED PLANS (oldest first; the code follows all of them)\n"
+            + "".join(f"- {plan}\n" for plan in plans) +
+            f"\nWrite a plan to {path} to fix every agreed blocker in one candidate, keeping to the agreed plans except "
+            f"where a blocker needs otherwise {PLAN}.{BASE}\n")
 
 
 def vote(plans, reply, fixes=False):
     lines = ["PLANS"] + [f"- {number}: {path}" for number, path in plans] + [""]
     lines.append("Read the code each plan changes and check its claims against it. Approve each plan unless it "
-                 + ("misses an agreed blocker in its base or would not work" if fixes else "misses the task or would not work")
+                 + ("misses an agreed blocker in its base, undoes an agreed plan that no blocker requires undoing, "
+                    "or would not work" if fixes else "misses the task or would not work")
                  + f"; preferring one is not a reason to reject the other. Write to {reply}:")
     lines.append(f'{{"approve": {{"1": true|false, "2": true|false}}, "why": {{"<rejected>": "<at most {WHY_WORDS} words>"}}}}')
     return "\n".join(lines) + "\n"
@@ -57,13 +61,9 @@ def revise(objections, path, fixes=False):
     return "\n".join(lines) + "\n"
 
 
-def build(plan_path, work, note, base=None, blockers=None):
-    """`blockers`: fix these in `work`, a copy of `base`; the plan says what the code should do."""
-    if blockers:
-        first = f"Fix every blocker in {blockers} in {work}, a copy of {base}. The plan the code follows is {plan_path}."
-    else:
-        first = f"Implement the agreed plan, {plan_path}, in {work}" + (f", a copy of {base}." if base else ".")
-    return f"{first}\nWrite a short note of what you changed to {note}.\n"
+def build(plan_path, work, note, base=None):
+    return (f"Implement the agreed plan, {plan_path}, in {work}" + (f", a copy of {base}." if base else ".")
+            + f"\nWrite a short note of what you changed to {note}.\n")
 
 
 def retry_note(problem):

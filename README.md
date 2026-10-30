@@ -9,10 +9,10 @@ review    (plan + two branches, or the two builds) both review the plan and both
           list only blockers: real bugs that make the code wrong, or real departures from the plan.
 confirm   each votes on the other's blockers; a blocker both agree on stays, the rest are dropped.
           A candidate with no agreed blocker is the result.
-fix       after the first review: both plan the fix of every agreed blocker on a base they choose,
-          voting and revising until one plan is approved; both build it.
-rebuild   after later reviews: both fix the agreed blockers on the candidate with fewer of them.
-          The next review checks those blockers, and new ones may be raised; both must agree on each.
+fix       after every review with no clear candidate: both plan the fix of every agreed blocker on a
+          base they choose, keeping to every plan agreed before (each fix plan sees them all), voting
+          and revising until one plan is approved; both build it. The next review checks those
+          blockers, and new ones may be raised; both must agree on each.
 result    kept as the local branch cav/<run>. Nothing is pushed.
 ```
 
