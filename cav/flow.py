@@ -308,7 +308,7 @@ class Flow:
                 if result:
                     return self.publish(branch, candidates[result], result)
             else:
-                plans, reviews = self.plan(cycle), []
+                plans, reviews = self.plan(cycle, base), []
             plan_path, label = self.agree(cycle, plans, candidates, reviews)
             candidates = self.build(cycle, plan_path, candidates[label]["commit"] if candidates else base, label)
         raise RuntimeError("the final judge must decide")  # unreachable: the final judge always picks
@@ -352,15 +352,16 @@ class Flow:
         self.save(decided=how, open_defects=[item for item in defects if item["candidate"] == result])
         return result, None, None
 
-    def plan(self, cycle):
-        """No candidates yet: both write a plan for the task, separately."""
+    def plan(self, cycle, base):
+        """No candidates yet: both read a plain copy of the base and write a plan for the task, separately."""
+        code = export_tree(self.repo, base, self.blind / "code")
         folder = self.blind / "plans"
         folder.mkdir(exist_ok=True)
         numbers = _numbered(self.names)
         paths = {name: folder / f"c{cycle}-plan-{numbers[name]}.md" for name in self.names}
         self.state["authors"].update({str(path.relative_to(self.blind)): name for name, path in paths.items()})
         entry = self.begin("plan", cycle=cycle)
-        self.ask({name: (prompts.plan(self.task, paths[name]), self.blind) for name in self.names}, "plan",
+        self.ask({name: (prompts.plan(self.task, code, paths[name]), self.blind) for name in self.names}, "plan",
                  lambda name: self.plan_problem(paths[name].read_text(encoding="utf-8")
                                                 if paths[name].exists() else None, None))
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})

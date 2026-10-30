@@ -14,9 +14,10 @@ def _checks(checks):
     return "; ".join(c.replace("{python}", f'"{sys.executable}"') for c in checks)
 
 
-def plan(task, path):
-    """A cycle's first prompt when there is nothing to judge yet."""
-    return f"TASK\n{task}\n\nWrite a plan to {path} (at most {PLAN_WORDS} words): {PLAN}.\n"
+def plan(task, code, path):
+    """A cycle's first prompt when there is nothing to judge yet; `code` is a read-only copy of the repo."""
+    return (f"TASK\n{task}\n\nCODE\n- {code}\n\n"
+            f"Read the code the task touches. Write a plan to {path} (at most {PLAN_WORDS} words): {PLAN}.\n")
 
 
 def judge(task, candidates, reply, plan_path=None):
@@ -46,8 +47,9 @@ def agree(plans, reply, reviews=(), attached=False):
     lines += ["PLANS" + (" (each ends with the defects found in its base, as the builders get it)" if attached else "")]
     lines += [f"- {number}: {path}" for number, path in plans] + [""]
     lines += [
-        "Approve each plan unless it misses the task or would not work; liking one more is not a reason to reject "
-        f"the other. Write to {reply}:",
+        "Read the code each plan changes and check its claims against it; a plan judged from its text alone is not "
+        "judged. Approve each plan unless it misses the task or would not work; liking one more is not a reason to "
+        f"reject the other. Write to {reply}:",
         f'{{"approve": {{"1": true|false, "2": true|false}}, "why": {{"<rejected plan>": "<at most {WHY_WORDS} words>"}}}}',
     ]
     return "\n".join(lines) + "\n"
