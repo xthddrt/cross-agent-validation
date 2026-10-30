@@ -77,10 +77,6 @@ class RunState:
             self.messages = messages
 
     @property
-    def elapsed(self):
-        return time.time() - self.started
-
-    @property
     def idle(self):
         return time.time() - self.last_activity
 
@@ -88,14 +84,13 @@ class RunState:
 class Agent:
     kind = "base"
 
-    def __init__(self, spec, log_path, emit=None, thinking=False):
+    def __init__(self, spec, log_path, emit=None):
         self.spec = spec
         self.name = spec.name
         self.log_path = pathlib.Path(log_path)
         self.state = RunState()
         self._abort = threading.Event()
         self.emit = emit or _noop
-        self.thinking = thinking
 
     def _event(self, type_, data=None):
         try:
@@ -137,8 +132,8 @@ def _opencode_cli():
 class OpenCodeAgent(Agent):
     kind = "opencode"
 
-    def __init__(self, spec, log_path, title_prefix="cav", emit=None, thinking=False):
-        super().__init__(spec, log_path, emit, thinking)
+    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
+        super().__init__(spec, log_path, emit)
         self.cli = _opencode_cli()
         self.session_id = None
         self.title_prefix = title_prefix
@@ -242,8 +237,8 @@ def _kimi_home():
 class KimiAgent(Agent):
     kind = "kimi"
 
-    def __init__(self, spec, log_path, title_prefix="cav", emit=None, thinking=False):
-        super().__init__(spec, log_path, emit, thinking)
+    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
+        super().__init__(spec, log_path, emit)
         self.title_prefix = title_prefix
         self.base = None
         self.token = None
@@ -316,8 +311,6 @@ class KimiAgent(Agent):
                 kind = part.get("type")
                 if kind == "text" and part.get("text"):
                     self._event("agent.text", {"text": part["text"]})
-                elif kind == "thinking" and self.thinking:
-                    self._event("agent.thinking", {"text": part.get("text") or ""})
                 elif kind == "tool_use":
                     self._event("agent.tool.start", {"tool": part.get("tool_name"),
                                                      "call": part.get("tool_call_id"),
@@ -522,9 +515,9 @@ class KimiAgent(Agent):
         return text
 
 
-def build(spec, log_path, title_prefix="cav", emit=None, thinking=False):
+def build(spec, log_path, title_prefix="cav", emit=None):
     if spec.kind == "opencode":
-        return OpenCodeAgent(spec, log_path, title_prefix, emit, thinking)
+        return OpenCodeAgent(spec, log_path, title_prefix, emit)
     if spec.kind == "kimi":
-        return KimiAgent(spec, log_path, title_prefix, emit, thinking)
+        return KimiAgent(spec, log_path, title_prefix, emit)
     raise ValueError(f"unknown agent kind {spec.kind}")

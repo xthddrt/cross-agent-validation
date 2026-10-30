@@ -133,6 +133,10 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(code, 0, flow.state)
         self.assertEqual(self.steps(flow), [("plan", "planned"), ("vote", "agreed"), ("build", "built"),
                                             ("review", "reviewed"), ("confirm", "no blocker in X and Y")])
+        for fake in fakes.values():
+            vote = next(p for p in fake.prompts if p.startswith("PLANS"))
+            written = re.search(r"Write a plan to (\S+)", fake.prompts[0]).group(1)
+            self.assertNotIn(written, vote, "a voter is not shown the file it wrote")
         branch = flow.state["final"]["branch"]
         self.assertEqual(git("rev-parse", branch, cwd=self.work), flow.state["final"]["commits"]["work"])
         self.assertTrue(git("show", f"{branch}:feature.txt", cwd=self.work).startswith("built by"))
@@ -238,6 +242,14 @@ class FlowTest(unittest.TestCase):
         self.assertIn("each of 1 to 2", Flow.confirm_problem(path, 2))
         path.write_text(json.dumps({"blockers": [{"candidate": "Z", "problem": "x"}]}), encoding="utf-8")
         self.assertIn('"candidate"', Flow.review_problem(path, {}))
+        candidate = self.tmp / "candidate"
+        candidate.mkdir()
+        path.write_text(json.dumps({"blockers": [{"candidate": "X", "file": "tool/missing.cpp", "problem": "never added"}]}),
+                        encoding="utf-8")
+        self.assertIsNone(Flow.review_problem(path, {"X": {"folder": str(candidate)}}), "a missing file can be the blocker")
+        path.write_text(json.dumps({"blockers": [{"candidate": "X", "file": "../elsewhere.txt", "problem": "x"}]}),
+                        encoding="utf-8")
+        self.assertIn("not a path inside", Flow.review_problem(path, {"X": {"folder": str(candidate)}}))
         plan = self.tmp / "plan.md"
         plan.write_text("no base", encoding="utf-8")
         self.assertEqual(Flow.plan_problem(plan, True), 'the plan must start with "Base: X" or "Base: Y"')
