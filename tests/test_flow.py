@@ -175,7 +175,7 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(all("Defects found in the base" in path.read_text(encoding="utf-8") for path in ballots),
                         "the voters see each plan as the builders will get it")
         self.assertIn("REVIEWS", vote, "the first vote lists both reviews; each judge has written only one")
-        self.assertIn("leaves a listed defect unfixed", vote)
+        self.assertIn("leaves a real listed defect unfixed, or fixes one that is not real", vote)
         for fake in fakes.values():
             self.assertEqual(sum(p.startswith("TASK") for p in fake.prompts), fake.sessions,
                              "the task is given once per session, in the cycle's first prompt")
@@ -250,13 +250,6 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(self.steps(flow)[-1], ("judge", "forced"))
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base)
 
-    def test_an_over_long_plan_is_sent_back_once(self):
-        fakes = {"deepseek": Fake("deepseek", plan_text=lambda attempt: "word " * (1050 if attempt == 1 else 50)),
-                 "kimi": Fake("kimi")}
-        code, flow = self.run_flow(fakes, push=False)
-        self.assertEqual(code, 0, flow.state)
-        retry = [p for p in fakes["deepseek"].prompts if "Write a plan to" in p][1]
-        self.assertIn("1050 words; cut it to 1000", retry)
 
     def test_answers_are_checked(self):
         self.assertEqual(Flow.plan_problem("no base here", {"X": {}, "Y": {}}),

@@ -9,11 +9,13 @@ judge   (two branches) both, blind: list every defect in each branch (a code bug
         passing checks, is the result.
 plan    (a task alone) both write a plan (≤1000 words)
 agree   both approve or reject each of the two plans, shown as the builders will get it (the reviews'
-        defects in its base attached) and reject one that misses the task, leaves a listed defect
-        unfixed or would not work, with a reason (≤250 words). A plan both approve is the plan. Otherwise both revise from the reasons and vote again: up to 10 rounds, then a
+        defects in its base attached) and reject one that misses the task, would not work, leaves a
+        real listed defect unfixed or fixes one that is not real, with a reason (≤250 words). A plan
+        both approve is the plan. A revised plan may set a listed defect aside only by showing from
+        the code that it is not real. Otherwise both revise from the reasons and vote again: up to 10 rounds, then a
         coin flip.
-build   both implement the agreed plan from the same base, separately, fixing every listed defect;
-        the checks run
+build   both implement the agreed plan from the same base, separately, fixing every listed defect
+        the plan does not show to be unreal; the checks run
 judge   both judge the two builds blind, like two branches but against the plan they implemented
         (a defect is a code bug or a clear departure from that plan): a build both approve, with passing
         checks, is the result; otherwise each judge writes a plan and it repeats (agree, build,

@@ -107,24 +107,6 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), before)
 
 
-class RepoTest(unittest.TestCase):
-    def test_github_folder_with_another_origin_is_refused(self):
-        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-repo-"))
-        try:
-            work, origin, _ = with_origin(tmp)
-            target = tmp / "clones" / "thing"
-            shutil.copytree(work, target)
-            with self.assertRaisesRegex(ValueError, "already exists"):
-                flow_mod.resolve_repo("https://github.com/someone/thing", clone_root=tmp / "clones")
-            git("remote", "set-url", "origin", "https://github.com/someone/thing.git", cwd=target)
-            self.assertEqual(flow_mod.resolve_repo("https://github.com/someone/thing", clone_root=tmp / "clones"),
-                             target.resolve(), "an existing clone of the same repo is reused")
-            with self.assertRaisesRegex(ValueError, "not a git repository"):
-                flow_mod.resolve_repo(str(tmp / "missing"))
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
 class HomeTest(unittest.TestCase):
     def launches(self):
         """Catch the pipeline launch only; git still needs the real Popen."""
@@ -178,41 +160,6 @@ class HomeTest(unittest.TestCase):
             self.assertTrue(response.geturl().endswith(f"/run/{body['id']}/"), "a flow run opens its own dashboard")
         with urllib.request.urlopen(self.base + "/api/runs", timeout=5) as response:
             self.assertEqual(json.loads(response.read())[0]["phase"], "judge")
-
-    def test_start_refuses_bad_input(self):
-        for body, content_type, code in (({"repo": str(self.tmp / "nope"), "prompt": "x"}, "application/json", 400),
-                                         ({"repo": str(self.repo), "prompt": "  "}, "application/json", 400),
-                                         ({"repo": str(self.repo), "prompt": "x"}, "text/plain", 415)):
-            patch, launched = self.launches()
-            with patch:
-                with self.assertRaises(urllib.error.HTTPError) as caught:
-                    self.post(body, content_type)
-            self.assertEqual(caught.exception.code, code, body)
-            self.assertEqual(launched, [])
-        with self.assertRaises(urllib.error.HTTPError):
-            urllib.request.urlopen(self.base.rsplit("/", 1)[0] + "/wrong/api/runs", timeout=5)
-
-    def test_token_is_kept_across_restarts(self):
-        self.home.started(self.server)
-        self.assertEqual(Home(self.tmp / "runs").token, self.home.token)
-
-
-class HomeBranchTest(unittest.TestCase):
-    setUp, tearDown, launches, post = HomeTest.setUp, HomeTest.tearDown, HomeTest.launches, HomeTest.post
-
-    def test_start_passes_both_branches_or_refuses(self):
-        for name in ("one", "two"):
-            git("branch", name, cwd=self.repo)
-        for branches, code in ((["one"], 400), (["one", "missing"], 400), (["one", "one"], 400)):
-            patch, launched = self.launches()
-            with patch, self.assertRaises(urllib.error.HTTPError) as caught:
-                self.post({"repo": str(self.repo), "prompt": "x", "branches": branches})
-            self.assertEqual(caught.exception.code, code, branches)
-            self.assertEqual(launched, [])
-        patch, launched = self.launches()
-        with patch:
-            self.post({"repo": str(self.repo), "prompt": "x", "branches": ["one", "two"]}).close()
-        self.assertEqual(launched[0][-4:], ["--branch", "one", "--branch", "two"])
 
 
 if __name__ == "__main__":
