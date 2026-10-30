@@ -138,6 +138,9 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(flow.state["outcome"].startswith("merged and pushed"))
         self.assertTrue(git("--git-dir", str(self.origin), "show", f"{self.branch}:feature.txt").startswith("built by"))
         self.assertEqual([fake.builds for fake in fakes.values()], [1, 1], "both agents build, once")
+        code = pathlib.Path(re.search(r"^CODE\n- (\S+)$", fakes["kimi"].prompts[0], re.M).group(1))
+        self.assertTrue((code / "base.txt").is_file(), "a task-only plan gets a plain copy of the code")
+        self.assertIn("Read the code each plan changes", next(p for p in fakes["kimi"].prompts if "Approve each plan" in p))
         self.assertEqual([fake.sessions for fake in fakes.values()], [2, 2], "one session per cycle: plan, agree and build share one; the judge of the builds starts fresh")
         self.assert_blind(fakes, flow)
 
