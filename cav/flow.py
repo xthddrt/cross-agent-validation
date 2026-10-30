@@ -3,8 +3,8 @@
     plan     (repo + task) both write a plan, then vote on both; a plan both approve is the plan,
              otherwise both revise from the objections and vote again, until one is approved.
              Both build it; the two builds are the candidates.
-    review   (plan + two candidates) both review the plan and both candidates, blind, listing only
-             blockers: real bugs, or real departures from the plan.
+    review   (plan + two candidates) both review every agreed plan and both candidates, blind,
+             listing only blockers: real bugs, or real departures from an agreed plan.
     confirm  each votes on the other's blockers: one both call a blocker is agreed, the rest are
              dropped. A candidate with no agreed blocker is the result, kept as branch cav/<run>.
     fix      after every review with no clear candidate: both plan the fix of every agreed blocker
@@ -220,7 +220,7 @@ class Flow:
         agreed = None  # the agreed blockers in the base the candidates were built from
         while True:
             self.new_round()
-            found = self.review(candidates, plan_path, agreed)
+            found = self.review(candidates, plans, agreed)
             clear = [label for label in LABELS if not found[label]]
             if clear:
                 return self.finish(candidates, random.choice(clear))
@@ -298,14 +298,14 @@ class Flow:
         self.end(entry, "built", commits=commits)
         return self.candidates({labels[name]: commits[name] for name in self.names})
 
-    def review(self, candidates, plan_path, agreed):
+    def review(self, candidates, plans, agreed):
         """Both list the blockers in both candidates; each then votes on the other's. Returns, per
         candidate, the blockers both agreed on, numbered."""
         numbers = self.numbered()
         replies = {name: self.blind / f"c{self.cycle}-review-{numbers[name]}.json" for name in self.names}
         self.mine(replies)
         entry = self.begin("review", candidates={label: item["commit"] for label, item in candidates.items()})
-        self.ask({name: prompts.review(plan_path, [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)],
+        self.ask({name: prompts.review(plans, [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)],
                                        replies[name], agreed) for name in self.names},
                  lambda name: self.review_problem(replies[name], candidates))
         claims = {name: _json(replies[name])["blockers"] for name in self.names}
