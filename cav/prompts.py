@@ -6,20 +6,22 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 BLOCKER = ("A blocker is a real bug that makes the code wrong (wrong results, a crash, a security hole, data loss) "
-           "or a real departure from the plan, shown by a scenario you can name. Nothing else counts.")
+           "or a real departure from an agreed plan, shown by a scenario you can name. Nothing else counts.")
 
 
 def plan(task, code, path):
     return f"TASK\n{task}\n\nCODE\n- {code}\n\nRead the code the task touches. Write a plan to {path} {PLAN}.\n"
 
 
-def review(plan_path, candidates, reply, agreed=None):
-    """A round's first prompt. `candidates`: (label, folder) in the order to list them; `agreed`: the
-    blockers both reviewers agreed last round, numbered, in the candidates' base."""
-    lines = ["PLAN", f"- {plan_path}", "", "CANDIDATES"] + [f"- {label}: {folder}" for label, folder in candidates]
+def review(plans, candidates, reply, agreed=None):
+    """A round's first prompt. `plans`: every plan both agents approved, oldest first; `candidates`:
+    (label, folder) in the order to list them; `agreed`: the blockers both reviewers agreed last round,
+    numbered, in the candidates' base."""
+    lines = (["AGREED PLANS (oldest first; the code follows all of them)"] + [f"- {plan}" for plan in plans]
+             + ["", "CANDIDATES"] + [f"- {label}: {folder}" for label, folder in candidates])
     if agreed:
         lines += ["", "AGREED BLOCKERS (last round's, in the base both candidates were built from)", f"- {agreed}"]
-    lines += ["", "Review the plan and both candidates, reading all the code. " + BLOCKER,
+    lines += ["", "Review the plans and both candidates, reading all the code. " + BLOCKER,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
               + f'One in both is one entry with "candidate": "both". Write to {reply}:',

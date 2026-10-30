@@ -149,7 +149,7 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(code, 0, flow.state)
         self.assertEqual([step for step, _ in self.steps(flow)], ["review", "confirm"])
         self.assertEqual(flow.state["final"]["commit"], shas["feat-a"])
-        self.assertTrue(fakes["kimi"].prompts[0].startswith("PLAN\n- "))
+        self.assertTrue(fakes["kimi"].prompts[0].startswith("AGREED PLANS"))
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b", "note feat"))
 
     def test_a_blocker_voted_down_is_dropped(self):
@@ -190,6 +190,9 @@ class FlowTest(unittest.TestCase):
         self.assertEqual([len(paths) for paths in earlier], [1, 2], "the task plan, then it and the first fix plan")
         self.assertEqual(earlier[1][0], earlier[0][0], "the task plan stays first")
         self.assertTrue(pathlib.Path(earlier[1][1]).read_text(encoding="utf-8").startswith("Base:"))
+        reviews = [p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p]
+        self.assertEqual([len(re.findall(r"^- \S+$", p.split("\n\nCANDIDATES", 1)[0], re.M)) for p in reviews], [1, 2, 3],
+                         "each review checks every plan agreed so far")
         self.assertIn("undoes an agreed plan", next(p for p in fakes["kimi"].prompts if p.startswith("PLANS")
                                                      and "agreed blocker" in p))
 

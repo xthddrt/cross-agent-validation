@@ -5,8 +5,9 @@ Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) take a task, or 
 ```
 task      (repo + task) both write a plan, then vote on both; a plan both approve is the plan, otherwise
           both revise from the objections and vote again, until one is approved. Both build it.
-review    (plan + two branches, or the two builds) both review the plan and both candidates, blind, and
-          list only blockers: real bugs that make the code wrong, or real departures from the plan.
+review    (plan + two branches, or the two builds) both review every agreed plan and both candidates,
+          blind, and list only blockers: real bugs that make the code wrong, or real departures from an
+          agreed plan (the first plan, and every fix plan since).
 confirm   each votes on the other's blockers; a blocker both agree on stays, the rest are dropped.
           A candidate with no agreed blocker is the result.
 fix       after every review with no clear candidate: both plan the fix of every agreed blocker on a
