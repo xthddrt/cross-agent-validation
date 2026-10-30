@@ -61,10 +61,11 @@ def stage_rounds(stage_dir, stage, live):
         gate = entry.get("blockers") or {}
         out.append({
             "stage": stage, "round": number, "start": item["start"], "seconds": round(end - item["start"]),
-            "verdict": "failed" if entry.get("failed") else entry.get("verdict") or ("running" if running else "?"),
+            "verdict": (f"{entry['step']} " if entry.get("step") else "")
+                       + ("failed" if entry.get("failed") else entry.get("verdict") or ("running" if running else "?")),
             "differing": (entry.get("divergence") or {}).get("differing"),
             "must_fix": gate.get("blocking_must_fix"),
-            "method": (gate.get("decision") or {}).get("method"),
+            "method": (gate.get("decision") or {}).get("method") or entry.get("how"),
             "agents": {name: round(times.get("end", now if running else item["end"]) - times["start"])
                        for name, times in item["agents"].items() if "start" in times},
         })

@@ -419,7 +419,7 @@ class KimiAgent(Agent):
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._transcript = open(self.log_path, "a", encoding="utf-8", errors="replace")
         if not self.session_id:
-            # one session for the whole run: later steps continue it instead of re-reading everything
+            # a new session unless the caller set one to continue
             workspace = self._call("POST", "/api/v1/workspaces", {"root": cwd, "name": pathlib.Path(cwd).name})["data"]
             session = self._call("POST", "/api/v1/sessions", {
                 "title": f"{self.title_prefix} {self.name}",

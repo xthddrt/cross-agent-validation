@@ -35,7 +35,7 @@ def cmd_run(args):
         repo, task, checks, branches = args.repo, pathlib.Path(args.prompt_file).read_text(encoding="utf-8"), [], []
     run_dir = args.run_dir or pathlib.Path("runs") / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     flow = Flow(repo, task, run_dir, branches=args.branch or branches, checks=args.check or checks,
-                push=not args.no_push, builder=args.builder)
+                push=not args.no_push)
     if args.dashboard:
         server = Dashboard(flow.run_dir, port=args.port, open_browser=True)
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -96,13 +96,12 @@ def main(argv=None):
     parser = argparse.ArgumentParser(prog="cav", description="Cross-agent validation")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="plan, agree, build and review with two agents")
+    run = sub.add_parser("run", help="two agents agree on a base and a plan, both build it, both judge the results")
     run.add_argument("--case", help="a case file (repo, branches, checks, task)")
     run.add_argument("--repo", help="local repo path or GitHub URL")
     run.add_argument("--prompt-file", help="the task")
     run.add_argument("--branch", action="append", default=[], help="a branch to reconcile; give two, or none")
     run.add_argument("--check", action="append", default=[], help="a check command (build, tests)")
-    run.add_argument("--builder", default="deepseek", help="the agent that implements; the other reviews")
     run.add_argument("--no-push", action="store_true", help="keep the result local instead of pushing")
     run.add_argument("--run-dir", default=None)
     run.add_argument("--dashboard", action="store_true")

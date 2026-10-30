@@ -1,19 +1,26 @@
 # cross-agent-validation
 
-Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) turn one task into one reviewed result, fast:
+Two AI agents (DeepSeek in **OpenCode**, Kimi in **Kimi Code**) turn one task, or two branches, into one result both approve:
 
 ```
-plan    both write a plan (≤400 words), independently, in parallel
-agree   take turns: accept the other plan as written, or answer with a revised plan and why (≤100 words)
-        one accept ends it; after 4 turns a coin flip picks between the two latest plans
-build   DeepSeek implements the agreed plan; the checks run
-review  Kimi approves or lists ≤5 defects; DeepSeek fixes them; at most 2 fixes
-publish committed, and pushed to origin's default branch (merged if it moved) unless --no-push
+judge   both, blind and separately: approve or reject each of the two candidates (a rejection needs a
+        defect), name the one they would keep, and write a plan (≤400 words) whose first line names
+        the candidate to build on. A candidate both approve, with passing checks, is the result.
+plan    with no candidates yet (a task on a repo): both write a plan (≤400 words), separately
+agree   both approve or reject each of the two plans (a rejection needs a missed acceptance criterion
+        or a reason it would not work, ≤100 words). A plan both approve is the plan; otherwise the
+        plan both would keep, else a coin flip.
+build   both implement the agreed plan from the same base, separately; the checks run. The two
+        results are the next judge's candidates.
+publish a candidate both approve; after 3 builds, the one both would keep (a split: a coin flip).
+        Pushed to origin's default branch (merged if it moved) unless --no-push.
 ```
 
-Each agent keeps **one session** for the whole run, so nothing is read twice. Plans are Pareto: the few changes that deliver most of the result, meeting the acceptance criteria and nothing beyond. Prompts never name an agent; a plan is rejected only when it misses the task or would not work.
+Approval moves things forward, not preference: a candidate or plan both agents approve wins, even if each would rather keep the other one. Preference only breaks a deadlock.
 
-**Two branches to reconcile** (`--branch A --branch B`, or the two fields on the dashboard form): both agents read the branches as plain folders labelled **Candidate X** and **Candidate Y** (random per run, exported without `.git`, so no branch name, author or commit message), and the plan's first line is `Base: Candidate X` or `Base: Candidate Y`. The build starts from that branch. Everything else is the same.
+**No bias toward either side.** No prompt names an agent or says whose anything is. Candidates are **Candidate X** and **Candidate Y**, relabelled at random every round and read from plain folders exported without `.git` (so no branch name, author or commit message); plans and reviews are numbered at random; candidates are listed in random order; and every step runs in a **fresh session**, so no agent remembers what it wrote. Nobody keeps a tree of their own: both builds start from the one agreed base. Plans are Pareto: the few changes that deliver most of the result, meeting the acceptance criteria and nothing beyond.
+
+**Two branches to reconcile** (`--branch A --branch B`, or the two fields on the dashboard form) start at judge, since one may already be acceptable to both.
 
 ## Use
 
@@ -25,9 +32,9 @@ py -m cav web --run runs\<id>       # the dashboard for one run
 py -m cav smoke                     # both agents answer a trivial prompt
 ```
 
-`--builder kimi` swaps the roles (the other agent reviews). On Windows use `py`, not `python` (the Store stub).
+On Windows use `py`, not `python` (the Store stub).
 
-A run directory holds `state.json` (steps, verdicts, times), `events.jsonl` (every agent action), `plans/` (numbered plans; `agreed.md`), `agree/` (each turn's reply), `review/` (diffs and reviews), `work/` (the built tree), `REPORT.md`, and the result as `refs/cav/<id>/result` in the repo. `/compare?runs=a,b` on the home dashboard puts two runs side by side.
+A run directory holds `state.json` (steps, verdicts, times, and `authors`: which agent wrote each numbered file), `events.jsonl` (every agent action), `judge/` (reviews and plans per cycle), `plans/` (`c<N>-agreed.md`), `agree/` (replies), `candidates/` (what each judge read), `wt/` (the builds), `REPORT.md`, and the result as `refs/cav/<id>/result` in the repo. `/compare?runs=a,b` on the home dashboard puts two runs side by side.
 
 ## Requirements
 
@@ -38,9 +45,9 @@ A run directory holds `state.json` (steps, verdicts, times), `events.jsonl` (eve
 ## Layout
 
 ```
-cav/flow.py      the run: plan, agree, build, review, publish; repo, branch and push helpers
+cav/flow.py      the run: judge or plan, agree, build, publish; repo, branch and push helpers
 cav/prompts.py   what each agent is told, step by step
-cav/agents.py    OpenCode and Kimi adapters: persistent sessions, approvals, ponytail
+cav/agents.py    OpenCode and Kimi adapters: sessions, approvals, ponytail
 cav/gitops.py    git helpers
 cav/events.py    the event log
 cav/web.py, web/ the run dashboard, the home server, the compare page
