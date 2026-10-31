@@ -467,6 +467,12 @@ function details(h) {
       .map(r => `<li>${esc(a)} · ${esc(r.requirement)} · not met in ${['X', 'Y'].filter(l => !r.met[l]).join(' and ')}` +
         `${r.evidence ? ` <span class="dim">(${esc(r.evidence)})</span>` : ''}</li>`));
     if (unmet.length) more.push(fold(`Requirements not met (${unmet.length})`, `<ul>${unmet.join('')}</ul>`));
+    const gaps = Object.entries(h.test_gaps || {}).flatMap(([a, list]) => list.map(g =>
+      `<li>${esc(a)} · ${esc(g.candidate || '?')} · ${esc(g.gap)}</li>`));
+    if (gaps.length) {
+      lines.push(`${plural(gaps.length, 'test gap')} noted: listed, not blocking`);
+      more.push(fold(`Test gaps (${gaps.length})`, `<ul>${gaps.join('')}</ul>`));
+    }
     const by = (h.blockers || []).reduce((count, b) => (count[b.by] = (count[b.by] || 0) + 1, count), {});
     if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, k]) => `${esc(a)} ${k}`).join(' · ') || 'none'));
     if (h.files && done) lines.push('reviews: ' + links(h.files));
