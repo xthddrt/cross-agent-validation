@@ -412,43 +412,65 @@ const blockerItem = (b) => `<li><b>${b.agreed === undefined ? 'raised' : b.agree
   `${esc(b.by)} · Candidate ${esc(b.candidate)} · ${where(b)} ${esc(b.problem)}` +
   (b.why_not ? ` <span class="dim">(not a blocker: ${esc(b.why_not)})</span>` : '') + '</li>';
 
+// the latest step of a kind before step `round`
+const before = (round, kind) => (state.history || []).filter(x => x.round < round && x.step === kind).pop();
+// the agreed blockers a build fixed: recorded on newer runs, else the confirm before it, in its base
+const fixedBy = (b) => b.fixing != null ? b.fixing
+  : b.base && (before(b.round, 'confirm') || {}).agreed ? (before(b.round, 'confirm').agreed[b.base] || []).length : null;
+const agreedList = (list) => list && list.length ? '<ul>' + list.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : 'none';
+
 function details(h) {
-  // at most four lines on what the step is doing or decided, with links; long lists fold away below
+  // at most four lines on what the step is doing, or did, as it stood then; long lists fold away below
   if (!h) return '<div class="dim">waiting for this step</div>';
-  const lines = [h.verdict ? `<b>${esc(h.verdict)}</b> · took ${dur(h.seconds)}` : `<b>running</b> · ${dur(took(h))} so far`];
+  const done = !!h.verdict;
+  const lines = [done ? `<b>${esc(h.verdict)}</b> · took ${dur(h.seconds)}` : `<b>running</b> · ${dur(took(h))} so far`];
   const more = [];
   if (h.step === 'plan' || h.step === 'revise') {
-    lines.push('plans: ' + (links(h.files) || '…') + (h.words ? ` <span class="dim">(${Object.entries(h.words)
-      .map(([a, w]) => `${esc(a)} ${w} words`).join(', ')})</span>` : ''));
+    lines.push(done ? (h.files ? 'plans: ' + links(h.files) : 'plans written') + (h.words ? ` <span class="dim">(${Object.entries(h.words)
+      .map(([a, w]) => `${esc(a)} ${w} words`).join(', ')})</span>` : '')
+      : `both are ${h.step === 'plan' ? 'writing a plan' : 'revising from the objections'}`);
     if (h.agreed_plan) lines.push(`the two plans were the same: ${link(h.agreed_plan, 'open the agreed plan')}`);
   } else if (h.step === 'vote') {
-    if (h.ballots) lines.push('plans: ' + Object.entries(h.ballots).map(([n, path]) =>
+    if (h.ballots) lines.push((done ? 'voted on: ' : 'voting on: ') + Object.entries(h.ballots).map(([n, path]) =>
       link(path, `plan ${n}${h.plans ? ` (${h.plans[n]}'s)` : ''}`)).join(' · '));
     if (h.approvals) lines.push('votes: ' + Object.entries(h.approvals).map(([a, v]) =>
       `${esc(a)} ${Object.entries(v).map(([n, ok]) => `${n}${ok ? '✓' : '✕'}`).join(' ')}`).join(' · '));
     if (h.agreed_plan) lines.push(`agreed: ${link(h.agreed_plan, 'open the agreed plan')}`);
-    else if (h.why) lines.push(`no plan has both approvals: ${plural(Object.values(h.why).flat().length, 'objection')}, so both revise`);
+    else if (h.why) lines.push(`no plan had both approvals: ${plural(Object.values(h.why).flat().length, 'objection')}, so both revise`);
     if (h.why) more.push(fold('Objections', '<ul>' + Object.entries(h.why).flatMap(([n, texts]) =>
       texts.map(t => `<li>plan ${esc(n)}: ${esc(t)}</li>`)).join('') + '</ul>'));
   } else if (h.step === 'build') {
-    lines.push((h.base ? `building on Candidate ${esc(h.base)}` : 'building from main') +
-      (h.fixing != null ? ` · ${plural(h.fixing, 'agreed blocker')} to fix` : '') + (h.plan ? ` · ${link(h.plan, 'the plan')}` : ''));
+    const n = fixedBy(h);
+    lines.push(h.base ? `${done ? 'built on' : 'building on'} Candidate ${esc(h.base)}` +
+        (n != null ? `: ${done ? 'fixed' : 'fixing'} ${plural(n, 'agreed blocker')}${done ? ', checked by the next review' : ''}` : '')
+      : `${done ? 'built' : 'building'} the agreed plan from main`);
+    if (h.plan) lines.push(`plan: ${link(h.plan, 'open it')}`);
     if (h.commits) lines.push('built: ' + Object.entries(h.commits).map(([a, c]) => `${esc(a)} ${esc(shas(c))}`).join(' · '));
-    if (h.notes && h.verdict) lines.push("builders' notes: " + links(h.notes));
+    if (h.notes && done) lines.push("builders' notes: " + links(h.notes));
+    const confirm = h.base && before(h.round, 'confirm');
+    if (confirm && confirm.agreed) more.push(fold(`The agreed blockers in ${esc(h.base)}`, agreedList(confirm.agreed[h.base])));
   } else if (h.step === 'review') {
-    const by = (h.blockers || []).reduce((n, b) => (n[b.by] = (n[b.by] || 0) + 1, n), {});
-    if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, n]) => `${esc(a)} ${n}`).join(' · ') || 'none'));
-    if (h.files && h.verdict) lines.push('reviews: ' + links(h.files));
+    const build = before(h.round, 'build');
+    const confirm = build && build.base && before(build.round, 'confirm');
+    const n = build && build.base ? fixedBy(build) : null;
+    lines.push(n != null ? `${done ? 'checked' : 'checking'} the ${plural(n, 'agreed blocker')} the last build fixed in ` +
+      `${esc(build.base)}, and ${done ? 'looked' : 'looking'} for new ones in both candidates`
+      : `${done ? 'reviewed' : 'reviewing'} both candidates for the first time`);
+    const by = (h.blockers || []).reduce((count, b) => (count[b.by] = (count[b.by] || 0) + 1, count), {});
+    if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, k]) => `${esc(a)} ${k}`).join(' · ') || 'none'));
+    if (h.files && done) lines.push('reviews: ' + links(h.files));
+    if (confirm && confirm.agreed) more.push(fold(`The agreed blockers being checked (${n})`, agreedList(confirm.agreed[build.base])));
     if ((h.blockers || []).length) more.push(fold(`Blockers raised (${h.blockers.length})`, `<ul>${h.blockers.map(blockerItem).join('')}</ul>`));
   } else if (h.step === 'confirm') {
     const raised = (hist(h.round - 1) || {}).blockers || [];
     const dropped = raised.filter(b => b.agreed === false).length;
-    if (h.agreed) lines.push('agreed blockers: ' + Object.entries(h.agreed).map(([l, list]) => `${esc(l)} ${list.length}`).join(' · ') +
-      (dropped ? ` · ${plural(dropped, 'blocker')} voted down` : ''));
-    if (h.agreed) lines.push(/^no blocker/.test(h.verdict || '') ? 'a candidate is clear: the run ends here'
-      : h.verdict ? 'both candidates are blocked: a fix plan comes next' : '');
+    lines.push(done ? 'agreed blockers: ' + Object.entries(h.agreed || {}).map(([l, list]) => `${esc(l)} ${list.length}`).join(' · ') +
+        (dropped ? ` · ${plural(dropped, 'blocker')} voted down` : '')
+      : `each is voting on the other's blockers: ${plural(raised.length, 'blocker')} raised`);
+    if (done) lines.push(/^no blocker/.test(h.verdict) ? 'a candidate is clear: the run ends here'
+      : 'both candidates are blocked: a fix plan comes next');
     if (h.agreed) more.push(fold('Agreed blockers', Object.entries(h.agreed).map(([l, list]) =>
-      `<div>in ${esc(l)}: ${list.length ? '<ul>' + list.map(x => `<li>${esc(x)}</li>`).join('') + '</ul>' : 'none'}</div>`).join('')));
+      `<div>in ${esc(l)}: ${agreedList(list)}</div>`).join('')));
   } else {  // a step from an older run
     if (h.how) lines.push(esc(h.how));
     if (h.approvals) lines.push(Object.entries(h.approvals).map(([a, v]) => `${esc(a)}: ` +
@@ -465,8 +487,7 @@ function renderSteps() {
     `${esc(h.verdict || (isLive(h.round) ? 'running' : '…'))} · ${dur(took(h))}</span>`).join('')}` +
     (all.length ? `<span class="chip">total ${dur(total)}</span>` : '') + '</div>';
   const final = state.final ? `<div><b>${esc(state.outcome)}</b> · ${esc(shas(state.final.commits || state.final.commit))}</div>` : '';
-  const agreed = state.agreed && !state.final ? `<div class="dim">blockers being fixed on ${esc(state.base)}: ${state.agreed.length}</div>` : '';
-  setHtml($('summary'), chips + final + agreed +
+  setHtml($('summary'), chips + final +
     `<details><summary class="dim">${state.labels ? 'Plan' : 'Task'}</summary><pre>${esc(state.input || '')}</pre></details>`);
   setHtml($('details'), selected ? details(hist(selected)) : '');
 }
