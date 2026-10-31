@@ -348,6 +348,7 @@ class Flow:
         answers = {name: _json(replies[name]) for name in self.names}
         claims = {name: answers[name]["blockers"] for name in self.names}
         entry["requirements"] = {name: answers[name]["requirements"] for name in self.names}
+        entry["test_gaps"] = {name: answers[name].get("test_gaps") or [] for name in self.names}  # listed, not blocking
         for name in self.names:
             for item in claims[name]:
                 was = item.pop("id", None)  # numbers are CAV's to give; keep what a reviewer cited
@@ -537,6 +538,9 @@ class Flow:
         if not isinstance(blockers, list) or any(not isinstance(item, dict) or not item.get("problem")
                                                  or item.get("candidate") not in (*LABELS, "both") for item in blockers):
             return 'write JSON with "blockers": a list of {"candidate": "X|Y|both", "file", "line", "problem", "fix"}'
+        if not isinstance(data.get("test_gaps", []), list) or any(not isinstance(item, dict) or not item.get("gap")
+                                                                   for item in data.get("test_gaps", [])):
+            return 'write "test_gaps": a list of {"candidate": "X|Y|both", "gap"}, or an empty list'
         for item in blockers:  # a missing file can be the blocker; a path outside the candidate cannot
             root = pathlib.Path(candidates[LABELS[0]]["folder"]).resolve()
             if not item.get("file") or root not in (root / str(item["file"])).resolve().parents:

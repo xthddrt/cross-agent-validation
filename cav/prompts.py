@@ -13,6 +13,8 @@ CHECKLIST = ("First check every requirement in the agreed plans (each numbered i
              "effect, is a blocker. Then look for these failure classes: concurrency and locking, resource and reference "
              "leaks, memory used in the wrong context, input and buffer handling, error paths that fail open, byte order "
              "and encoding, names or paths in the wrong form.")
+TEST_GAPS = ("A missing, weak or broken test, or an unmet requirement about tests, is not a blocker when the code it "
+             'covers is right; list it in "test_gaps" instead.')
 TESTED = " Each fix comes with a test in the project's own tests that fails without it."
 
 
@@ -34,14 +36,13 @@ def review(plans, candidates, reply, agreed=None, audit=()):
         lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}. Assume it missed something "
                      "important, and find it.")
     lines += ["Each candidate holds one folder per repository. Review the plans and both candidates, reading all the code. "
-              + BLOCKER + " " + CHECKLIST
-              + (" A fix for an agreed blocker without a test that exercises it is not a fix." if agreed else ""),
+              + BLOCKER + " " + CHECKLIST + " " + TEST_GAPS,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
               + f'One in both is one entry with "candidate": "both". Write to {reply}:',
               '{"requirements": [{"requirement": "...", "met": {"X": true|false, "Y": true|false}, "evidence": "file:line ..."}], '
               '"blockers": [{"candidate": "X|Y|both", "id": "#n or none", "file": "<path in the candidate>", "line": 1, '
-              '"problem": "...", "fix": "..."}]}']
+              '"problem": "...", "fix": "..."}], "test_gaps": [{"candidate": "X|Y|both", "gap": "..."}]}']
     return "\n".join(lines) + "\n"
 
 

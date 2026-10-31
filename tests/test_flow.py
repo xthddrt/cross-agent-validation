@@ -55,7 +55,8 @@ class Fake:
                      for label, folder in self.folders.items() for n in range(1, count(folder) + 1)]
             requirements = [{"requirement": "feature.txt exists", "evidence": "feature.txt:1",
                              "met": {label: (folder / "feature.txt").exists() for label, folder in self.folders.items()}}]
-            path.write_text(json.dumps({"requirements": requirements, "blockers": found}), encoding="utf-8")
+            path.write_text(json.dumps({"requirements": requirements, "blockers": found,
+                                        "test_gaps": [{"candidate": "both", "gap": "no test for feature.txt"}]}), encoding="utf-8")
         elif prompt.startswith("VOTED DOWN"):
             listed = pathlib.Path(re.search(r"^- (\S+)$", prompt, re.M).group(1)).read_text(encoding="utf-8")
             keep = {n: self.keep(line) for n, line in re.findall(r"^(\d+)\. (.*)$", listed, re.M)}
@@ -150,6 +151,9 @@ class FlowTest(unittest.TestCase):
                                             ("audit", "reviewed"), ("confirm", "no blocker in X and Y")])
         audit = [p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p][1]
         self.assertIn("AUDIT. The last review found no blocker in X and Y", audit)
+        self.assertIn('"test_gaps"', audit)
+        self.assertEqual(flow.state["history"][3]["test_gaps"]["kimi"][0]["gap"], "no test for feature.txt",
+                         "a test gap is listed and does not block")
         for fake in fakes.values():
             vote = next(p for p in fake.prompts if p.startswith("PLANS"))
             written = re.search(r"Write a plan to (\S+)", fake.prompts[0]).group(1)
@@ -295,6 +299,8 @@ class FlowTest(unittest.TestCase):
         need = [{"requirement": "r", "met": {"X": True, "Y": True}, "evidence": "f:1"}]
         path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "Z", "problem": "x"}]}), encoding="utf-8")
         self.assertIn('"candidate"', Flow.review_problem(path, {}))
+        path.write_text(json.dumps({"requirements": need, "blockers": [], "test_gaps": ["weak"]}), encoding="utf-8")
+        self.assertIn('"test_gaps"', Flow.review_problem(path, {}))
         candidate = self.tmp / "candidate"
         candidate.mkdir()
         path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "X", "file": "tool/missing.cpp", "problem": "never added"}]}),
