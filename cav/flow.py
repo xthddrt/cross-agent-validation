@@ -40,6 +40,7 @@ from .gitops import GIT, GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, 
 LABELS = ("X", "Y")
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
 ANSWER_SECONDS = 5400  # one agent answer
+CHECK_SECONDS = 3600  # one check command
 POLL_SECONDS = 2
 BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
                           or pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home()) / "cav-blind")
@@ -83,7 +84,7 @@ def blocker_line(item):
 
 
 class Flow:
-    def __init__(self, repos, run_dir, task=None, plan=None, models=None):
+    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), models=None):
         """`repos`: [{"repo": a local path or a GitHub URL, "branches": [set 1, set 2]}]; a blank branch is
         that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`."""
         self.repos = [{"spec": item["repo"], "branches": (list(item.get("branches") or []) + ["", ""])[:2]}
@@ -94,6 +95,7 @@ class Flow:
         self.run_dir = pathlib.Path(run_dir).resolve()
         self.run_dir.mkdir(parents=True, exist_ok=True)
         self.task, self.plan = (task or "").strip(), (plan or "").strip()
+        self.checks = [command.strip() for command in checks if command.strip()]  # run in each candidate's folder
         self.run_id = self.run_dir.name
         self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
@@ -239,8 +241,13 @@ class Flow:
             self.new_round()
             found = self.review(candidates, plans, agreed)
             clear = [label for label in LABELS if not found[label]]
-            if clear:
-                return self.finish(candidates, random.choice(clear))
+            if clear:  # a fresh audit, told the review found nothing, before a candidate is the result
+                self.new_round()
+                audited = self.review(candidates, plans, agreed, audit=clear)
+                found = {label: found[label] + audited[label] for label in LABELS}  # the review's blockers stand
+                clear = [label for label in LABELS if not found[label]]
+                if clear:
+                    return self.finish(candidates, random.choice(clear))
             both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
             fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path)), fixes=True)
             plans.append(fix)
@@ -313,7 +320,7 @@ class Flow:
         (self.blind / "notes").mkdir(exist_ok=True)
         entry = self.begin("build", start=start, base=base, plan=self.rel(plan_path), fixing=fixing,
                            notes={name: self.rel(path) for name, path in notes.items()})
-        self.ask({name: prompts.build(plan_path, works[name], notes[name], base) for name in self.names},
+        self.ask({name: prompts.build(plan_path, works[name], notes[name], base, self.checks) for name in self.names},
                  lambda name: None if notes[name].exists() else "no note written")
         commits = {name: {item["name"]: self.snapshot(item["path"], works[name] / item["name"], start[item["name"]],
                                                       f"round {self.cycle} build {numbers[name]}") for item in self.repos}
@@ -323,18 +330,24 @@ class Flow:
         self.end(entry, "built", commits=commits)
         return self.candidates({labels[name]: commits[name] for name in self.names})
 
-    def review(self, candidates, plans, agreed):
-        """Both list the blockers in both candidates; each then votes on the other's. Returns, per
-        candidate, the blockers both agreed on, numbered."""
+    def review(self, candidates, plans, agreed, audit=()):
+        """Both check every requirement and list the blockers in both candidates; each then votes on the
+        other's, and a voted-down blocker goes back to its author once. Returns, per candidate, the
+        blockers both agreed on, numbered, plus one for failing checks. `audit`: the candidates the
+        last review found clear, which this one audits."""
         numbers = self.numbered()
         replies = {name: self.blind / f"c{self.cycle}-review-{numbers[name]}.json" for name in self.names}
         self.mine(replies)
-        entry = self.begin("review", candidates={label: item["commits"] for label, item in candidates.items()},
+        entry = self.begin("audit" if audit else "review",
+                           candidates={label: item["commits"] for label, item in candidates.items()},
+                           checks={label: item["checks"] for label, item in candidates.items()},
                            files={name: self.rel(path) for name, path in replies.items()})
-        self.ask({name: prompts.review(plans, [(label, candidates[label]["folder"]) for label in random.sample(LABELS, 2)],
-                                       replies[name], agreed) for name in self.names},
+        listed = lambda: [(label, candidates[label]["folder"], candidates[label]["checks"]) for label in random.sample(LABELS, 2)]
+        self.ask({name: prompts.review(plans, listed(), replies[name], agreed, audit) for name in self.names},
                  lambda name: self.review_problem(replies[name], candidates))
-        claims = {name: _json(replies[name])["blockers"] for name in self.names}
+        answers = {name: _json(replies[name]) for name in self.names}
+        claims = {name: answers[name]["blockers"] for name in self.names}
+        entry["requirements"] = {name: answers[name]["requirements"] for name in self.names}
         for name in self.names:
             for item in claims[name]:
                 was = item.pop("id", None)  # numbers are CAV's to give; keep what a reviewer cited
@@ -368,10 +381,42 @@ class Flow:
                 for label in LABELS:
                     if hits(item, label):
                         found[label].append(item)
+        self.comeback(claims, numbers)
+        for label in LABELS:  # failing checks block like an agreed blocker, without a vote
+            if not candidates[label]["checks_ok"]:
+                found[label].append({"candidate": label, "file": "(checks)", "problem": candidates[label]["checks"],
+                                     "by": "checks", "agreed": True, "id": self.next_id})
+                self.next_id += 1
         clear = [label for label in LABELS if not found[label]]
+        disputed = [item for name in self.names for item in claims[name] if item.get("disputed")]
         self.end(entry, f"no blocker in {' and '.join(clear)}" if clear else "blocked",
-                 agreed={label: [blocker_line(item) for item in found[label]] for label in LABELS})
+                 agreed={label: [blocker_line(item) for item in found[label]] for label in LABELS},
+                 disputed=[f"{blocker_line(item)} — kept by {item['by']}: {item['disputed']}" for item in disputed])
+        if disputed:
+            self.save(disputed=self.state.get("disputed", []) + entry["disputed"])
         return found
+
+    def comeback(self, claims, numbers):
+        """A blocker voted down goes back to its author once, with the reason: kept, it is disputed
+        (listed for the user, not blocking); else withdrawn."""
+        lists, replies = {}, {}
+        for name in self.names:
+            down = [item for item in claims[name] if item.get("agreed") is False]
+            if down:
+                lists[name] = self.blind / f"c{self.cycle}-voted-down-{numbers[name]}.md"
+                lists[name].write_text("".join(f"{n}. {blocker_line(item)}\n   Not a blocker because: {item['why_not']}\n"
+                                               for n, item in enumerate(down, 1)), encoding="utf-8")
+                replies[name] = (self.blind / f"c{self.cycle}-comeback-{numbers[name]}.json", down)
+        self.mine({name: path for name, (path, _) in replies.items()})
+        if not replies:
+            return
+        self.ask({name: prompts.challenged(lists[name], path) for name, (path, _) in replies.items()},
+                 lambda name: self.keep_problem(replies[name][0], len(replies[name][1])))
+        for name, (path, down) in replies.items():
+            answer = _json(path)
+            for n, item in enumerate(down, 1):
+                if answer["keep"][str(n)]:
+                    item["disputed"] = answer["why"][str(n)]
 
     def finish(self, candidates, label):
         commits, branch = candidates[label]["commits"], f"cav/{self.run_id}"
@@ -401,10 +446,38 @@ class Flow:
         return folder
 
     def candidates(self, commits):
-        """label -> its commits (repo name -> commit) and a plain folder to read, one folder per repo."""
+        """label -> its commits (repo name -> commit), a plain folder to read (one folder per repo), and
+        how its checks went, run by CAV in a copy of its own."""
         folder = self.blind / "candidates" / f"c{self.cycle + 1}"
-        return {label: {"commits": commits[label], "folder": str(self.export(commits[label], folder / label))}
-                for label in commits}
+        out = {}
+        for label in commits:
+            ok, summary = self.run_checks(commits[label], f"c{self.cycle + 1}-{label}")
+            out[label] = {"commits": commits[label], "folder": str(self.export(commits[label], folder / label)),
+                          "checks_ok": ok, "checks": summary}
+        return out
+
+    def run_checks(self, commits, name):
+        """Run each check command in a fresh copy, stopping at the first failure. The log goes to the
+        blind area, where the reviewers can read it."""
+        if not self.checks:
+            return True, "none configured"
+        work = self.export(commits, self.run_dir / "checks" / name)
+        log = self.blind / f"{name}-checks.log"
+        lines = []
+        for command in self.checks:
+            try:
+                proc = subprocess.run(command, shell=True, cwd=str(work), capture_output=True, text=True, encoding="utf-8",
+                                      errors="replace", timeout=CHECK_SECONDS, creationflags=NO_WINDOW)
+                code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+            except subprocess.TimeoutExpired:
+                code, output = "timeout", f"no result after {CHECK_SECONDS} seconds"
+            lines += [f"$ {command}", output[-6000:], f"exit {code}", ""]
+            if code != 0:
+                log.write_text("\n".join(lines), encoding="utf-8")
+                self.log(f"checks {name}: {command} -> exit {code}")
+                return False, f"FAILED: {command} exit {code}; log {log}"
+        log.write_text("\n".join(lines), encoding="utf-8")
+        return True, f"all pass ({len(self.checks)}); log {log}"
 
     def snapshot(self, repo, folder, parent, what):
         """Commit a plain folder on top of `parent` through a separate index: the folder never gets a .git."""
@@ -453,6 +526,13 @@ class Flow:
     @staticmethod
     def review_problem(path, candidates):
         data = _json(path) or {}
+        requirements = data.get("requirements")
+        if not isinstance(requirements, list) or not requirements or any(
+                not isinstance(item, dict) or not item.get("requirement") or not isinstance(item.get("met"), dict)
+                or set(item["met"]) != set(LABELS) or not all(isinstance(v, bool) for v in item["met"].values())
+                for item in requirements):
+            return ('write "requirements": a list of {"requirement", "met": {"X": true|false, "Y": true|false}, '
+                    '"evidence"}, one for each requirement in the agreed plans')
         blockers = data.get("blockers")
         if not isinstance(blockers, list) or any(not isinstance(item, dict) or not item.get("problem")
                                                  or item.get("candidate") not in (*LABELS, "both") for item in blockers):
@@ -461,6 +541,18 @@ class Flow:
             root = pathlib.Path(candidates[LABELS[0]]["folder"]).resolve()
             if not item.get("file") or root not in (root / str(item["file"])).resolve().parents:
                 return f"blocker file {item.get('file')!r} is not a path inside the candidate"
+        return None
+
+    @staticmethod
+    def keep_problem(path, count):
+        data = _json(path) or {}
+        keep, why = data.get("keep"), data.get("why") or {}
+        if not isinstance(keep, dict) or set(keep) != {str(n) for n in range(1, count + 1)} \
+                or not all(isinstance(v, bool) for v in keep.values()):
+            return f'write JSON with "keep": true or false for each of 1 to {count}'
+        for n, kept in keep.items():
+            if kept and not isinstance(why.get(n), str):
+                return f'blocker {n} is kept without a "why"'
         return None
 
     @staticmethod

@@ -75,6 +75,13 @@
         <label for="text">Task, or the plan the two branch sets implement</label>
         <textarea id="text" placeholder="No branches: what should be built. Two branch sets: the plan both follow."></textarea>
       </div>
+      <div class="field">
+        <label for="checks">Checks <span class="hint" style="font-weight:400">(optional: one command per line)</span></label>
+        <textarea id="checks" style="min-height:70px;font-family:var(--mono);font-size:13px" spellcheck="false"
+                  placeholder="cd kernel-filter &amp;&amp; build.cmd &amp;&amp; build\Release\tool\kfilterctl.exe self-test"></textarea>
+        <div class="hint">CAV runs these on every candidate, in a folder holding one folder per repository. A candidate whose
+          checks fail is never the result, and every fix must come with a test.</div>
+      </div>
       <div class="actions">
         <button id="go" type="submit">Start run</button>
         <span class="error" id="error"></span>
@@ -153,7 +160,7 @@ $('form').addEventListener('submit', async (ev) => {
   try {
     const repos = [...$('repos').children].map(row => ({repo:row.querySelector('.path').value,
       branches:[row.querySelector('.b1').value, row.querySelector('.b2').value]}));
-    const out = await post('start', {repos, text:$('text').value});
+    const out = await post('start', {repos, text:$('text').value, checks:$('checks').value.split('\n')});
     location.href = out.url;
   } catch (e) {
     $('error').textContent = e.message;

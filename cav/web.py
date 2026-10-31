@@ -138,7 +138,7 @@ class Home:
                         "running": phase not in ENDED, "updated": max(stamps)})
         return sorted(out, key=lambda item: item["updated"], reverse=True)
 
-    def start(self, repos, text):
+    def start(self, repos, text, checks=()):
         """Start a run as its own process, so it outlives this server. `repos`: [{"repo", "branches":
         [set 1, set 2]}]; a blank branch is that repo's main."""
         repos = [{"repo": str(item.get("repo") or "").strip().strip('"'),
@@ -166,7 +166,9 @@ class Home:
         run_dir = self.runs_dir / run_id
         run_dir.mkdir(parents=True)
         (run_dir / "input.md").write_text(text + "\n", encoding="utf-8")
-        (run_dir / "spec.json").write_text(json.dumps({"repos": repos, "plan" if branched else "task": text}, indent=2),
+        checks = [line.strip() for line in checks or () if str(line).strip()]
+        (run_dir / "spec.json").write_text(json.dumps({"repos": repos, "plan" if branched else "task": text,
+                                                       "checks": checks}, indent=2),
                                            encoding="utf-8")
         # python.exe, not pythonw.exe: the agents' console children then share one hidden console
         python = pathlib.Path(sys.executable)
@@ -237,7 +239,7 @@ class Home:
         body = json.loads(raw or b"{}")
         try:
             if parts == ["api", "start"]:
-                run_id = self.start(body.get("repos"), body.get("text"))
+                run_id = self.start(body.get("repos"), body.get("text"), body.get("checks") or ())
                 return handler.send(200, json.dumps({"id": run_id, "url": f"/{self.token}/run/{run_id}/"}))
             if parts == ["api", "stop"]:
                 self.stop(str(body.get("id") or ""))
