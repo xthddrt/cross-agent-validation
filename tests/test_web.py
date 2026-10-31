@@ -52,7 +52,7 @@ class HomeTest(unittest.TestCase):
         run_dir = self.tmp / "runs" / run_id
         self.assertEqual(launched[0][launched[0].index("--spec") + 1], str(run_dir / "spec.json"))
         self.assertEqual(json.loads((run_dir / "spec.json").read_text(encoding="utf-8")),
-                         {"repos": [{"repo": str(self.repo), "branches": ["", ""]}], "task": "Do the thing"},
+                         {"repos": [{"repo": str(self.repo), "branches": ["", ""]}], "task": "Do the thing", "checks": []},
                          "an empty repo row is ignored; no branches means a task")
         self.assertEqual((run_dir / "input.md").read_text(encoding="utf-8").strip(), "Do the thing")
         blind = self.tmp / "blind"

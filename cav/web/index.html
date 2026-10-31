@@ -449,13 +449,24 @@ function details(h) {
     if (h.notes && done) lines.push("builders' notes: " + links(h.notes));
     const confirm = h.base && before(h.round, 'confirm');
     if (confirm && confirm.agreed) more.push(fold(`The agreed blockers in ${esc(h.base)}`, agreedList(confirm.agreed[h.base])));
-  } else if (h.step === 'review') {
+  } else if (h.step === 'review' || h.step === 'audit') {
     const build = before(h.round, 'build');
     const confirm = build && build.base && before(build.round, 'confirm');
     const n = build && build.base ? fixedBy(build) : null;
     lines.push(n != null ? `${done ? 'checked' : 'checking'} the ${plural(n, 'agreed blocker')} the last build fixed in ` +
       `${esc(build.base)}, and ${done ? 'looked' : 'looking'} for new ones in both candidates`
       : `${done ? 'reviewed' : 'reviewing'} both candidates for the first time`);
+    if (h.step === 'audit') lines[1] = `${done ? 'audited' : 'auditing'} the candidates the last review found clear, ` +
+      'looking for what it missed';
+    if (h.checks) lines.push('checks: ' + Object.entries(h.checks).map(([l, c]) => `${esc(l)} ${/^FAILED/.test(c) ? '✕ failed'
+      : /^all pass/.test(c) ? '✓ pass' : esc(c)}`).join(' · '));
+    const req = h.requirements || {};
+    if (Object.keys(req).length) lines.push('requirements met: ' + Object.entries(req).map(([a, list]) =>
+      `${esc(a)} X ${list.filter(r => r.met.X).length}/${list.length}, Y ${list.filter(r => r.met.Y).length}/${list.length}`).join(' · '));
+    const unmet = Object.entries(req).flatMap(([a, list]) => list.filter(r => !r.met.X || !r.met.Y)
+      .map(r => `<li>${esc(a)} · ${esc(r.requirement)} · not met in ${['X', 'Y'].filter(l => !r.met[l]).join(' and ')}` +
+        `${r.evidence ? ` <span class="dim">(${esc(r.evidence)})</span>` : ''}</li>`));
+    if (unmet.length) more.push(fold(`Requirements not met (${unmet.length})`, `<ul>${unmet.join('')}</ul>`));
     const by = (h.blockers || []).reduce((count, b) => (count[b.by] = (count[b.by] || 0) + 1, count), {});
     if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, k]) => `${esc(a)} ${k}`).join(' · ') || 'none'));
     if (h.files && done) lines.push('reviews: ' + links(h.files));
@@ -471,6 +482,10 @@ function details(h) {
       : 'both candidates are blocked: a fix plan comes next');
     if (h.agreed) more.push(fold('Agreed blockers', Object.entries(h.agreed).map(([l, list]) =>
       `<div>in ${esc(l)}: ${agreedList(list)}</div>`).join('')));
+    if ((h.disputed || []).length) {
+      lines.push(`${plural(h.disputed.length, 'voted-down blocker')} kept by its author: disputed, listed, not blocking`);
+      more.push(fold(`Disputed (${h.disputed.length})`, agreedList(h.disputed)));
+    }
   } else {  // a step from an older run
     if (h.how) lines.push(esc(h.how));
     if (h.approvals) lines.push(Object.entries(h.approvals).map(([a, v]) => `${esc(a)}: ` +
