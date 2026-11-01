@@ -14,8 +14,9 @@ CHECKLIST = ("First check each requirement in the agreed plans (numbered items, 
              "blocker. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
              "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
              "in the wrong form.")
-NOTES = ('Anything less, including a missing or weak test for code that is right, is a note: list it in "notes"; '
-         'it does not hold up the result.')
+NOT_BLOCKERS = ("Not blockers: code the project does not build or run, hardening for a case nothing in the project "
+                "triggers, a wrong result that needs rare timing or an unlikely setup, style, naming, comments, and "
+                "missing or weak tests. A crash, security hole or data loss counts even when rare.")
 TESTED = " Each fix comes with a test in the project's own tests that fails without it."
 
 
@@ -38,13 +39,13 @@ def review(plans, candidates, reply, agreed=None, audit=()):
                      "important and find it. It focused on the newest changes, so start with files no recent round "
                      "changed, and check each bug you find for the same pattern in every repository.")
     lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
-              + BLOCKER + " " + CHECKLIST + " " + NOTES,
+              + BLOCKER + " " + NOT_BLOCKERS + " " + CHECKLIST,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
               + f'One in both is one entry with "candidate": "both". Write to {reply}:',
               '{"requirements": [{"requirement": "...", "met": {"X": true|false, "Y": true|false}, "evidence": "file:line ..."}], '
               '"blockers": [{"candidate": "X|Y|both", "id": "#n or none", "file": "<path in the candidate>", "line": 1, '
-              '"problem": "...", "fix": "..."}], "notes": [{"candidate": "X|Y|both", "note": "..."}]}']
+              '"problem": "...", "fix": "..."}]}']
     return "\n".join(lines) + "\n"
 
 

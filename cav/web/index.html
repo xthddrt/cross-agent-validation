@@ -473,12 +473,6 @@ function details(h) {
       lines.push(`${plural(gaps.length, 'test gap')} noted: listed, not blocking`);
       more.push(fold(`Test gaps (${gaps.length})`, `<ul>${gaps.join('')}</ul>`));
     }
-    const notes = Object.entries(h.notes || {}).flatMap(([a, list]) => list.map(g =>
-      `<li>${esc(a)} · ${esc(g.candidate || '?')} · ${esc(g.note)}</li>`));
-    if (notes.length) {
-      lines.push(`${plural(notes.length, 'note')}: listed, not blocking`);
-      more.push(fold(`Notes (${notes.length})`, `<ul>${notes.join('')}</ul>`));
-    }
     const by = (h.blockers || []).reduce((count, b) => (count[b.by] = (count[b.by] || 0) + 1, count), {});
     if (h.blockers) lines.push('blockers raised: ' + (Object.entries(by).map(([a, k]) => `${esc(a)} ${k}`).join(' · ') || 'none'));
     if (h.files && done) lines.push('reviews: ' + links(h.files));
