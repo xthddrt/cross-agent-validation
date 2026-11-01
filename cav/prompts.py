@@ -6,15 +6,16 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 REPOS = "Each holds one folder per repository."
-BLOCKER = ("A blocker is a real bug in code the project runs (crash, wrong results, security hole, data loss) or a "
-           "real departure from an agreed plan, shown by a realistic scenario you can name; nothing else counts.")
+BLOCKER = ("A blocker is a crash, security hole or data loss in code the project runs, or wrong results or a "
+           "departure from an agreed plan that someone using it would hit in normal use, shown by a realistic scenario "
+           "you can name.")
 CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
              "blocker. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
              "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
              "in the wrong form.")
-TEST_GAPS = ("A missing, weak or broken test, or an unmet test requirement, is not a blocker if the code it covers is "
-             'right; list it in "test_gaps".')
+NOTES = ('Anything less, including a missing or weak test for code that is right, is a note: list it in "notes"; '
+         'it does not hold up the result.')
 TESTED = " Each fix comes with a test in the project's own tests that fails without it."
 
 
@@ -37,13 +38,13 @@ def review(plans, candidates, reply, agreed=None, audit=()):
                      "important and find it. It focused on the newest changes, so start with files no recent round "
                      "changed, and check each bug you find for the same pattern in every repository.")
     lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
-              + BLOCKER + " " + CHECKLIST + " " + TEST_GAPS,
+              + BLOCKER + " " + CHECKLIST + " " + NOTES,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
               + f'One in both is one entry with "candidate": "both". Write to {reply}:',
               '{"requirements": [{"requirement": "...", "met": {"X": true|false, "Y": true|false}, "evidence": "file:line ..."}], '
               '"blockers": [{"candidate": "X|Y|both", "id": "#n or none", "file": "<path in the candidate>", "line": 1, '
-              '"problem": "...", "fix": "..."}], "test_gaps": [{"candidate": "X|Y|both", "gap": "..."}]}']
+              '"problem": "...", "fix": "..."}], "notes": [{"candidate": "X|Y|both", "note": "..."}]}']
     return "\n".join(lines) + "\n"
 
 
