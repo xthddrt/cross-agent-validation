@@ -6,8 +6,8 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 REPOS = "Each holds one folder per repository."
-BLOCKER = ("A blocker is a real bug (wrong results, crash, security hole, data loss) or a real departure from an "
-           "agreed plan, shown by a scenario you can name; nothing else counts.")
+BLOCKER = ("A blocker is a real bug in code the project runs (crash, wrong results, security hole, data loss) or a "
+           "real departure from an agreed plan, shown by a realistic scenario you can name; nothing else counts.")
 CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
              "blocker. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
