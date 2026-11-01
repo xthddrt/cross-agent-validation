@@ -6,15 +6,15 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 REPOS = "Each holds one folder per repository."
-BLOCKER = ("A blocker is a real bug that makes the code wrong (wrong results, a crash, a security hole, data loss) "
-           "or a real departure from an agreed plan, shown by a scenario you can name. Nothing else counts.")
-CHECKLIST = ("First check every requirement in the agreed plans (each numbered item, acceptance criterion and must-not-"
-             "regress item) in each candidate, citing file:line; one that is not met, or is present but never takes "
-             "effect, is a blocker. Then look for these failure classes: concurrency and locking, resource and reference "
-             "leaks, memory used in the wrong context, input and buffer handling, error paths that fail open, byte order "
-             "and encoding, names or paths in the wrong form.")
-TEST_GAPS = ("A missing, weak or broken test, or an unmet requirement about tests, is not a blocker when the code it "
-             'covers is right; list it in "test_gaps" instead.')
+BLOCKER = ("A blocker is a real bug (wrong results, crash, security hole, data loss) or a real departure from an "
+           "agreed plan, shown by a scenario you can name; nothing else counts.")
+CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
+             "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
+             "blocker. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
+             "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
+             "in the wrong form.")
+TEST_GAPS = ("A missing, weak or broken test, or an unmet test requirement, is not a blocker if the code it covers is "
+             'right; list it in "test_gaps".')
 TESTED = " Each fix comes with a test in the project's own tests that fails without it."
 
 
@@ -33,9 +33,10 @@ def review(plans, candidates, reply, agreed=None, audit=()):
         lines += ["", "AGREED BLOCKERS (last round's, in the base both candidates were built from)", f"- {agreed}"]
     lines += [""]
     if audit:
-        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}. Assume it missed something "
-                     "important, and find it.")
-    lines += ["Each candidate holds one folder per repository. Review the plans and both candidates, reading all the code. "
+        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}; assume it missed something "
+                     "important and find it. It focused on the newest changes, so start with files no recent round "
+                     "changed, and check each bug you find for the same pattern in every repository.")
+    lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
               + BLOCKER + " " + CHECKLIST + " " + TEST_GAPS,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
