@@ -11,13 +11,13 @@ BLOCKER = ("A blocker is a crash, security hole or data loss in code the project
            "you can name.")
 CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
-             "blocker. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
+             "departure from the plan. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
              "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
              "in the wrong form.")
 NOT_BLOCKERS = ("Not blockers: code the project does not build or run, hardening for a case nothing in the project "
                 "triggers, a wrong result that needs rare timing or an unlikely setup, style, naming, comments, and "
                 "missing or weak tests. A crash, security hole or data loss counts even when rare.")
-TESTED = " Each fix comes with a test in the project's own tests that fails without it."
+TESTED = " Each fix comes with a test that fails without it, where the project's tests can cover it."
 
 
 def plan(task, code, path):
@@ -76,7 +76,7 @@ def fix_plan(blockers, plans, path):
 def vote(plans, reply, fixes=False):
     lines = ["PLANS"] + [f"- {number}: {path}" for number, path in plans] + [""]
     lines.append("Read the code each plan changes and check its claims against it. Approve each plan unless it "
-                 + ("misses an agreed blocker in its base, fixes one without a test, builds on the candidate that clearly "
+                 + ("misses an agreed blocker in its base, fixes one without a test the project's tests could cover, builds on the candidate that clearly "
                     "needs more work, undoes an agreed plan that no blocker requires undoing, or would not work" if fixes
                     else "misses the task or would not work")
                  + f"; preferring one is not a reason to reject the other. Write to {reply}:")
