@@ -220,6 +220,33 @@ class FlowTest(unittest.TestCase):
         self.assertIn("fails without it", fix)
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
+    def test_a_run_stopped_in_a_build_resumes_at_that_build_and_finishes(self):
+        class Crash(Fake):
+            def run(self, prompt, cwd):
+                if BUILD.match(prompt) and self.builds:  # the fix build: the machine goes down
+                    raise RuntimeError("the machine restarted")
+                return super().run(prompt, cwd)
+
+        fakes = {name: Crash(name, blockers=built(1)) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, task="Add feature.txt.")
+        self.assertEqual(code, 1)
+        self.assertEqual(flow.state["resume"]["next"], "build")
+        fresh = {name: Fake(name) for name in ("deepseek", "kimi")}
+        with mock.patch("cav.flow.agent_mod.build", side_effect=lambda spec, log, title_prefix="": fresh[spec.name]):
+            resumed = Flow.resume(flow.run_dir)
+            code = resumed.run()
+        self.assertEqual(code, 0, resumed.state)
+        self.assertEqual(self.steps(resumed), [("plan", "planned"), ("vote", "agreed"), ("build", "built"),
+                                               ("review", "reviewed"), ("confirm", "blocked"), ("plan", "planned"),
+                                               ("vote", "agreed"), ("build", "interrupted"), ("build", "built"),
+                                               ("review", "reviewed"), ("confirm", "no blocker in X and Y"),
+                                               ("audit", "reviewed"), ("confirm", "no blocker in X and Y")])
+        self.assertTrue(BUILD.match(fresh["kimi"].prompts[0]), "it picks up at the build, not the plan")
+        self.assertEqual(resumed.blind, flow.blind)
+        self.assert_blind(fresh, resumed)
+        with self.assertRaises(ValueError):
+            Flow.resume(flow.run_dir)  # a finished run has nothing to resume
+
     def test_every_failed_review_gets_a_fix_plan_that_carries_all_earlier_agreed_plans(self):
         fewer = lambda folder: 0 if built(3)(folder) else 2 if built_by("kimi")(folder) else 1
         fakes = {name: Fake(name, blockers=fewer) for name in ("deepseek", "kimi")}

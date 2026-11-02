@@ -162,6 +162,7 @@
     <h1 id="case">CAV</h1>
     <span class="badge" id="status">connecting</span>
     <button id="stop" hidden>Stop</button>
+    <button id="resume" hidden>Resume</button>
     <span id="meta"></span>
   </header>
 
@@ -361,7 +362,7 @@ const roundNumbers = () => [...new Set([...Object.keys(rounds).map(Number), ...(
 const stepName = (h) => h ? `r${h.cycle || 0} ${h.step}${h.vote ? ' ' + h.vote : ''}` : '';
 function stepClass(h, n) {
   if (!h || !h.verdict) return isLive(n) ? 'run' : '';
-  return /^(rejected|blocked)$/.test(h.verdict) ? 'warn' : 'ok';
+  return /^(rejected|blocked|interrupted)$/.test(h.verdict) ? 'warn' : 'ok';
 }
 
 function renderHeader() {
@@ -370,7 +371,8 @@ function renderHeader() {
   const [cls, text] = state.phase === 'done' ? ['ok', state.outcome] : ['failed', 'stopped'].includes(state.phase)
     ? ['bad', state.phase] : ['run', state.phase || 'starting'];
   $('status').className = 'badge ' + cls; $('status').textContent = text;
-  $('stop').hidden = runOver();
+  $('stop').hidden = runOver() || !state.live;
+  $('resume').hidden = state.live || state.phase === 'done' || !state.resume;
   // a label is one branch (older runs) or, per repo, a branch
   const refs = (v) => v.ref ? v.ref : Object.entries(v).map(([repo, r]) => `${repo}: ${r.ref}`).join(', ');
   let html = esc([state.repo, state.labels && Object.entries(state.labels).map(([l, v]) => `${l} = ${refs(v)}`).join(' · ')]
@@ -752,6 +754,13 @@ $('home').href = `/${TOKEN}/`;
 $('stop').onclick = async () => {
   if (!confirm('Stop this run?')) return;
   const r = await fetch(`/${TOKEN}/api/stop`, {method:'POST', headers:{'Content-Type':'application/json'},
+                        body:JSON.stringify({id:BASE.split('/').pop()})});
+  if (!r.ok) alert((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
+  poll();
+};
+$('resume').onclick = async () => {
+  if (!confirm('Resume this run? The step it stopped in starts over.')) return;
+  const r = await fetch(`/${TOKEN}/api/resume`, {method:'POST', headers:{'Content-Type':'application/json'},
                         body:JSON.stringify({id:BASE.split('/').pop()})});
   if (!r.ok) alert((await r.json().catch(() => ({}))).error || `HTTP ${r.status}`);
   poll();

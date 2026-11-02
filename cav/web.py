@@ -170,19 +170,35 @@ class Home:
         (run_dir / "spec.json").write_text(json.dumps({"repos": repos, "plan" if branched else "task": text,
                                                        "checks": checks}, indent=2),
                                            encoding="utf-8")
+        self.launch(run_dir, ["run", "--spec", str(run_dir / "spec.json")], ", ".join(item["repo"] for item in repos))
+        return run_id
+
+    def resume(self, run_id):
+        """Continue a run whose process ended before its result, from the step it was in."""
+        run_dir = self.run_path(run_id)
+        if not run_dir:
+            raise ValueError("no such run")
+        meta, state = read_json(run_dir / "run.json"), read_json(run_dir / "state.json")
+        if alive(meta.get("pid")):
+            raise ValueError("that run is still running")
+        if state.get("phase") == "done" or not state.get("resume"):
+            raise ValueError("that run has no point to resume from")
+        self.launch(run_dir, ["resume"], meta.get("repo") or state.get("repo"))
+
+    @staticmethod
+    def launch(run_dir, command, repo):
+        """`python -m cav <command> --run-dir <run_dir>` as its own process, so it outlives this server."""
         # python.exe, not pythonw.exe: the agents' console children then share one hidden console
         python = pathlib.Path(sys.executable)
         if python.name.lower() == "pythonw.exe" and (python.parent / "python.exe").exists():
             python = python.parent / "python.exe"
-        args = [str(python), "-m", "cav", "run", "--spec", str(run_dir / "spec.json"), "--run-dir", str(run_dir)]
+        args = [str(python), "-m", "cav", *command, "--run-dir", str(run_dir)]
         flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
         with open(run_dir / "run-output.log", "ab") as log:
             process = subprocess.Popen(args, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                        env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
                                        creationflags=flags, start_new_session=os.name != "nt")
-        (run_dir / "run.json").write_text(json.dumps({"pid": process.pid, "repo": ", ".join(item["repo"] for item in repos)}),
-                                          encoding="utf-8")
-        return run_id
+        (run_dir / "run.json").write_text(json.dumps({"pid": process.pid, "repo": repo}), encoding="utf-8")
 
     def stop(self, run_id):
         """End a run's process and everything it started; the agents' own apps keep their sessions."""
@@ -213,7 +229,8 @@ class Home:
             return handler.send(200, (WEB / "index.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
         if rest == ["api", "state"]:
             state = read_json(run_dir / "state.json") or {"phase": "starting"}
-            return handler.send(200, json.dumps(dict(state, input=next(
+            live = alive(read_json(run_dir / "run.json").get("pid"))
+            return handler.send(200, json.dumps(dict(state, live=live, input=next(
                 (p.read_text(encoding="utf-8", errors="replace") for p in (run_dir / "input.md", run_dir / "prompt.md")
                  if p.exists()), ""))))
         if rest == ["api", "prompt"]:
@@ -243,6 +260,9 @@ class Home:
                 return handler.send(200, json.dumps({"id": run_id, "url": f"/{self.token}/run/{run_id}/"}))
             if parts == ["api", "stop"]:
                 self.stop(str(body.get("id") or ""))
+                return handler.send(200, "{}")
+            if parts == ["api", "resume"]:
+                self.resume(str(body.get("id") or ""))
                 return handler.send(200, "{}")
         except ValueError as error:
             return handler.send(400, json.dumps({"error": str(error)}))
