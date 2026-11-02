@@ -6,17 +6,17 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 REPOS = "Each holds one folder per repository."
-BLOCKER = ("A blocker is a crash, security hole or data loss in code the project runs, or wrong results or a "
-           "departure from an agreed plan that someone using it would hit in normal use, shown by a realistic scenario "
-           "you can name.")
+BLOCKER = ("A blocker is a defect you would refuse to ship. In code the project builds and runs, it makes the project "
+           "fail at what it is for: a wrong result, a feature the task or an agreed plan requires that is missing or "
+           "broken, a crash or hang, lost or corrupted user data, a security hole, or slowness that defeats the purpose. "
+           "It must happen in normal use, in a scenario you can name; lost user data, a security hole or a system crash "
+           "counts even when rare, if it can really happen. Not blockers: unused code, contrived timing or setups, "
+           "hardening, style, comments, missing or weak tests.")
 CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
              "departure from the plan. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
              "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
              "in the wrong form.")
-NOT_BLOCKERS = ("Not blockers: code the project does not build or run, hardening for a case nothing in the project "
-                "triggers, a wrong result that needs rare timing or an unlikely setup, style, naming, comments, and "
-                "missing or weak tests. A crash, security hole or data loss counts even when rare.")
 TESTED = " Tests only where the task asks for them."
 
 
@@ -39,7 +39,7 @@ def review(plans, candidates, reply, agreed=None, audit=()):
                      "important and find it. It focused on the newest changes, so start with files no recent round "
                      "changed, and check each bug you find for the same pattern in every repository.")
     lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
-              + BLOCKER + " " + NOT_BLOCKERS + " " + CHECKLIST,
+              + BLOCKER + " " + CHECKLIST,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
                if agreed else "List every blocker in each candidate. ")
               + f'One in both is one entry with "candidate": "both". Write to {reply}:',
