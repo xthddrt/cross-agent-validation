@@ -323,8 +323,18 @@ class FlowTest(unittest.TestCase):
         path = self.tmp / "answer.json"
         path.write_text(json.dumps({"approve": {"1": False, "2": True}}), encoding="utf-8")
         self.assertEqual(Flow.vote_problem(path), 'plan 1 is rejected without a "why"')
+        path.write_text(json.dumps({"approve": {"1": True, "2": False}, "why": "plan 2 misses the test"}), encoding="utf-8")
+        self.assertEqual(Flow.vote_problem(path), 'plan 2 is rejected without a "why"', "retried, not a failed run")
+        path.write_text(json.dumps({"approve": {"1": True, "2": True}, "why": "both fine"}), encoding="utf-8")
+        self.assertIsNone(Flow.vote_problem(path))
         path.write_text(json.dumps({"blocker": {"1": True}}), encoding="utf-8")
         self.assertIn("each of 1 to 2", Flow.confirm_problem(path, 2))
+        path.write_text(json.dumps({"blocker": {"1": False}, "why": ["not real"]}), encoding="utf-8")
+        self.assertEqual(Flow.confirm_problem(path, 1), 'blocker 1 is voted down without a "why"')
+        path.write_text(json.dumps({"keep": {"1": True}, "why": "still a bug"}), encoding="utf-8")
+        self.assertEqual(Flow.keep_problem(path, 1), 'blocker 1 is kept without a "why"')
+        path.write_text(json.dumps({"keep": {"1": True}, "why": ["still a bug"]}), encoding="utf-8")
+        self.assertEqual(Flow.keep_problem(path, 1), 'blocker 1 is kept without a "why"')
         path.write_text(json.dumps({"blockers": []}), encoding="utf-8")
         self.assertIn('"requirements"', Flow.review_problem(path, {}), "a review must go through the requirements")
         need = [{"requirement": "r", "met": {"X": True, "Y": True}, "evidence": "f:1"}]

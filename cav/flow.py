@@ -573,7 +573,8 @@ class Flow:
     @staticmethod
     def vote_problem(path):
         data = _json(path) or {}
-        approve, why = data.get("approve"), data.get("why") or {}
+        approve, why = data.get("approve"), data.get("why")
+        why = why if isinstance(why, dict) else {}  # a string or list "why" is a schema slip: ask again, do not fail the run
         if not isinstance(approve, dict) or set(approve) != {"1", "2"} or not all(isinstance(v, bool) for v in approve.values()):
             return 'write JSON with "approve": {"1": true|false, "2": true|false}'
         for n, ok in approve.items():
@@ -606,7 +607,8 @@ class Flow:
     @staticmethod
     def keep_problem(path, count):
         data = _json(path) or {}
-        keep, why = data.get("keep"), data.get("why") or {}
+        keep, why = data.get("keep"), data.get("why")
+        why = why if isinstance(why, dict) else {}
         if not isinstance(keep, dict) or set(keep) != {str(n) for n in range(1, count + 1)} \
                 or not all(isinstance(v, bool) for v in keep.values()):
             return f'write JSON with "keep": true or false for each of 1 to {count}'
@@ -618,7 +620,8 @@ class Flow:
     @staticmethod
     def confirm_problem(path, count):
         data = _json(path) or {}
-        votes, why = data.get("blocker"), data.get("why") or {}
+        votes, why = data.get("blocker"), data.get("why")
+        why = why if isinstance(why, dict) else {}
         if not isinstance(votes, dict) or set(votes) != {str(n) for n in range(1, count + 1)} \
                 or not all(isinstance(v, bool) for v in votes.values()):
             return f'write JSON with "blocker": true or false for each of 1 to {count}'
