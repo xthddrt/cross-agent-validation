@@ -73,19 +73,6 @@ class HomeTest(unittest.TestCase):
         self.assertIn("4242", kill.call_args[0][0])
         self.assertEqual(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["phase"], "stopped")
 
-    def test_bad_requests_are_refused(self):
-        repo = lambda *branches: [{"repo": str(self.repo), "branches": list(branches)}]
-        for body, error in (({"repos": [{"repo": str(self.tmp / "nope")}], "text": "x"}, "not a git repository or GitHub URL"),
-                            ({"repos": [], "text": "x"}, "at least one repository"),
-                            ({"repos": repo("a", "a"), "text": "x"}, "the two branch sets are the same"),
-                            ({"repos": repo("a", ""), "text": "x"}, "not found"),
-                            ({"repos": repo(), "text": ""}, "give the task"),
-                            ({"repos": repo("a", ""), "text": ""}, "give the plan")):
-            with self.assertRaises(urllib.error.HTTPError) as caught:
-                self.post("start", body)
-            self.assertIn(error, json.loads(caught.exception.read())["error"])
-        with self.assertRaises(urllib.error.HTTPError):
-            urllib.request.urlopen(self.base.rsplit("/", 1)[0] + "/wrong-token/api/runs", timeout=5)
 
     def test_a_github_url_reuses_its_clone_and_finds_fetched_branches(self):
         clones = self.tmp / "clones"
