@@ -1,6 +1,5 @@
 """One CAV run: two agents, one result both agree has no blockers (see README)."""
 
-import io
 import itertools
 import json
 import os
@@ -10,14 +9,13 @@ import re
 import secrets
 import shutil
 import subprocess
-import tarfile
 import threading
 import time
 
 from . import agents as agent_mod
 from . import prompts
 from .events import EventWriter, atomic_write
-from .gitops import GIT, GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, resolve_repo
+from .gitops import GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, resolve_repo
 
 LABELS = ("X", "Y")
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
@@ -29,14 +27,20 @@ BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
 
 
 def export_tree(repo, sha, dest):
-    """A commit's files as a plain folder: no .git, so no branch name, author or message."""
-    data = subprocess.run([GIT, "archive", "--format=tar", sha], cwd=str(repo), capture_output=True,
-                          check=True, creationflags=NO_WINDOW).stdout
+    """A commit's files as a plain folder: no .git, so no branch name, author or message. Not `git archive`:
+    it drops export-ignore paths and expands export-subst, which a build's snapshot would then commit."""
     if dest.exists():  # left by an interrupted step of a resumed run: start clean
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-        archive.extractall(dest, filter="data")
+    git_dir = git("rev-parse", "--absolute-git-dir", cwd=repo)
+    index = dest.parent / f"{dest.name}.index"
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    where = ("--git-dir", git_dir, "--work-tree", str(dest))
+    try:
+        git(*where, "read-tree", sha, cwd=dest, env=env)
+        git(*where, "checkout-index", "-a", "-f", cwd=dest, env=env)
+    finally:
+        index.unlink(missing_ok=True)
     return dest
 
 
@@ -556,7 +560,10 @@ class Flow:
     def plan_problem(path, base_needed):
         if not path.exists():
             return "no plan file written"
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:  # e.g. written by Windows PowerShell or cp1252 Python: ask again, do not fail the run
+            return "the plan is not UTF-8; write it as UTF-8"
         if words(text) > prompts.WORDS:
             return f"the plan has {words(text)} words; cut it to {prompts.WORDS}"
         if base_needed and plan_base(text) not in LABELS:

@@ -11,7 +11,7 @@ from unittest import mock
 
 from cav.agents import RunState
 from cav import prompts
-from cav.flow import Flow
+from cav.flow import Flow, export_tree
 from cav.gitops import git, git_ok
 from tests.test_agents import with_origin
 
@@ -346,10 +346,32 @@ class FlowTest(unittest.TestCase):
         plan.write_text("no base", encoding="utf-8")
         self.assertEqual(Flow.plan_problem(plan, True), 'the plan must start with "Base: X" or "Base: Y"')
         self.assertIsNone(Flow.plan_problem(plan, False))
+        plan.write_bytes("Base: X\nKeep it small — one change.\n".encode("cp1252"))
+        self.assertEqual(Flow.plan_problem(plan, True), "the plan is not UTF-8; write it as UTF-8", "retried, not a failed run")
         fix = prompts.revise({1: ["no"]}, plan, fixes=True)
         for rule in ("fixes every agreed blocker", "keeps to the agreed plans", "least work", "what the other candidate does better", "Base: X"):
             self.assertIn(rule, fix, "a revised fix plan is held to the same rules as the first")
         self.assertNotIn("least work", prompts.revise({1: ["no"]}, plan))
+
+    def test_an_export_holds_every_file_so_a_build_changes_only_what_it_edits(self):
+        import types
+
+        (self.work / ".gitattributes").write_text("/tests export-ignore\nv.txt export-subst\n", encoding="utf-8")
+        (self.work / "tests").mkdir()
+        (self.work / "tests" / "t.py").write_text("x\n", encoding="utf-8")
+        (self.work / "v.txt").write_text("$Format:%H$\n", encoding="utf-8")
+        (self.work / "a.txt").write_text("a\n", encoding="utf-8")
+        git("add", "-A", cwd=self.work)
+        git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "-q", "-m", "attributes", cwd=self.work)
+        sha = git("rev-parse", "HEAD", cwd=self.work)
+        folder = export_tree(self.work, sha, self.tmp / "exp" / "repo")
+        self.assertTrue((folder / "tests" / "t.py").exists(), "an export-ignore path is still exported")
+        self.assertEqual((folder / "v.txt").read_text(encoding="utf-8").strip(), "$Format:%H$")
+        self.assertFalse((folder / ".git").exists())
+        self.assertEqual([path.name for path in (self.tmp / "exp").iterdir()], ["repo"], "no index left beside it")
+        (folder / "a.txt").write_text("a changed\n", encoding="utf-8")
+        commit = Flow.snapshot(types.SimpleNamespace(run_dir=self.tmp, run_id="t"), self.work, folder, sha, "round 1 build 1")
+        self.assertEqual(git("diff", "--name-only", sha, commit, cwd=self.work).split(), ["a.txt"])
 
     def test_an_interrupted_state_write_preserves_the_last_complete_state(self):
         import types
