@@ -17,11 +17,11 @@ CHECKLIST = ("First check each requirement in the agreed plans (numbered items, 
 NOT_BLOCKERS = ("Not blockers: code the project does not build or run, hardening for a case nothing in the project "
                 "triggers, a wrong result that needs rare timing or an unlikely setup, style, naming, comments, and "
                 "missing or weak tests. A crash, security hole or data loss counts even when rare.")
-TESTED = " Each fix comes with a test that fails without it, where the project's tests can cover it."
+TESTED = " Tests only where the task asks for them."
 
 
 def plan(task, code, path):
-    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.\n"
+    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.{TESTED}\n"
 
 
 def review(plans, candidates, reply, agreed=None, audit=()):
@@ -76,7 +76,7 @@ def fix_plan(blockers, plans, path):
 def vote(plans, reply, fixes=False):
     lines = ["PLANS"] + [f"- {number}: {path}" for number, path in plans] + [""]
     lines.append("Read the code each plan changes and check its claims against it. Approve each plan unless it "
-                 + ("misses an agreed blocker in its base, fixes one without a test the project's tests could cover, builds on the candidate that clearly "
+                 + ("misses an agreed blocker in its base, builds on the candidate that clearly "
                     "needs more work, undoes an agreed plan that no blocker requires undoing, or would not work" if fixes
                     else "misses the task or would not work")
                  + f"; preferring one is not a reason to reject the other. Write to {reply}:")
