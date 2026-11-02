@@ -150,7 +150,7 @@ class FlowTest(unittest.TestCase):
                                             ("audit", "reviewed"), ("confirm", "no blocker in X and Y")])
         audit = [p for p in fakes["kimi"].prompts if "\nCANDIDATES\n" in p][1]
         self.assertIn("AUDIT. The last review found no blocker in X and Y", audit)
-        self.assertIn("Not blockers: code the project does not build or run", audit)
+        self.assertIn("A blocker is a defect you would refuse to ship.", audit)
         self.assertNotIn('"notes"', audit, "what is not a blocker is not logged")
         for fake in fakes.values():
             vote = next(p for p in fake.prompts if p.startswith("PLANS"))
