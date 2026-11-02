@@ -16,10 +16,11 @@ from dataclasses import dataclass, field
 from .gitops import NO_WINDOW
 
 GIT_DIR = r"C:\Program Files\Git\cmd"
+NODE_DIR = r"C:\Program Files\nodejs"  # ponytail's Claude hooks run on Node
 KIMI_POLL_SECONDS = 3
 # Every agent always runs under the ponytail ruleset at this level. OpenCode reads it from the
-# environment; Kimi keeps no level, so each Kimi session activates the skill with it; Claude gets
-# the skill's rules as an extra system prompt (its plugin's hooks need Node).
+# environment; Kimi keeps no level, so each Kimi session activates the skill with it; Claude loads
+# ponytail's plugin for the session, whose hooks read the level from the environment too.
 PONYTAIL_LEVEL = "ultra"
 PONYTAIL_SKILL = "ponytail:ponytail"
 # agent name -> (kind, model); a run uses two of them, the first two by default
@@ -540,16 +541,13 @@ def _claude_cli():
     raise RuntimeError("Claude Code CLI not found; set CAV_CLAUDE_CLI")
 
 
-def _ponytail_rules():
-    """The ponytail skill's rules, from the copy installed for Kimi unless CAV_PONYTAIL_SKILL names one."""
-    path = pathlib.Path(os.environ.get("CAV_PONYTAIL_SKILL") or
-                        _kimi_home() / "plugins" / "managed" / "ponytail" / "skills" / "ponytail" / "SKILL.md")
-    if not path.exists():
-        raise RuntimeError(f"ponytail's SKILL.md not found at {path}; CAV runs every agent under ponytail "
-                           "(set CAV_PONYTAIL_SKILL to its SKILL.md)")
-    text = path.read_text(encoding="utf-8")
-    body = text.split("---", 2)[2] if text.startswith("---") else text  # without the front matter
-    return f"{body.strip()}\n\nPonytail is active at level {PONYTAIL_LEVEL}."
+def _ponytail_plugin():
+    """ponytail's plugin folder, the copy installed for Kimi unless CAV_PONYTAIL_DIR names one."""
+    path = pathlib.Path(os.environ.get("CAV_PONYTAIL_DIR") or _kimi_home() / "plugins" / "managed" / "ponytail")
+    if not (path / ".claude-plugin" / "plugin.json").exists():
+        raise RuntimeError(f"ponytail's Claude plugin not found at {path}; CAV runs every agent under ponytail "
+                           "(set CAV_PONYTAIL_DIR to its folder)")
+    return str(path)
 
 
 class ClaudeAgent(Agent):
@@ -561,7 +559,7 @@ class ClaudeAgent(Agent):
         self.session_id = None
         self.title_prefix = title_prefix
         self._proc = None
-        self._system = f"{NOBODY_ANSWERS}\n\n{_ponytail_rules()}"
+        self.plugin = _ponytail_plugin()
 
     def abort(self):
         super().abort()
@@ -574,8 +572,8 @@ class ClaudeAgent(Agent):
     def _command(self, prompt):
         # bypassPermissions: no tool call may wait on an approval nobody gives (Kimi runs in yolo)
         cmd = [self.cli, "-p", "--output-format", "stream-json", "--verbose",
-               "--permission-mode", "bypassPermissions", "--append-system-prompt", self._system,
-               "--name", f"{self.title_prefix} {self.name}"]
+               "--permission-mode", "bypassPermissions", "--append-system-prompt", NOBODY_ANSWERS,
+               "--plugin-dir", self.plugin, "--name", f"{self.title_prefix} {self.name}"]
         if self.spec.model:
             cmd += ["--model", self.spec.model]
         if self.spec.thinking:
@@ -587,8 +585,10 @@ class ClaudeAgent(Agent):
     def run(self, prompt, cwd):
         cmd = self._command(prompt)
         env = os.environ.copy()
-        if GIT_DIR.lower() not in env.get("PATH", "").lower():
-            env["PATH"] = env.get("PATH", "") + os.pathsep + GIT_DIR
+        env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
+        for folder in (GIT_DIR, NODE_DIR):  # a dashboard started before Node was installed lacks it
+            if folder.lower() not in env.get("PATH", "").lower():
+                env["PATH"] = env.get("PATH", "") + os.pathsep + folder
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
         with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:

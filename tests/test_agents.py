@@ -161,8 +161,9 @@ class ClaudeAgentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-claude-"))
         (self.tmp / "claude.exe").write_text("", encoding="utf-8")
-        (self.tmp / "SKILL.md").write_text("---\nname: ponytail\n---\n# Ponytail\nLazy rules.\n", encoding="utf-8")
-        env = {"CAV_CLAUDE_CLI": str(self.tmp / "claude.exe"), "CAV_PONYTAIL_SKILL": str(self.tmp / "SKILL.md")}
+        (self.tmp / "ponytail" / ".claude-plugin").mkdir(parents=True)
+        (self.tmp / "ponytail" / ".claude-plugin" / "plugin.json").write_text("{}", encoding="utf-8")
+        env = {"CAV_CLAUDE_CLI": str(self.tmp / "claude.exe"), "CAV_PONYTAIL_DIR": str(self.tmp / "ponytail")}
         with mock.patch.dict(os.environ, env):
             spec = agent_mod.AgentSpec("claude", "claude", "opus", "high")
             self.agent = agent_mod.build(spec, self.tmp / "claude.log")
@@ -176,11 +177,8 @@ class ClaudeAgentTest(unittest.TestCase):
         for flag, value in (("--permission-mode", "bypassPermissions"), ("--model", "opus"), ("--effort", "high"),
                             ("--output-format", "stream-json")):
             self.assertEqual(cmd[cmd.index(flag) + 1], value)
-        system = cmd[cmd.index("--append-system-prompt") + 1]
-        self.assertIn("never stop to ask", system)
-        self.assertIn("Lazy rules.", system)
-        self.assertIn("level ultra", system)
-        self.assertNotIn("name: ponytail", system, "the skill's front matter is not part of the rules")
+        self.assertIn("never stop to ask", cmd[cmd.index("--append-system-prompt") + 1])
+        self.assertEqual(cmd[cmd.index("--plugin-dir") + 1], str(self.tmp / "ponytail"), "ponytail's own plugin")
         self.assertNotIn("--resume", cmd)
         self.agent.session_id = "s-1"
         self.assertEqual(self.agent._command("next")[-3:], ["--resume", "s-1", "next"], "one session per round")
