@@ -145,16 +145,45 @@ class KimiBlockingTest(unittest.TestCase):
         self.assertEqual(result["text"], "done")
         self.assertEqual(len(submitted), 1)
 
+    def test_a_stale_failed_turn_does_not_fail_the_new_prompt(self):
+        agent = self.agent()
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-kimi-"))
+        self.addCleanup(shutil.rmtree, tmp, True)
+        agent.log_path = tmp / "kimi.log"
+        agent.base = "http://kimi"
+        agent.session_id = "s"
+        history = [{"id": "old", "role": "assistant", "created_at": "2026-10-30T14:00:00Z",
+                    "content": [{"type": "text", "text": "old"}]}]
+        polls = iter([
+            {"busy": False, "last_turn_reason": "failed"},
+            {"busy": True, "last_turn_reason": "failed"},
+            {"busy": False, "last_turn_reason": "completed"},
+        ])
+
+        def call(method, path, body=None, timeout=60):
+            if path.endswith("/prompts"):
+                return {"data": {"prompt_id": "p"}}
+            if path.endswith("/messages"):
+                return {"data": {"items": history}}
+            if path.endswith("/status"):
+                return {"data": {}}
+            detail = next(polls)
+            if detail["busy"]:
+                history.append({"id": "new", "role": "assistant", "created_at": "2026-10-30T15:00:00Z",
+                                "content": [{"type": "text", "text": "done"}]})
+            return {"data": detail}
+
+        agent._call = call
+        with mock.patch.object(agent_mod, "KIMI_POLL_SECONDS", 0):
+            result = agent.run("judge", tmp)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["text"], "done")
 
     def test_opencode_session_directory_is_the_worktree(self):
         """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
         agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")
         with mock.patch.dict(os.environ, {"PWD": "C:/somewhere/else"}):
             self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ClaudeAgentTest(unittest.TestCase):
@@ -183,6 +212,16 @@ class ClaudeAgentTest(unittest.TestCase):
         self.agent.session_id = "s-1"
         self.assertEqual(self.agent._command("next")[-3:], ["--resume", "s-1", "next"], "one session per round")
 
+    def test_shared_cli_runner_reads_the_stream_and_finishes(self):
+        proc = mock.Mock(stdout=['{"type":"result","subtype":"success","result":"DONE"}\n'], returncode=0)
+        with mock.patch("cav.agents.subprocess.Popen", return_value=proc) as popen:
+            result = self.agent.run("TASK", self.tmp)
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["text"], "DONE")
+        self.assertEqual(popen.call_args.kwargs["stdin"], agent_mod.subprocess.DEVNULL)
+        self.assertEqual(popen.call_args.kwargs["env"]["PWD"], str(self.tmp))
+        proc.wait.assert_called_once_with()
+
     def test_stream_is_read_into_progress_and_the_answer(self):
         seen = []
         self.agent.emit = lambda type_, name, data: seen.append(type_)
@@ -210,3 +249,7 @@ class ClaudeAgentTest(unittest.TestCase):
         for bad in (["claude", "claude"], ["claude"], ["gpt", "kimi"]):
             with self.assertRaises(ValueError):
                 agent_mod.models_for(bad)
+
+
+if __name__ == "__main__":
+    unittest.main()

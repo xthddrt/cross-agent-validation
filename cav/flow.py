@@ -1,23 +1,4 @@
-"""One CAV run: two agents, one result both agree has no blockers.
-
-    plan     (repos + task) both write a plan, then vote on both; a plan both approve is the plan,
-             otherwise both revise from the objections and vote again, until one is approved.
-             Both build it; the two builds are the candidates.
-    review   (plan + two sets of branches, or the builds) both review every agreed plan and both candidates, blind,
-             listing only blockers: real bugs, or real departures from an agreed plan.
-    confirm  each votes on the other's blockers: one both call a blocker is agreed, the rest are
-             dropped. A candidate with no agreed blocker is the result, kept as branch cav/<run>.
-    fix      after every review with no clear candidate: both plan the fix of every agreed blocker
-             on a base they choose, in line with every plan agreed before, voting and revising as
-             above until one plan is approved; both build it. Then review again: the agreed blockers
-             are checked, new ones can be raised, and both must agree on each.
-
-No prompt names an agent or says whose anything is: candidates are X and Y, labelled at random and
-read from plain folders without .git; files are numbered at random; candidates are listed in random
-order. Each agent keeps one session per round (review, confirm, any plan and votes, the build) and
-starts a fresh one the next, so no agent reviews knowing which build is its own. Everything an agent
-reads or writes is in a blind area outside every git repo; CAV commits the builds itself.
-"""
+"""One CAV run: two agents, one result both agree has no blockers (see README)."""
 
 import io
 import itertools
@@ -87,7 +68,7 @@ def blocker_line(item):
 
 
 class Flow:
-    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), models=None, agents=None):
+    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), agents=None):
         """`repos`: [{"repo": a local path or a GitHub URL, "branches": [set 1, set 2]}]; a blank branch is
         that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`.
         `agents`: the two agents by name (see agents.AGENTS); none means the defaults."""
@@ -103,7 +84,7 @@ class Flow:
         self.run_id = self.run_dir.name
         self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
-        models = models or agent_mod.models_for(agents)
+        models = agent_mod.models_for(agents)
         self.names = list(models)
         self.state = {"run_id": self.run_id, "repo": ", ".join(str(item["spec"]) for item in self.repos),
                       "names": self.names, "phase": "starting",
@@ -122,7 +103,7 @@ class Flow:
             self.agents[name] = agent
 
     @classmethod
-    def resume(cls, run_dir, models=None):
+    def resume(cls, run_dir):
         """A run that stopped before its result, picked up from its last resume point: the step it was
         in starts over, everything before it is kept."""
         run_dir = pathlib.Path(run_dir).resolve()
@@ -131,7 +112,7 @@ class Flow:
         if state.get("phase") == "done" or not point or not spec:
             raise ValueError(f"{run_dir.name} has no point to resume from")
         flow = cls(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"),
-                   checks=spec.get("checks") or (), models=models, agents=spec.get("agents"))
+                   checks=spec.get("checks") or (), agents=spec.get("agents"))
         for entry in state["history"]:
             entry.setdefault("verdict", "interrupted")
         for key in ("outcome", "detail"):
@@ -210,7 +191,7 @@ class Flow:
                 self.save()
                 if time.time() > deadline:
                     for name, thread in threads:
-                        if thread.is_alive():
+                        if thread.is_alive() and not self.agents[name].state.error:
                             self.agents[name].abort()
                             self.agents[name].state.error = "timed out"
                 time.sleep(POLL_SECONDS)
@@ -600,9 +581,9 @@ class Flow:
         if not isinstance(blockers, list) or any(not isinstance(item, dict) or not item.get("problem")
                                                  or item.get("candidate") not in (*LABELS, "both") for item in blockers):
             return 'write JSON with "blockers": a list of {"candidate": "X|Y|both", "file", "line", "problem", "fix"}'
-        for item in blockers:  # a missing file can be the blocker; a path outside the candidate cannot
-            root = pathlib.Path(candidates[LABELS[0]]["folder"]).resolve()
-            if not item.get("file") or root not in (root / str(item["file"])).resolve().parents:
+        roots = [pathlib.Path(c["folder"]).resolve() for c in candidates.values()]
+        for item in blockers:  # a missing file can be the blocker; a path outside the candidates cannot
+            if not item.get("file") or not any(root in (root / str(item["file"])).resolve().parents for root in roots):
                 return f"blocker file {item.get('file')!r} is not a path inside the candidate"
         return None
 

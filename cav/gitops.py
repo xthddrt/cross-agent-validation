@@ -25,7 +25,7 @@ def git(*args, cwd=None, check=True, env=None):
 
 def git_ok(*args, cwd=None):
     return subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
-                          capture_output=True, text=True, creationflags=NO_WINDOW).returncode == 0
+                          capture_output=True, creationflags=NO_WINDOW).returncode == 0
 
 
 def resolve_repo(spec, clone_root=None):

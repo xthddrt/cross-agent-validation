@@ -324,14 +324,18 @@ class FlowTest(unittest.TestCase):
         need = [{"requirement": "r", "met": {"X": True, "Y": True}, "evidence": "f:1"}]
         path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "Z", "problem": "x"}]}), encoding="utf-8")
         self.assertIn('"candidate"', Flow.review_problem(path, {}))
-        candidate = self.tmp / "candidate"
-        candidate.mkdir()
+        candidates = {label: {"folder": str(self.tmp / label)} for label in ("X", "Y")}
+        for candidate in candidates.values():
+            pathlib.Path(candidate["folder"]).mkdir()
         path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "X", "file": "tool/missing.cpp", "problem": "never added"}]}),
                         encoding="utf-8")
-        self.assertIsNone(Flow.review_problem(path, {"X": {"folder": str(candidate)}}), "a missing file can be the blocker")
+        self.assertIsNone(Flow.review_problem(path, candidates), "a missing file can be the blocker")
+        path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "Y", "file": str(pathlib.Path(candidates["Y"]["folder"]) / "repo/a.py"), "problem": "x"}]}),
+                        encoding="utf-8")
+        self.assertIsNone(Flow.review_problem(path, candidates), "an absolute path into Y is valid")
         path.write_text(json.dumps({"requirements": need, "blockers": [{"candidate": "X", "file": "../elsewhere.txt", "problem": "x"}]}),
                         encoding="utf-8")
-        self.assertIn("not a path inside", Flow.review_problem(path, {"X": {"folder": str(candidate)}}))
+        self.assertIn("not a path inside", Flow.review_problem(path, candidates))
         plan = self.tmp / "plan.md"
         plan.write_text("no base", encoding="utf-8")
         self.assertEqual(Flow.plan_problem(plan, True), 'the plan must start with "Base: X" or "Base: Y"')

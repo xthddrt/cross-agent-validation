@@ -32,6 +32,11 @@ def read_json(path):
     return data if isinstance(data, dict) else {}
 
 
+def input_text(run_dir):
+    path = pathlib.Path(run_dir) / "input.md"
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+
+
 def alive(pid):
     """Whether a process is still running. os.kill(pid, 0) would terminate it on Windows."""
     if not pid:
@@ -131,8 +136,7 @@ class Home:
             phase = state.get("phase") or "starting"
             if phase not in ENDED and meta.get("pid") and not alive(meta["pid"]):
                 phase = "stopped"  # the run's process ended without recording an outcome
-            text = next((p.read_text(encoding="utf-8", errors="replace") for p in (path / "input.md", path / "prompt.md")
-                         if p.exists()), "")
+            text = input_text(path)
             stamps = [p.stat().st_mtime for p in (path / "state.json", path / "run.json") if p.exists()]
             out.append({"id": path.name, "repo": state.get("repo") or meta.get("repo"), "phase": phase,
                         "outcome": state.get("outcome"), "detail": state.get("detail"), "text": text[:400],
@@ -232,9 +236,7 @@ class Home:
         if rest == ["api", "state"]:
             state = read_json(run_dir / "state.json") or {"phase": "starting"}
             live = alive(read_json(run_dir / "run.json").get("pid"))
-            return handler.send(200, json.dumps(dict(state, live=live, input=next(
-                (p.read_text(encoding="utf-8", errors="replace") for p in (run_dir / "input.md", run_dir / "prompt.md")
-                 if p.exists()), ""))))
+            return handler.send(200, json.dumps(dict(state, live=live, input=input_text(run_dir))))
         if rest == ["api", "prompt"]:
             record = run_dir / "rounds" / f"r{int(query.get('round', 0))}" / f"{query.get('agent', '')}-context.md"
             ok = RUN_ID.match(query.get("agent", "")) and record.is_file()

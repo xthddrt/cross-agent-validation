@@ -54,10 +54,6 @@ class AgentSpec:
     thinking: str | None = None
 
 
-def _noop(*args, **kwargs):
-    return None
-
-
 def _find_exit(value):
     """OpenCode nests execution status differently between versions; find `exit` anywhere."""
     if isinstance(value, dict):
@@ -78,13 +74,11 @@ def _find_exit(value):
 @dataclass
 class RunState:
     """Live progress for one agent run. Read by the flow's monitor."""
-    started: float = field(default_factory=time.time)
     last_activity: float = field(default_factory=time.time)
     messages: int = 0
     detail: str = "starting"
     finished: bool = False
     error: str | None = None
-    session: str | None = None
     text: str = ""
 
     def touch(self, detail=None, messages=None):
@@ -100,15 +94,13 @@ class RunState:
 
 
 class Agent:
-    kind = "base"
-
-    def __init__(self, spec, log_path, emit=None):
+    def __init__(self, spec, log_path):
         self.spec = spec
         self.name = spec.name
         self.log_path = pathlib.Path(log_path)
         self.state = RunState()
         self._abort = threading.Event()
-        self.emit = emit or _noop
+        self.emit = lambda *args: None
 
     def _event(self, type_, data=None):
         try:
@@ -126,8 +118,59 @@ class Agent:
     def run(self, prompt, cwd):
         raise NotImplementedError
 
-    def close(self):
-        pass
+
+class CliAgent(Agent):
+    def __init__(self, spec, log_path, title_prefix="cav"):
+        super().__init__(spec, log_path)
+        self.session_id = None
+        self.title_prefix = title_prefix
+        self._proc = None
+
+    def abort(self):
+        super().abort()
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+
+    def _env(self, cwd):
+        env = os.environ.copy()
+        env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
+        # OpenCode takes the session directory from PWD, not the process directory.
+        env["PWD"] = str(cwd)
+        for folder in (GIT_DIR, NODE_DIR):
+            if folder.lower() not in env.get("PATH", "").lower():
+                env["PATH"] = env.get("PATH", "") + os.pathsep + folder
+        return env
+
+    def run(self, prompt, cwd):
+        cmd = self._command(prompt)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
+        with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
+            self.state.touch("launched")
+            self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                          env=self._env(cwd), creationflags=NO_WINDOW)
+            for line in self._proc.stdout:
+                log.write(line)
+                log.flush()
+                if self._abort.is_set():
+                    self._proc.kill()
+                    break
+                self._consume(line)
+            self._proc.wait()
+        if self.state.error is None:
+            if self._abort.is_set():
+                self.state.error = "aborted"
+            elif self._proc.returncode != 0:
+                self.state.error = f"{self.name_in_errors} exit {self._proc.returncode}"
+        self.state.finished = True
+        self.state.touch("finished" if not self.state.error else "failed")
+        self._event("agent.done", {"ok": self.state.error is None, "reason": self.state.error or "completed"})
+        return {"ok": self.state.error is None, "text": self.state.text,
+                "reason": self.state.error or "completed", "session": self.session_id}
 
 
 def _opencode_cli():
@@ -147,35 +190,12 @@ def _opencode_cli():
     raise RuntimeError("opencode CLI not found; set CAV_OPENCODE_CLI")
 
 
-class OpenCodeAgent(Agent):
-    kind = "opencode"
+class OpenCodeAgent(CliAgent):
+    name_in_errors = "opencode"
 
-    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
-        super().__init__(spec, log_path, emit)
+    def __init__(self, spec, log_path, title_prefix="cav"):
+        super().__init__(spec, log_path, title_prefix)
         self.cli = _opencode_cli()
-        self.session_id = None
-        self.title_prefix = title_prefix
-        self._proc = None
-
-    def abort(self):
-        super().abort()
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
-
-    def _env(self, cwd=None):
-        env = os.environ.copy()
-        env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
-        if cwd:
-            # OpenCode takes the session directory from PWD, not the process directory, so an
-            # inherited PWD would put every session in the folder `cav` was started from.
-            env["PWD"] = str(cwd)
-        path = env.get("PATH", "")
-        if GIT_DIR.lower() not in path.lower():
-            env["PATH"] = path + os.pathsep + GIT_DIR
-        return env
 
     def _command(self, prompt):
         cmd = [self.cli, "run", "--format", "json", "--auto",
@@ -185,36 +205,6 @@ class OpenCodeAgent(Agent):
         if self.session_id:
             cmd += ["--session", self.session_id]
         return cmd + [prompt]
-
-    def run(self, prompt, cwd):
-        cmd = self._command(prompt)
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
-        with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
-            self.state.touch("launched")
-            self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdout=subprocess.PIPE,
-                                          stderr=subprocess.STDOUT, text=True,
-                                          encoding="utf-8", errors="replace", env=self._env(cwd),
-                                          creationflags=NO_WINDOW)
-            for line in self._proc.stdout:
-                log.write(line)
-                log.flush()
-                if self._abort.is_set():
-                    self._proc.kill()
-                    break
-                self._consume(line)
-            self._proc.wait()
-        if self.state.error is None:
-            if self._abort.is_set():
-                self.state.error = "aborted"
-            elif self._proc.returncode != 0:
-                self.state.error = f"opencode exit {self._proc.returncode}"
-        self.state.finished = True
-        self.state.touch("finished" if not self.state.error else "failed")
-        self._event("agent.done", {"ok": self.state.error is None,
-                                   "reason": self.state.error or "completed"})
-        return {"ok": self.state.error is None, "text": self.state.text,
-                "reason": self.state.error or "completed", "session": self.session_id}
 
     def _consume(self, line):
         line = line.strip()
@@ -226,7 +216,6 @@ class OpenCodeAgent(Agent):
             return
         if event.get("sessionID"):
             self.session_id = event["sessionID"]
-            self.state.session = self.session_id
         part = event.get("part") or {}
         kind = part.get("type")
         if kind == "text" and part.get("text"):
@@ -253,16 +242,13 @@ def _kimi_home():
 
 
 class KimiAgent(Agent):
-    kind = "kimi"
-
-    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
-        super().__init__(spec, log_path, emit)
+    def __init__(self, spec, log_path, title_prefix="cav"):
+        super().__init__(spec, log_path)
         self.title_prefix = title_prefix
         self.base = None
         self.token = None
         self.session_id = None
         self._since = ""  # created_at of the newest message before this prompt
-        self._prompt_id = None
         self._part_fingerprints = {}
         self._transcript = None
 
@@ -312,9 +298,6 @@ class KimiAgent(Agent):
 
     def _capture(self, items):
         """Emit new and updated parts; also keep the raw transcript the adapter never wrote."""
-        if self._transcript is None:
-            self.log_path.parent.mkdir(parents=True, exist_ok=True)
-            self._transcript = open(self.log_path, "a", encoding="utf-8", errors="replace")
         for message_index, message in enumerate(items):
             for index, part in enumerate(message.get("content") or []):
                 message_id = message.get("id") or f"#{message_index}"
@@ -457,15 +440,13 @@ class KimiAgent(Agent):
             self._verify_permission(self._agent_config()["permission_mode"])
             self._activate_ponytail()
             self._part_fingerprints = {}
-        self.state.session = self.session_id
         self._since = max((message.get("created_at") or "" for message in self._messages()), default="")
         self._event("agent.launch", {"model": self._model(), "session": self.session_id})
-        submitted = self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
-                               {"content": [{"type": "text", "text": prompt}]})
-        self._prompt_id = (submitted.get("data") or {}).get("prompt_id")
+        self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
+                   {"content": [{"type": "text", "text": prompt}]})
         self.state.touch("running")
 
-        idle = 0
+        idle, seen = 0, False
         while not self._abort.is_set():
             detail = self._call("GET", f"/api/v1/sessions/{self.session_id}")["data"]
             items = self._messages()
@@ -474,6 +455,7 @@ class KimiAgent(Agent):
             # the replies newer than this prompt instead
             count = sum(1 for m in items if m.get("role") == "assistant" and (m.get("created_at") or "") > self._since)
             busy = detail.get("busy", False) or detail.get("main_turn_active", False)
+            seen = seen or busy
             waiting = self._pending(detail)
             if waiting == "waiting:approval" and self._approve_pending():
                 self.state.touch("approved")
@@ -497,7 +479,7 @@ class KimiAgent(Agent):
             reason = detail.get("last_turn_reason")
             if not busy and count and reason in ("completed", "failed", "cancelled"):
                 break
-            if not busy and reason == "failed" and not count:
+            if seen and not busy and reason == "failed" and not count:
                 self.state.error = "kimi turn failed"
                 break
             if idle * KIMI_POLL_SECONDS > 120:
@@ -550,24 +532,13 @@ def _ponytail_plugin():
     return str(path)
 
 
-class ClaudeAgent(Agent):
-    kind = "claude"
+class ClaudeAgent(CliAgent):
+    name_in_errors = "claude"
 
-    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
-        super().__init__(spec, log_path, emit)
+    def __init__(self, spec, log_path, title_prefix="cav"):
+        super().__init__(spec, log_path, title_prefix)
         self.cli = _claude_cli()
-        self.session_id = None
-        self.title_prefix = title_prefix
-        self._proc = None
         self.plugin = _ponytail_plugin()
-
-    def abort(self):
-        super().abort()
-        if self._proc and self._proc.poll() is None:
-            try:
-                self._proc.kill()
-            except OSError:
-                pass
 
     def _command(self, prompt):
         # bypassPermissions: no tool call may wait on an approval nobody gives (Kimi runs in yolo)
@@ -582,39 +553,6 @@ class ClaudeAgent(Agent):
             cmd += ["--resume", self.session_id]
         return cmd + [prompt]
 
-    def run(self, prompt, cwd):
-        cmd = self._command(prompt)
-        env = os.environ.copy()
-        env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
-        for folder in (GIT_DIR, NODE_DIR):  # a dashboard started before Node was installed lacks it
-            if folder.lower() not in env.get("PATH", "").lower():
-                env["PATH"] = env.get("PATH", "") + os.pathsep + folder
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
-        with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
-            self.state.touch("launched")
-            self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                                          env=env, creationflags=NO_WINDOW)
-            for line in self._proc.stdout:
-                log.write(line)
-                log.flush()
-                if self._abort.is_set():
-                    self._proc.kill()
-                    break
-                self._consume(line)
-            self._proc.wait()
-        if self.state.error is None:
-            if self._abort.is_set():
-                self.state.error = "aborted"
-            elif self._proc.returncode != 0:
-                self.state.error = f"claude exit {self._proc.returncode}"
-        self.state.finished = True
-        self.state.touch("finished" if not self.state.error else "failed")
-        self._event("agent.done", {"ok": self.state.error is None, "reason": self.state.error or "completed"})
-        return {"ok": self.state.error is None, "text": self.state.text,
-                "reason": self.state.error or "completed", "session": self.session_id}
-
     def _consume(self, line):
         line = line.strip()
         if not line.startswith("{"):
@@ -625,7 +563,6 @@ class ClaudeAgent(Agent):
             return
         if event.get("session_id"):
             self.session_id = event["session_id"]
-            self.state.session = self.session_id
         kind = event.get("type")
         content = (event.get("message") or {}).get("content")
         if kind == "system" and event.get("subtype") == "init":
@@ -661,11 +598,11 @@ class ClaudeAgent(Agent):
             self.state.touch()
 
 
-def build(spec, log_path, title_prefix="cav", emit=None):
+def build(spec, log_path, title_prefix="cav"):
     if spec.kind == "opencode":
-        return OpenCodeAgent(spec, log_path, title_prefix, emit)
+        return OpenCodeAgent(spec, log_path, title_prefix)
     if spec.kind == "kimi":
-        return KimiAgent(spec, log_path, title_prefix, emit)
+        return KimiAgent(spec, log_path, title_prefix)
     if spec.kind == "claude":
-        return ClaudeAgent(spec, log_path, title_prefix, emit)
+        return ClaudeAgent(spec, log_path, title_prefix)
     raise ValueError(f"unknown agent kind {spec.kind}")
