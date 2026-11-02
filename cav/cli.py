@@ -16,6 +16,10 @@ def cmd_run(args):
     run_dir = args.run_dir or pathlib.Path("runs") / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     flow = Flow(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"), checks=spec.get("checks") or (),
                 agents=spec.get("agents"))
+    meta = flow.run_dir / "run.json"  # the dashboard follows this process: live, stoppable, not resumable while it runs
+    data = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+    meta.write_text(json.dumps(dict({"repo": flow.state["repo"], **data}, pid=os.getpid(),
+                                    started=process_start(os.getpid()))), encoding="utf-8")
     print(f"run {flow.run_dir}")
     return flow.run()
 

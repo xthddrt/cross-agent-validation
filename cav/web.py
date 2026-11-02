@@ -6,7 +6,6 @@ import os
 import pathlib
 import re
 import secrets
-import signal
 import subprocess
 import sys
 import time
@@ -15,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import events as events_mod
 from .agents import models_for
-from .gitops import GITHUB, NO_WINDOW, resolve_ref, resolve_repo
+from .gitops import GITHUB, kill_tree, resolve_ref, resolve_repo
 
 WEB = pathlib.Path(__file__).resolve().parent / "web"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -237,10 +236,7 @@ class Home:
         pid = read_json(run_dir / "run.json").get("pid") if run_dir else None
         if not pid or not meta_alive(run_dir / "run.json"):
             raise ValueError("that run is not running")
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
-        else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        kill_tree(pid)
         state = read_json(run_dir / "state.json")
         if state:
             state.update(phase="stopped", outcome="stopped", detail="stopped from the dashboard")

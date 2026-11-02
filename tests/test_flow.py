@@ -6,6 +6,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -291,6 +292,21 @@ class FlowTest(unittest.TestCase):
         self.assertIn("FAILED", confirm["agreed"][failed[0]][0])
         self.assertTrue(git("show", f"{flow.state['final']['branch']}:feature.txt", cwd=self.work).startswith("built by deepseek"))
         self.assertIn("Run the checks there", next(p for p in fakes["kimi"].prompts if BUILD.match(p)))
+
+    def test_a_hanging_check_times_out_and_blocks_its_candidate(self):
+        # the check runs under the shell, so a hung one is the shell's child still holding the output pipe
+        command = f'"{sys.executable}" -c "import pathlib,time; time.sleep(30 if any(pathlib.Path().glob(\'*/bad.txt\')) else 0)"'
+        fakes = {"deepseek": Fake("deepseek"), "kimi": Fake("kimi", bad=True)}
+        started = time.time()
+        with mock.patch("cav.flow.CHECK_SECONDS", 1):
+            code, flow = self.run_flow(fakes, task="Add feature.txt.", checks=[command])
+        self.assertLess(time.time() - started, 20, "the timed-out check's process tree is killed, not waited for")
+        self.assertEqual(code, 0, flow.state)
+        confirm = flow.state["history"][4]
+        failed = [label for label, items in confirm["agreed"].items() if items]
+        self.assertEqual(len(failed), 1)
+        self.assertIn("exit timeout", confirm["agreed"][failed[0]][0])
+        self.assertTrue(git("show", f"{flow.state['final']['branch']}:feature.txt", cwd=self.work).startswith("built by deepseek"))
 
     def test_several_repos_are_one_candidate_and_get_the_result_branch_each(self):
         other = self.tmp / "second"

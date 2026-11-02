@@ -149,6 +149,32 @@ class HomeTest(unittest.TestCase):
         data = json.loads((resumed / "run.json").read_text(encoding="utf-8"))
         self.assertEqual(data["started"], web.process_start(os.getpid()))
 
+    def test_a_cli_run_is_live_and_not_resumed_while_it_runs(self):
+        import types
+        from cav import cli, web
+
+        run_dir = self.home.runs_dir / "cli-run"
+        run_dir.mkdir()
+        (run_dir / "state.json").write_text(json.dumps({"phase": "review", "resume": {"next": "review"}, "repo": "r"}),
+                                            encoding="utf-8")
+        spec = self.tmp / "spec.json"
+        spec.write_text(json.dumps({"repos": [{"repo": str(self.repo)}], "task": "t"}), encoding="utf-8")
+
+        def running():
+            self.assertTrue(web.meta_alive(run_dir / "run.json"))
+            with mock.patch.object(Home, "launch") as launch:
+                with self.assertRaisesRegex(ValueError, "still running"):
+                    self.home.resume("cli-run")
+            launch.assert_not_called()
+            self.assertEqual(next(run for run in self.home.runs() if run["id"] == "cli-run")["phase"], "review")
+            return 0
+
+        flow = mock.Mock(run_dir=run_dir, state={"repo": "r"})
+        flow.run.side_effect = running
+        with mock.patch("cav.cli.Flow", return_value=flow):
+            self.assertEqual(cli.cmd_run(types.SimpleNamespace(spec=str(spec), run_dir=str(run_dir))), 0)
+        self.assertEqual(json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["repo"], "r")
+
     def test_stop_leaves_unreadable_state_for_inspection(self):
         run_dir = self.tmp / "runs" / "damaged"
         run_dir.mkdir()

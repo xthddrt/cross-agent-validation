@@ -15,7 +15,7 @@ import time
 from . import agents as agent_mod
 from . import prompts
 from .events import EventWriter, atomic_write
-from .gitops import GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, resolve_repo
+from .gitops import GITHUB, IDENTITY, NO_WINDOW, git, git_ok, kill_tree, resolve_ref, resolve_repo
 
 LABELS = ("X", "Y")
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
@@ -522,12 +522,14 @@ class Flow:
         log = self.blind / f"{name}-checks.log"
         lines = []
         for command in self.checks:
+            proc = subprocess.Popen(command, shell=True, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                                    start_new_session=os.name != "nt")
             try:
-                proc = subprocess.run(command, shell=True, cwd=str(work), capture_output=True, text=True, encoding="utf-8",
-                                      errors="replace", timeout=CHECK_SECONDS, creationflags=NO_WINDOW)
-                code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+                output, code = proc.communicate(timeout=CHECK_SECONDS)[0] or "", proc.returncode
             except subprocess.TimeoutExpired:
-                code, output = "timeout", f"no result after {CHECK_SECONDS} seconds"
+                kill_tree(proc.pid)  # killing the shell alone leaves the check holding the pipe, and the wait never ends
+                output, code = (proc.communicate()[0] or "") + f"\nno result after {CHECK_SECONDS} seconds", "timeout"
             lines += [f"$ {command}", output[-6000:], f"exit {code}", ""]
             if code != 0:
                 log.write_text("\n".join(lines), encoding="utf-8")
