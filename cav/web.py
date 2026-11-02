@@ -6,7 +6,6 @@ import os
 import pathlib
 import re
 import secrets
-import signal
 import subprocess
 import sys
 import time
@@ -15,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import events as events_mod
 from .agents import models_for
-from .gitops import NO_WINDOW, resolve_ref, resolve_repo
+from .gitops import GITHUB, kill_tree, resolve_ref, resolve_repo
 
 WEB = pathlib.Path(__file__).resolve().parent / "web"
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -32,25 +31,54 @@ def read_json(path):
     return data if isinstance(data, dict) else {}
 
 
-def alive(pid):
-    """Whether a process is still running. os.kill(pid, 0) would terminate it on Windows."""
+def input_text(run_dir):
+    path = pathlib.Path(run_dir) / "input.md"
+    return path.read_text(encoding="utf-8", errors="replace") if path.exists() else ""
+
+
+def process_start(pid):
+    """The process's absolute creation time, or None if it is gone or cannot be queried."""
     if not pid:
-        return False
+        return None
     if os.name != "nt":
         try:
-            os.kill(int(pid), 0)
-            return True
-        except OSError:
-            return False
+            stat = pathlib.Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
+            ticks = int(stat.rsplit(")", 1)[1].split()[19])
+            with open("/proc/stat", encoding="utf-8") as handle:
+                boot = next(float(line.split()[1]) for line in handle if line.startswith("btime "))
+            return boot + ticks / os.sysconf("SC_CLK_TCK")
+        except (OSError, ValueError, IndexError, StopIteration):
+            return None
     import ctypes
     kernel = ctypes.windll.kernel32
     handle = kernel.OpenProcess(0x1000, False, int(pid))  # PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
-        return False
-    code = ctypes.c_ulong()
-    ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code))
+        return None
+    code, times = ctypes.c_ulong(), [ctypes.c_ulonglong() for _ in range(4)]
+    ok = kernel.GetExitCodeProcess(handle, ctypes.byref(code)) and kernel.GetProcessTimes(
+        handle, *(ctypes.byref(value) for value in times))
     kernel.CloseHandle(handle)
-    return bool(ok) and code.value == 259  # STILL_ACTIVE
+    if not ok or code.value != 259:  # STILL_ACTIVE
+        return None
+    return times[0].value / 10_000_000 - 11644473600
+
+
+def alive(pid, started=None, not_after=None):
+    """Whether pid still names the recorded process, not a later process reusing it."""
+    now = process_start(pid)
+    if now is None:
+        return False
+    return now == started if started is not None else not_after is None or now <= not_after
+
+
+def meta_alive(path):
+    path = pathlib.Path(path)
+    meta = read_json(path)
+    try:
+        modified = path.stat().st_mtime
+    except OSError:
+        modified = None
+    return alive(meta.get("pid"), meta.get("started"), modified)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -129,10 +157,9 @@ class Home:
             if not path.is_dir() or not (state or meta):
                 continue
             phase = state.get("phase") or "starting"
-            if phase not in ENDED and meta.get("pid") and not alive(meta["pid"]):
+            if phase not in ENDED and meta.get("pid") and not meta_alive(path / "run.json"):
                 phase = "stopped"  # the run's process ended without recording an outcome
-            text = next((p.read_text(encoding="utf-8", errors="replace") for p in (path / "input.md", path / "prompt.md")
-                         if p.exists()), "")
+            text = input_text(path)
             stamps = [p.stat().st_mtime for p in (path / "state.json", path / "run.json") if p.exists()]
             out.append({"id": path.name, "repo": state.get("repo") or meta.get("repo"), "phase": phase,
                         "outcome": state.get("outcome"), "detail": state.get("detail"), "text": text[:400],
@@ -159,7 +186,7 @@ class Home:
             path = resolve_repo(item["repo"])  # a GitHub URL is cloned (or its clone fetched) here, so its branches can be checked
             for ref in item["branches"]:
                 if ref:
-                    resolve_ref(path, ref)
+                    resolve_ref(path, ref, prefer_origin=bool(GITHUB.match(item["repo"])))
             paths.append(path)
         slug = "-".join(re.sub(r"[^\w.-]+", "-", path.name).strip("-.") for path in paths)[:60] or "repo"
         run_id = f"{slug}-{time.strftime('%Y%m%d-%H%M%S')}"
@@ -181,7 +208,7 @@ class Home:
         if not run_dir:
             raise ValueError("no such run")
         meta, state = read_json(run_dir / "run.json"), read_json(run_dir / "state.json")
-        if alive(meta.get("pid")):
+        if meta_alive(run_dir / "run.json"):
             raise ValueError("that run is still running")
         if state.get("phase") == "done" or not state.get("resume"):
             raise ValueError("that run has no point to resume from")
@@ -200,21 +227,20 @@ class Home:
             process = subprocess.Popen(args, cwd=str(ROOT), stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                        env=dict(os.environ, PYTHONIOENCODING="utf-8", PYTHONUNBUFFERED="1"),
                                        creationflags=flags, start_new_session=os.name != "nt")
-        (run_dir / "run.json").write_text(json.dumps({"pid": process.pid, "repo": repo}), encoding="utf-8")
+        (run_dir / "run.json").write_text(json.dumps({
+            "pid": process.pid, "repo": repo, "started": process_start(process.pid)}), encoding="utf-8")
 
     def stop(self, run_id):
         """End a run's process and everything it started; the agents' own apps keep their sessions."""
         run_dir = self.run_path(run_id)
         pid = read_json(run_dir / "run.json").get("pid") if run_dir else None
-        if not pid or not alive(pid):
+        if not pid or not meta_alive(run_dir / "run.json"):
             raise ValueError("that run is not running")
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
-        else:
-            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        kill_tree(pid)
         state = read_json(run_dir / "state.json")
-        state.update(phase="stopped", outcome="stopped", detail="stopped from the dashboard")
-        (run_dir / "state.json").write_text(json.dumps(state, indent=2), encoding="utf-8")
+        if state:
+            state.update(phase="stopped", outcome="stopped", detail="stopped from the dashboard")
+            events_mod.atomic_write(run_dir / "state.json", json.dumps(state, indent=2))
 
     # --------------------------------------------------------------- routes
 
@@ -231,10 +257,8 @@ class Home:
             return handler.send(200, (WEB / "index.html").read_text(encoding="utf-8"), "text/html; charset=utf-8")
         if rest == ["api", "state"]:
             state = read_json(run_dir / "state.json") or {"phase": "starting"}
-            live = alive(read_json(run_dir / "run.json").get("pid"))
-            return handler.send(200, json.dumps(dict(state, live=live, input=next(
-                (p.read_text(encoding="utf-8", errors="replace") for p in (run_dir / "input.md", run_dir / "prompt.md")
-                 if p.exists()), ""))))
+            live = meta_alive(run_dir / "run.json")
+            return handler.send(200, json.dumps(dict(state, live=live, input=input_text(run_dir))))
         if rest == ["api", "prompt"]:
             record = run_dir / "rounds" / f"r{int(query.get('round', 0))}" / f"{query.get('agent', '')}-context.md"
             ok = RUN_ID.match(query.get("agent", "")) and record.is_file()

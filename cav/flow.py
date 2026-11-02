@@ -1,25 +1,5 @@
-"""One CAV run: two agents, one result both agree has no blockers.
+"""One CAV run: two agents, one result both agree has no blockers (see README)."""
 
-    plan     (repos + task) both write a plan, then vote on both; a plan both approve is the plan,
-             otherwise both revise from the objections and vote again, until one is approved.
-             Both build it; the two builds are the candidates.
-    review   (plan + two sets of branches, or the builds) both review every agreed plan and both candidates, blind,
-             listing only blockers: real bugs, or real departures from an agreed plan.
-    confirm  each votes on the other's blockers: one both call a blocker is agreed, the rest are
-             dropped. A candidate with no agreed blocker is the result, kept as branch cav/<run>.
-    fix      after every review with no clear candidate: both plan the fix of every agreed blocker
-             on a base they choose, in line with every plan agreed before, voting and revising as
-             above until one plan is approved; both build it. Then review again: the agreed blockers
-             are checked, new ones can be raised, and both must agree on each.
-
-No prompt names an agent or says whose anything is: candidates are X and Y, labelled at random and
-read from plain folders without .git; files are numbered at random; candidates are listed in random
-order. Each agent keeps one session per round (review, confirm, any plan and votes, the build) and
-starts a fresh one the next, so no agent reviews knowing which build is its own. Everything an agent
-reads or writes is in a blind area outside every git repo; CAV commits the builds itself.
-"""
-
-import io
 import itertools
 import json
 import os
@@ -29,14 +9,13 @@ import re
 import secrets
 import shutil
 import subprocess
-import tarfile
 import threading
 import time
 
 from . import agents as agent_mod
 from . import prompts
-from .events import EventWriter
-from .gitops import GIT, GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, resolve_repo
+from .events import EventWriter, atomic_write
+from .gitops import GITHUB, IDENTITY, NO_WINDOW, git, git_ok, kill_tree, resolve_ref, resolve_repo
 
 LABELS = ("X", "Y")
 BASE_LINE = re.compile(r"(?im)^\W*base\W*:\W*(?:candidate\s+)?([XY])\b")
@@ -48,14 +27,20 @@ BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
 
 
 def export_tree(repo, sha, dest):
-    """A commit's files as a plain folder: no .git, so no branch name, author or message."""
-    data = subprocess.run([GIT, "archive", "--format=tar", sha], cwd=str(repo), capture_output=True,
-                          check=True, creationflags=NO_WINDOW).stdout
+    """A commit's files as a plain folder: no .git, so no branch name, author or message. Not `git archive`:
+    it drops export-ignore paths and expands export-subst, which a build's snapshot would then commit."""
     if dest.exists():  # left by an interrupted step of a resumed run: start clean
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
-    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-        archive.extractall(dest, filter="data")
+    git_dir = git("rev-parse", "--absolute-git-dir", cwd=repo)
+    index = dest.parent / f"{dest.name}.index"
+    env = dict(os.environ, GIT_INDEX_FILE=str(index))
+    where = ("--git-dir", git_dir, "--work-tree", str(dest))
+    try:
+        git(*where, "read-tree", sha, cwd=dest, env=env)
+        git(*where, "checkout-index", "-a", "-f", cwd=dest, env=env)
+    finally:
+        index.unlink(missing_ok=True)
     return dest
 
 
@@ -70,7 +55,9 @@ def words(text):
 
 def _json(path):
     try:
-        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8", errors="replace"))
+        raw = pathlib.Path(path).read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+        data = json.loads(text)
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
@@ -87,7 +74,7 @@ def blocker_line(item):
 
 
 class Flow:
-    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), models=None, agents=None):
+    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), agents=None):
         """`repos`: [{"repo": a local path or a GitHub URL, "branches": [set 1, set 2]}]; a blank branch is
         that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`.
         `agents`: the two agents by name (see agents.AGENTS); none means the defaults."""
@@ -103,7 +90,7 @@ class Flow:
         self.run_id = self.run_dir.name
         self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
-        models = models or agent_mod.models_for(agents)
+        models = agent_mod.models_for(agents)
         self.names = list(models)
         self.state = {"run_id": self.run_id, "repo": ", ".join(str(item["spec"]) for item in self.repos),
                       "names": self.names, "phase": "starting",
@@ -122,7 +109,7 @@ class Flow:
             self.agents[name] = agent
 
     @classmethod
-    def resume(cls, run_dir, models=None):
+    def resume(cls, run_dir):
         """A run that stopped before its result, picked up from its last resume point: the step it was
         in starts over, everything before it is kept."""
         run_dir = pathlib.Path(run_dir).resolve()
@@ -131,7 +118,12 @@ class Flow:
         if state.get("phase") == "done" or not point or not spec:
             raise ValueError(f"{run_dir.name} has no point to resume from")
         flow = cls(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"),
-                   checks=spec.get("checks") or (), models=models, agents=spec.get("agents"))
+                   checks=spec.get("checks") or (), agents=spec.get("agents"))
+        for name, info in (state.get("agents") or {}).items():  # a stopped run's Kimi turn keeps writing into this run's files
+            if name in flow.agents and isinstance(info, dict) and info.get("session"):
+                flow.agents[name].session_id = info["session"]
+                flow.agents[name].abort()
+                flow.agents[name].session_id = None  # the restarted step opens a fresh session, as before
         for entry in state["history"]:
             entry.setdefault("verdict", "interrupted")
         for key in ("outcome", "detail"):
@@ -151,7 +143,7 @@ class Flow:
 
     def save(self, **changes):
         self.state.update(changes, updated=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        (self.run_dir / "state.json").write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+        atomic_write(self.run_dir / "state.json", json.dumps(self.state, indent=2))
 
     def begin(self, kind, **data):
         """A new step: the dashboard's unit."""
@@ -203,17 +195,20 @@ class Flow:
                 thread.start()
                 threads.append((name, thread))
             deadline = time.time() + ANSWER_SECONDS
+            # the session too: a resumed run aborts a turn this run leaves running (see resume)
+            status = lambda: {name: {"state": "running" if thread.is_alive() else "done",
+                                     "detail": self.agents[name].state.detail, "idle": int(self.agents[name].state.idle),
+                                     "session": self.agents[name].session_id} for name, thread in threads}
             while any(thread.is_alive() for _, thread in threads):
-                self.state["agents"] = {name: {"state": "running" if thread.is_alive() else "done",
-                                               "detail": self.agents[name].state.detail,
-                                               "idle": int(self.agents[name].state.idle)} for name, thread in threads}
+                self.state["agents"] = status()
                 self.save()
                 if time.time() > deadline:
                     for name, thread in threads:
-                        if thread.is_alive():
+                        if thread.is_alive() and not self.agents[name].state.error:
                             self.agents[name].abort()
                             self.agents[name].state.error = "timed out"
                 time.sleep(POLL_SECONDS)
+            self.save(agents=status())
             for name, _ in threads:
                 problems[name] = self.agents[name].state.error or check(name)
                 if problems[name]:
@@ -302,7 +297,8 @@ class Flow:
             plan_path.write_text(self.plan + "\n", encoding="utf-8")
             order = dict(zip(LABELS, random.sample((0, 1), 2)))  # which branch set is X, at random
             refs = {label: {item["name"]: item["branches"][order[label]] for item in self.repos} for label in LABELS}
-            commits = {label: {item["name"]: resolve_ref(item["path"], refs[label][item["name"]]) if refs[label][item["name"]]
+            commits = {label: {item["name"]: resolve_ref(item["path"], refs[label][item["name"]],
+                       prefer_origin=bool(GITHUB.match(str(item["spec"]).strip()))) if refs[label][item["name"]]
                                else item["main"] for item in self.repos} for label in LABELS}
             self.save(labels={label: {name: {"ref": refs[label][name] or "(main)", "commit": commits[label][name]}
                                       for name in mains} for label in LABELS})
@@ -528,12 +524,14 @@ class Flow:
         log = self.blind / f"{name}-checks.log"
         lines = []
         for command in self.checks:
+            proc = subprocess.Popen(command, shell=True, cwd=str(work), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                    text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW,
+                                    start_new_session=os.name != "nt")
             try:
-                proc = subprocess.run(command, shell=True, cwd=str(work), capture_output=True, text=True, encoding="utf-8",
-                                      errors="replace", timeout=CHECK_SECONDS, creationflags=NO_WINDOW)
-                code, output = proc.returncode, (proc.stdout or "") + (proc.stderr or "")
+                output, code = proc.communicate(timeout=CHECK_SECONDS)[0] or "", proc.returncode
             except subprocess.TimeoutExpired:
-                code, output = "timeout", f"no result after {CHECK_SECONDS} seconds"
+                kill_tree(proc.pid)  # killing the shell alone leaves the check holding the pipe, and the wait never ends
+                output, code = (proc.communicate()[0] or "") + f"\nno result after {CHECK_SECONDS} seconds", "timeout"
             lines += [f"$ {command}", output[-6000:], f"exit {code}", ""]
             if code != 0:
                 log.write_text("\n".join(lines), encoding="utf-8")
@@ -566,7 +564,10 @@ class Flow:
     def plan_problem(path, base_needed):
         if not path.exists():
             return "no plan file written"
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:  # e.g. written by Windows PowerShell or cp1252 Python: ask again, do not fail the run
+            return "the plan is not UTF-8; write it as UTF-8"
         if words(text) > prompts.WORDS:
             return f"the plan has {words(text)} words; cut it to {prompts.WORDS}"
         if base_needed and plan_base(text) not in LABELS:
@@ -576,7 +577,8 @@ class Flow:
     @staticmethod
     def vote_problem(path):
         data = _json(path) or {}
-        approve, why = data.get("approve"), data.get("why") or {}
+        approve, why = data.get("approve"), data.get("why")
+        why = why if isinstance(why, dict) else {}  # a string or list "why" is a schema slip: ask again, do not fail the run
         if not isinstance(approve, dict) or set(approve) != {"1", "2"} or not all(isinstance(v, bool) for v in approve.values()):
             return 'write JSON with "approve": {"1": true|false, "2": true|false}'
         for n, ok in approve.items():
@@ -600,16 +602,17 @@ class Flow:
         if not isinstance(blockers, list) or any(not isinstance(item, dict) or not item.get("problem")
                                                  or item.get("candidate") not in (*LABELS, "both") for item in blockers):
             return 'write JSON with "blockers": a list of {"candidate": "X|Y|both", "file", "line", "problem", "fix"}'
-        for item in blockers:  # a missing file can be the blocker; a path outside the candidate cannot
-            root = pathlib.Path(candidates[LABELS[0]]["folder"]).resolve()
-            if not item.get("file") or root not in (root / str(item["file"])).resolve().parents:
+        roots = [pathlib.Path(c["folder"]).resolve() for c in candidates.values()]
+        for item in blockers:  # a missing file can be the blocker; a path outside the candidates cannot
+            if not item.get("file") or not any(root in (root / str(item["file"])).resolve().parents for root in roots):
                 return f"blocker file {item.get('file')!r} is not a path inside the candidate"
         return None
 
     @staticmethod
     def keep_problem(path, count):
         data = _json(path) or {}
-        keep, why = data.get("keep"), data.get("why") or {}
+        keep, why = data.get("keep"), data.get("why")
+        why = why if isinstance(why, dict) else {}
         if not isinstance(keep, dict) or set(keep) != {str(n) for n in range(1, count + 1)} \
                 or not all(isinstance(v, bool) for v in keep.values()):
             return f'write JSON with "keep": true or false for each of 1 to {count}'
@@ -621,7 +624,8 @@ class Flow:
     @staticmethod
     def confirm_problem(path, count):
         data = _json(path) or {}
-        votes, why = data.get("blocker"), data.get("why") or {}
+        votes, why = data.get("blocker"), data.get("why")
+        why = why if isinstance(why, dict) else {}
         if not isinstance(votes, dict) or set(votes) != {str(n) for n in range(1, count + 1)} \
                 or not all(isinstance(v, bool) for v in votes.values()):
             return f'write JSON with "blocker": true or false for each of 1 to {count}'

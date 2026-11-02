@@ -1,6 +1,7 @@
-"""Append-only event log: one file, monotonic seq, redacted and capped payloads."""
+"""Run persistence: an append-only event log and atomic small-file writes."""
 
 import json
+import os
 import pathlib
 import re
 import threading
@@ -15,6 +16,19 @@ _SECRET = re.compile(
     r"client[_-]?secret|password|secret)\s*[:=]\s*)([^\s\"',;}]+)"
 )
 _SECRET_KEY = re.compile(r"(?i)(?:authorization|token|secret|password|credential|cookie|api[_-]?key)")
+
+
+def atomic_write(path, text):
+    path = pathlib.Path(path)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    for attempt in range(50):
+        try:
+            return os.replace(tmp, path)
+        except PermissionError:  # a Windows dashboard reader may have the destination open briefly
+            if attempt == 49:
+                raise
+            time.sleep(0.1)
 
 
 def redact(text):

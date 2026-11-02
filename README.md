@@ -21,7 +21,8 @@ result    kept as the local branch cav/<run> in every repo. Nothing is pushed.
 
 There is no round limit: a run ends when a candidate has no blocker both agents agree on, or when you stop it.
 
-**No bias.** No prompt names an agent or says whose anything is: candidates are X and Y, labelled at random and read from plain folders exported without `.git`; files are numbered at random; each agent starts a fresh session every round, so it never reviews knowing which build is its own. Everything the agents read and write sits in a blind area outside every git repo (`%LOCALAPPDATA%\cav-blind\<random>`, or `CAV_BLIND_ROOT`); CAV commits the builds itself.
+**No bias.** Candidates and answer files are labelled at random, exported without `.git`, and reviewed in fresh sessions.
+Agents work outside every repository in `%LOCALAPPDATA%\cav-blind\<random>` (or `CAV_BLIND_ROOT`); CAV commits the builds.
 
 ## Use
 
@@ -33,18 +34,6 @@ py -m cav run --spec spec.json
 `spec.json` is `{"repos": [{"repo": "<path or GitHub URL>", "branches": ["<set 1>", "<set 2>"]}, ...], "task": "..."}`, or with branches `"plan": "..."` instead of `"task"`. An empty branch in a set means that repo's main; no branches at all means a task. The dashboard's form writes it for you.
 
 A GitHub URL is cloned to `Documents\Default Project\<repo>` (or that clone is reused and fetched); a task then starts from its default branch. On Windows use `py`, not `python` (the Store stub). Kimi Code desktop must be running.
-
-## Layout
-
-```
-cav/flow.py      the run
-cav/prompts.py   what each agent is told
-cav/agents.py    OpenCode and Kimi adapters: sessions, approvals, ponytail
-cav/web.py, web/ the dashboard
-cav/events.py    the event log the dashboard streams
-cav/gitops.py    git
-cav/cli.py       run / serve
-```
 
 ## Tests
 
