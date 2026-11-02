@@ -102,6 +102,111 @@ class HomeTest(unittest.TestCase):
         with self.assertRaises(urllib.error.HTTPError):
             self.get("run/../api/state")
 
+    def test_a_reused_pid_is_not_alive_or_stopped(self):
+        import os
+        from cav import web
+
+        run_dir = self.tmp / "runs" / "reused"
+        run_dir.mkdir()
+        (run_dir / "state.json").write_text(json.dumps({"phase": "review"}), encoding="utf-8")
+        meta = run_dir / "run.json"
+        meta.write_text(json.dumps({"pid": os.getpid(), "started": 100}), encoding="utf-8")
+        with mock.patch("cav.web.process_start", return_value=101), mock.patch("cav.web.subprocess.run") as kill:
+            self.assertFalse(web.alive(os.getpid(), 100))
+            self.assertTrue(web.alive(os.getpid(), 101))
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post("stop", {"id": run_dir.name})
+        self.assertEqual(caught.exception.code, 400)
+        kill.assert_not_called()
+
+        meta.write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        os.utime(meta, (100, 100))
+        with mock.patch("cav.web.process_start", return_value=101), mock.patch("cav.web.subprocess.run") as kill:
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post("stop", {"id": run_dir.name})
+        self.assertEqual(caught.exception.code, 400)
+        kill.assert_not_called()
+
+    def test_launch_and_resume_record_process_identity(self):
+        import os
+        import types
+        from cav import cli, web
+
+        launched = self.tmp / "launched"
+        launched.mkdir()
+        with mock.patch("cav.web.subprocess.Popen", return_value=mock.Mock(pid=4242)), \
+                mock.patch("cav.web.process_start", return_value=123):
+            self.home.launch(launched, ["run", "--spec", "spec.json"], "repo")
+        self.assertEqual(json.loads((launched / "run.json").read_text(encoding="utf-8"))["started"], 123)
+
+        resumed = self.tmp / "resumed"
+        resumed.mkdir()
+        (resumed / "run.json").write_text(json.dumps({"pid": os.getpid()}), encoding="utf-8")
+        flow = mock.Mock(run_dir=resumed)
+        flow.run.return_value = 0
+        with mock.patch("cav.cli.Flow.resume", return_value=flow):
+            self.assertEqual(cli.cmd_resume(types.SimpleNamespace(run_dir=str(resumed))), 0)
+        data = json.loads((resumed / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["started"], web.process_start(os.getpid()))
+
+    def test_stop_leaves_unreadable_state_for_inspection(self):
+        run_dir = self.tmp / "runs" / "damaged"
+        run_dir.mkdir()
+        (run_dir / "state.json").write_bytes(b"")
+        (run_dir / "run.json").write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+        with mock.patch("cav.web.alive", return_value=True), mock.patch("cav.web.subprocess.run"):
+            self.post("stop", {"id": run_dir.name})
+        self.assertEqual((run_dir / "state.json").read_bytes(), b"")
+
+    def test_stop_state_writes_are_atomic_and_retry_a_locked_replace(self):
+        import os
+
+        run_dir = self.tmp / "runs" / "atomic"
+        run_dir.mkdir()
+        state = run_dir / "state.json"
+        state.write_text(json.dumps({"phase": "review"}), encoding="utf-8")
+        (run_dir / "run.json").write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+        real_write = pathlib.Path.write_text
+
+        def interrupted(path, text, *args, **kwargs):
+            if path.name.startswith("state.json"):
+                with path.open("w", encoding="utf-8") as handle:
+                    handle.write(text[:1])
+                raise OSError("interrupted")
+            return real_write(path, text, *args, **kwargs)
+
+        with mock.patch("cav.web.alive", return_value=True), mock.patch("cav.web.subprocess.run"), \
+                mock.patch.object(pathlib.Path, "write_text", interrupted):
+            with self.assertRaises(urllib.error.HTTPError) as caught:
+                self.post("stop", {"id": run_dir.name})
+        self.assertEqual(caught.exception.code, 500)
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["phase"], "review")
+
+        real_replace, attempts = os.replace, []
+
+        def locked_once(source, destination):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise PermissionError("locked")
+            return real_replace(source, destination)
+
+        with mock.patch("cav.web.alive", return_value=True), mock.patch("cav.web.subprocess.run"), \
+                mock.patch("cav.events.os.replace", side_effect=locked_once), mock.patch("cav.events.time.sleep"):
+            self.post("stop", {"id": run_dir.name})
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["phase"], "stopped")
+
+    def test_github_refs_prefer_the_fetched_branch(self):
+        clone = self.tmp / "clone"
+        shutil.copytree(self.repo, clone)
+        old = git("rev-parse", "HEAD", cwd=clone)
+        git("-c", "user.name=t", "-c", "user.email=t@e", "commit", "--allow-empty", "-q", "-m", "new", cwd=clone)
+        new = git("rev-parse", "HEAD", cwd=clone)
+        git("update-ref", "refs/remotes/origin/feature", new, cwd=clone)
+        git("branch", "-f", "feature", old, cwd=clone)
+        self.assertEqual(resolve_ref(clone, "feature", prefer_origin=True), new)
+        self.assertEqual(resolve_ref(clone, "feature"), old)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,7 +16,7 @@ import time
 
 from . import agents as agent_mod
 from . import prompts
-from .events import EventWriter
+from .events import EventWriter, atomic_write
 from .gitops import GIT, GITHUB, IDENTITY, NO_WINDOW, git, git_ok, resolve_ref, resolve_repo
 
 LABELS = ("X", "Y")
@@ -132,7 +132,7 @@ class Flow:
 
     def save(self, **changes):
         self.state.update(changes, updated=time.strftime("%Y-%m-%dT%H:%M:%S"))
-        (self.run_dir / "state.json").write_text(json.dumps(self.state, indent=2), encoding="utf-8")
+        atomic_write(self.run_dir / "state.json", json.dumps(self.state, indent=2))
 
     def begin(self, kind, **data):
         """A new step: the dashboard's unit."""
@@ -283,7 +283,8 @@ class Flow:
             plan_path.write_text(self.plan + "\n", encoding="utf-8")
             order = dict(zip(LABELS, random.sample((0, 1), 2)))  # which branch set is X, at random
             refs = {label: {item["name"]: item["branches"][order[label]] for item in self.repos} for label in LABELS}
-            commits = {label: {item["name"]: resolve_ref(item["path"], refs[label][item["name"]]) if refs[label][item["name"]]
+            commits = {label: {item["name"]: resolve_ref(item["path"], refs[label][item["name"]],
+                       prefer_origin=bool(GITHUB.match(str(item["spec"]).strip()))) if refs[label][item["name"]]
                                else item["main"] for item in self.repos} for label in LABELS}
             self.save(labels={label: {name: {"ref": refs[label][name] or "(main)", "commit": commits[label][name]}
                                       for name in mains} for label in LABELS})

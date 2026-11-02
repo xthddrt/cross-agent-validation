@@ -179,6 +179,21 @@ class KimiBlockingTest(unittest.TestCase):
         self.assertTrue(result["ok"], result)
         self.assertEqual(result["text"], "done")
 
+    def test_transport_failures_become_runtime_errors_and_abort_does_not_raise(self):
+        agent = self.agent()
+        agent.base, agent.token, agent.session_id = "http://kimi", "t", "s"
+        with mock.patch("cav.agents.urllib.request.urlopen", side_effect=TimeoutError("timed out")):
+            agent.abort()
+        self.assertTrue(agent._abort.is_set())
+        with mock.patch("cav.agents.urllib.request.urlopen", side_effect=ConnectionResetError("reset")):
+            with self.assertRaisesRegex(RuntimeError, "kimi GET /status"):
+                agent._call("GET", "/status")
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b"not json"
+        with mock.patch("cav.agents.urllib.request.urlopen", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "kimi GET /status"):
+                agent._call("GET", "/status")
+
     def test_opencode_session_directory_is_the_worktree(self):
         """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
         agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")

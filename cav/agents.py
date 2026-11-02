@@ -272,8 +272,8 @@ class KimiAgent(Agent):
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as error:
             raise RuntimeError(f"kimi {method} {path}: HTTP {error.code} {error.read().decode('utf-8', 'replace')[:300]}")
-        except urllib.error.URLError as error:
-            raise RuntimeError(f"kimi {method} {path}: {error.reason}")
+        except (urllib.error.URLError, OSError, ValueError) as error:
+            raise RuntimeError(f"kimi {method} {path}: {error}")
 
     def _model(self):
         if self.spec.model:

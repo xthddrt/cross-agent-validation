@@ -50,9 +50,10 @@ def resolve_repo(spec, clone_root=None):
     return target.resolve()
 
 
-def resolve_ref(repo, ref):
+def resolve_ref(repo, ref, prefer_origin=False):
     """A branch's commit, as given or as fetched from origin."""
-    for name in (ref, f"origin/{ref}"):
+    names = (f"origin/{ref}", ref) if prefer_origin else (ref, f"origin/{ref}")
+    for name in names:
         sha = git("rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", cwd=repo, check=False)
         if sha:
             return sha

@@ -8,7 +8,7 @@ import sys
 import time
 
 from .flow import Flow
-from .web import Home, alive
+from .web import Home, meta_alive, process_start
 
 
 def cmd_run(args):
@@ -24,10 +24,10 @@ def cmd_resume(args):
     meta = pathlib.Path(args.run_dir) / "run.json"  # the dashboard follows this process from now on
     data = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
     # the dashboard records this process (or the launcher that started it) before it gets here
-    if data.get("pid") not in (os.getpid(), os.getppid()) and alive(data.get("pid")):
+    if data.get("pid") not in (os.getpid(), os.getppid()) and meta_alive(meta):
         raise SystemExit("that run is still running")
     flow = Flow.resume(args.run_dir)
-    meta.write_text(json.dumps(dict(data, pid=os.getpid())), encoding="utf-8")
+    meta.write_text(json.dumps(dict(data, pid=os.getpid(), started=process_start(os.getpid()))), encoding="utf-8")
     print(f"resume {flow.run_dir}")
     return flow.run()
 

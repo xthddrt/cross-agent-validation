@@ -345,6 +345,41 @@ class FlowTest(unittest.TestCase):
             self.assertIn(rule, fix, "a revised fix plan is held to the same rules as the first")
         self.assertNotIn("least work", prompts.revise({1: ["no"]}, plan))
 
+    def test_an_interrupted_state_write_preserves_the_last_complete_state(self):
+        import types
+
+        flow = types.SimpleNamespace(state={}, run_dir=self.tmp)
+        Flow.save(flow, phase="review")
+        state = self.tmp / "state.json"
+        real_write = pathlib.Path.write_text
+
+        def interrupted(path, text, *args, **kwargs):
+            if path.name.startswith("state.json"):
+                with path.open("w", encoding="utf-8") as handle:
+                    handle.write(text[:1])
+                raise OSError("interrupted")
+            return real_write(path, text, *args, **kwargs)
+
+        with mock.patch.object(pathlib.Path, "write_text", interrupted):
+            with self.assertRaisesRegex(OSError, "interrupted"):
+                Flow.save(flow, phase="build")
+        self.assertEqual(json.loads(state.read_text(encoding="utf-8"))["phase"], "review")
+
+    def test_a_github_spec_resolves_explicit_refs_remote_first(self):
+        from cav.gitops import resolve_ref
+
+        self.branches()
+        fakes = {name: Fake(name) for name in ("deepseek", "kimi")}
+        with mock.patch("cav.flow.agent_mod.build", side_effect=lambda spec, log, title_prefix="": fakes[spec.name]), \
+                mock.patch("cav.flow.resolve_repo", return_value=self.work), \
+                mock.patch("cav.flow.resolve_ref", wraps=resolve_ref) as resolved:
+            flow = Flow([{"repo": "https://github.com/owner/work", "branches": ["feat-a", "feat-b"]}],
+                        self.tmp / "runs" / "github", plan="Add a note.")
+            self.assertEqual(flow.run(), 0, flow.state)
+        for branch in ("feat-a", "feat-b"):
+            self.assertTrue(any(call.args[1] == branch and call.kwargs.get("prefer_origin")
+                                for call in resolved.call_args_list), branch)
+
 
 if __name__ == "__main__":
     unittest.main()
