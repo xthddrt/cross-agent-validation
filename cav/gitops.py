@@ -4,6 +4,7 @@ import os
 import pathlib
 import re
 import shutil
+import signal
 import subprocess
 
 GIT = os.environ.get("CAV_GIT") or shutil.which("git") or r"C:\Program Files\Git\cmd\git.exe"
@@ -13,6 +14,14 @@ CLONE_ROOT = pathlib.Path(os.environ.get("CAV_CLONE_ROOT") or pathlib.Path.home(
 # gets a window of its own that flashes up and closes; start them all without one.
 NO_WINDOW = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 IDENTITY = ("-c", "user.name=Cross-Agent Validation", "-c", "user.email=cav@localhost")
+
+
+def kill_tree(pid):
+    """End a process and every process it started (a shell's children hold its pipes)."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
+    else:
+        os.killpg(os.getpgid(pid), signal.SIGTERM)
 
 
 def git(*args, cwd=None, check=True, env=None):
@@ -25,7 +34,7 @@ def git(*args, cwd=None, check=True, env=None):
 
 def git_ok(*args, cwd=None):
     return subprocess.run([GIT] + list(args), cwd=str(cwd) if cwd else None,
-                          capture_output=True, text=True, creationflags=NO_WINDOW).returncode == 0
+                          capture_output=True, creationflags=NO_WINDOW).returncode == 0
 
 
 def resolve_repo(spec, clone_root=None):
@@ -50,9 +59,10 @@ def resolve_repo(spec, clone_root=None):
     return target.resolve()
 
 
-def resolve_ref(repo, ref):
+def resolve_ref(repo, ref, prefer_origin=False):
     """A branch's commit, as given or as fetched from origin."""
-    for name in (ref, f"origin/{ref}"):
+    names = (f"origin/{ref}", ref) if prefer_origin else (ref, f"origin/{ref}")
+    for name in names:
         sha = git("rev-parse", "--verify", "--quiet", f"{name}^{{commit}}", cwd=repo, check=False)
         if sha:
             return sha
