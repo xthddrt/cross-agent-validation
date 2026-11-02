@@ -113,6 +113,11 @@ class Flow:
             raise ValueError(f"{run_dir.name} has no point to resume from")
         flow = cls(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"),
                    checks=spec.get("checks") or (), agents=spec.get("agents"))
+        for name, info in (state.get("agents") or {}).items():  # a stopped run's Kimi turn keeps writing into this run's files
+            if name in flow.agents and isinstance(info, dict) and info.get("session"):
+                flow.agents[name].session_id = info["session"]
+                flow.agents[name].abort()
+                flow.agents[name].session_id = None  # the restarted step opens a fresh session, as before
         for entry in state["history"]:
             entry.setdefault("verdict", "interrupted")
         for key in ("outcome", "detail"):
@@ -184,10 +189,12 @@ class Flow:
                 thread.start()
                 threads.append((name, thread))
             deadline = time.time() + ANSWER_SECONDS
+            # the session too: a resumed run aborts a turn this run leaves running (see resume)
+            status = lambda: {name: {"state": "running" if thread.is_alive() else "done",
+                                     "detail": self.agents[name].state.detail, "idle": int(self.agents[name].state.idle),
+                                     "session": self.agents[name].session_id} for name, thread in threads}
             while any(thread.is_alive() for _, thread in threads):
-                self.state["agents"] = {name: {"state": "running" if thread.is_alive() else "done",
-                                               "detail": self.agents[name].state.detail,
-                                               "idle": int(self.agents[name].state.idle)} for name, thread in threads}
+                self.state["agents"] = status()
                 self.save()
                 if time.time() > deadline:
                     for name, thread in threads:
@@ -195,6 +202,7 @@ class Flow:
                             self.agents[name].abort()
                             self.agents[name].state.error = "timed out"
                 time.sleep(POLL_SECONDS)
+            self.save(agents=status())
             for name, _ in threads:
                 problems[name] = self.agents[name].state.error or check(name)
                 if problems[name]:

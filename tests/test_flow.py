@@ -35,12 +35,13 @@ class Fake:
         self.blockers, self.agree, self.approve, self.base = blockers, agree, approve, base
         self.audit, self.keep, self.bad = audit, keep, bad
         self.prompts, self.sessions, self.builds, self.folders = [], 0, 0, {}
+        self.aborted = []  # (session, prompts so far) at each abort
 
     def reset(self):
         self.state = RunState()
 
     def abort(self):
-        pass
+        self.aborted.append((self.session_id, len(self.prompts)))
 
     def run(self, prompt, cwd):
         if not self.session_id:
@@ -161,6 +162,7 @@ class FlowTest(unittest.TestCase):
         self.assertTrue(git("show", f"{branch}:feature.txt", cwd=self.work).startswith("built by"))
         self.assertEqual(git("--git-dir", str(self.origin), "rev-parse", self.branch), self.base, "nothing is pushed")
         self.assertEqual([fake.sessions for fake in fakes.values()], [3, 3], "fresh sessions for the review and the audit")
+        self.assertEqual(flow.state["agents"]["kimi"]["session"], fakes["kimi"].session_id, "kept for a resume to abort")
         self.assert_blind(fakes, flow)
 
     def test_rejected_plans_are_revised_until_both_approve(self):
@@ -231,9 +233,13 @@ class FlowTest(unittest.TestCase):
         code, flow = self.run_flow(fakes, task="Add feature.txt.")
         self.assertEqual(code, 1)
         self.assertEqual(flow.state["resume"]["next"], "build")
+        old = flow.state["agents"]["kimi"]["session"]
+        self.assertTrue(old)
         fresh = {name: Fake(name) for name in ("deepseek", "kimi")}
         with mock.patch("cav.flow.agent_mod.build", side_effect=lambda spec, log, title_prefix="": fresh[spec.name]):
             resumed = Flow.resume(flow.run_dir)
+            self.assertEqual(fresh["kimi"].aborted, [(old, 0)], "the stopped run's turn is aborted before any new prompt")
+            self.assertIsNone(fresh["kimi"].session_id, "the restarted step opens a fresh session")
             code = resumed.run()
         self.assertEqual(code, 0, resumed.state)
         self.assertEqual(self.steps(resumed), [("plan", "planned"), ("vote", "agreed"), ("build", "built"),

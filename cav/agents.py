@@ -336,6 +336,11 @@ class KimiAgent(Agent):
         super().abort()
         # Stop the turn in Kimi too: an abandoned turn keeps running, or keeps waiting on a
         # prompt someone might approve, while a retry edits the same worktree.
+        if self.session_id and not self.base:  # a resumed run's agent, stopping the stopped run's turn
+            try:
+                self._connect()
+            except (OSError, ValueError, KeyError, RuntimeError):  # Kimi not running: no turn left to stop
+                return
         if self.base and self.session_id:
             try:
                 self._call("POST", f"/api/v1/sessions/{self.session_id}:abort", {}, timeout=15)

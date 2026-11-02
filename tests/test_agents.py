@@ -194,6 +194,20 @@ class KimiBlockingTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "kimi GET /status"):
                 agent._call("GET", "/status")
 
+    def test_abort_connects_to_stop_a_stopped_runs_turn(self):
+        agent = self.agent()
+        agent.session_id = "s"
+
+        def connect():
+            agent.base, agent.token = "http://kimi", "t"
+        with mock.patch.object(agent, "_connect", side_effect=connect), mock.patch.object(agent, "_call") as call:
+            agent.abort()
+        call.assert_called_once_with("POST", "/api/v1/sessions/s:abort", {}, timeout=15)
+        agent.base = None
+        with mock.patch.object(agent, "_connect", side_effect=RuntimeError("Kimi Code server not running")),                 mock.patch.object(agent, "_call") as call:
+            agent.abort()
+        call.assert_not_called()
+
     def test_opencode_session_directory_is_the_worktree(self):
         """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
         agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")
