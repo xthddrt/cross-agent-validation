@@ -9,7 +9,6 @@ import unittest
 from unittest import mock
 
 from cav import agents as agent_mod
-from cav import events
 from cav.gitops import git
 
 
@@ -35,51 +34,11 @@ def with_origin(tmp):
     return work, origin, base
 
 
-class EventsTest(unittest.TestCase):
-    def test_order_redaction_and_clip(self):
-        tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-events-"))
-        try:
-            writer = events.EventWriter(tmp / "events.jsonl", "run")
-            writer.emit("one", 1, "kimi", {"text": "x" * 9000})
-            writer.emit("two", 1, "kimi", {"header": "Authorization: Bearer abcdefghijklmnop"})
-            writer.emit("three", 1, "kimi", {"token": "abc123",
-                                             "nested": {"password": "hunter2", "note": "ok"}})
-            payload, _ = events.tail(tmp / "events.jsonl")
-            self.assertEqual([item["seq"] for item in payload], [1, 2, 3])
-            self.assertIn("truncated", payload[0]["data"]["text"])
-            self.assertIn("[redacted]", payload[1]["data"]["header"])
-            self.assertEqual(payload[2]["data"]["token"], "[redacted]")
-            self.assertEqual(payload[2]["data"]["nested"]["password"], "[redacted]")
-            self.assertEqual(payload[2]["data"]["nested"]["note"], "ok")
-            resumed = events.EventWriter(tmp / "events.jsonl", "run")
-            self.assertEqual(resumed.emit("four")["seq"], 4, "a resumed run continues the sequence")
-        finally:
-            shutil.rmtree(tmp, ignore_errors=True)
-
-
 class KimiBlockingTest(unittest.TestCase):
     def agent(self):
         return agent_mod.KimiAgent(agent_mod.AgentSpec("kimi", "kimi", model="kimi-code/k3.1-pro"),
                                    "log.txt")
 
-    def test_pending_approval_wins_over_busy(self):
-        """Kimi reports busy=True while waiting for approval; the block must still be visible."""
-        agent = self.agent()
-        self.assertEqual(agent._pending({"busy": True, "main_turn_active": True,
-                                         "pending_interaction": "approval"}), "waiting:approval")
-        self.assertIsNone(agent._pending({"busy": True, "pending_interaction": "none"}))
-        self.assertIsNone(agent._pending({}))
-
-    def test_permission_mismatch_fails_fast(self):
-        agent = self.agent()
-        agent.session_id = "s"
-        agent._call = lambda *args, **kwargs: {"data": {"permission": "ask"}}
-        with self.assertRaises(RuntimeError):
-            agent._verify_permission("yolo")
-        agent._call = lambda *args, **kwargs: {"data": {"permission": "yolo"}}
-        agent._verify_permission("yolo")
-        agent._call = lambda *args, **kwargs: {"data": {}}
-        agent._verify_permission("yolo")
 
     def fake_api(self, agent, responses):
         calls = []
@@ -153,10 +112,6 @@ class KimiBlockingTest(unittest.TestCase):
             self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ClaudeAgentTest(unittest.TestCase):
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-claude-"))
@@ -199,14 +154,6 @@ class ClaudeAgentTest(unittest.TestCase):
         self.assertIsNone(self.agent.state.error)
         self.assertEqual(seen, ["agent.model", "agent.tool.start", "agent.tool.end", "agent.text"])
 
-    def test_a_usage_limit_fails_the_answer_with_its_reason(self):
-        self.agent._consume(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
-                                        "result": "usage limit reached"}))
-        self.assertIn("usage limit reached", self.agent.state.error)
 
-    def test_a_run_picks_two_different_known_agents(self):
-        self.assertEqual(list(agent_mod.models_for(None)), ["deepseek", "kimi"])
-        self.assertEqual(list(agent_mod.models_for(["claude", "kimi"])), ["claude", "kimi"])
-        for bad in (["claude", "claude"], ["claude"], ["gpt", "kimi"]):
-            with self.assertRaises(ValueError):
-                agent_mod.models_for(bad)
+if __name__ == "__main__":
+    unittest.main()

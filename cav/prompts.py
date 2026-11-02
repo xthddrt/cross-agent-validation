@@ -6,17 +6,12 @@ WORDS, WHY_WORDS = 1000, 100
 PLAN = f"(at most {WORDS} words): the smallest changes that do it, each with what and where, and how to check it"
 BASE = ' Its first line is "Base: X" or "Base: Y", the candidate to build on.'
 REPOS = "Each holds one folder per repository."
-BLOCKER = ("A blocker is a defect you would refuse to ship. In code the project builds and runs, it makes the project "
-           "fail at what it is for: a wrong result, a feature the task or an agreed plan requires that is missing or "
-           "broken, a crash or hang, lost or corrupted user data, a security hole, or slowness that defeats the purpose. "
-           "It must happen in normal use, in a scenario you can name; lost user data, a security hole or a system crash "
-           "counts even when rare, if it can really happen. Not blockers: unused code, contrived timing or setups, "
-           "hardening, style, comments, missing or weak tests.")
+BLOCKER = ("A blocker is a defect you would refuse to ship: in normal use it breaks what the project is for or what "
+           "the task and agreed plans require, or it can really cause harm that cannot be undone (lost data, a security "
+           "hole). Name the scenario. Style, tests and unlikely edge cases are not blockers.")
 CHECKLIST = ("First check each requirement in the agreed plans (numbered items, acceptance criteria, must-not-regress "
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
-             "departure from the plan. Then check for: concurrency and locking, resource and reference leaks, memory in the wrong "
-             "context, input and buffer handling, error paths that fail open, byte order and encoding, names or paths "
-             "in the wrong form.")
+             "departure from the plan.")
 TESTED = " Tests only where the task asks for them."
 
 
@@ -35,9 +30,8 @@ def review(plans, candidates, reply, agreed=None, audit=()):
         lines += ["", "AGREED BLOCKERS (last round's, in the base both candidates were built from)", f"- {agreed}"]
     lines += [""]
     if audit:
-        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}; assume it missed something "
-                     "important and find it. It focused on the newest changes, so start with files no recent round "
-                     "changed, and check each bug you find for the same pattern in every repository.")
+        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}. Review again from scratch: "
+                     "every file in every repository, not only what the plans changed.")
     lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
               + BLOCKER + " " + CHECKLIST,
               ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
