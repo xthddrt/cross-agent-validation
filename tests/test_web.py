@@ -150,6 +150,7 @@ class HomeTest(unittest.TestCase):
         self.assertEqual(data["started"], web.process_start(os.getpid()))
 
     def test_a_cli_run_is_live_and_not_resumed_while_it_runs(self):
+        import os
         import types
         from cav import cli, web
 
@@ -157,6 +158,7 @@ class HomeTest(unittest.TestCase):
         run_dir.mkdir()
         (run_dir / "state.json").write_text(json.dumps({"phase": "review", "resume": {"next": "review"}, "repo": "r"}),
                                             encoding="utf-8")
+        (run_dir / "run.json").write_text(json.dumps({"pid": 1, "repo": "r", "started": 1.0}), encoding="utf-8")
         spec = self.tmp / "spec.json"
         spec.write_text(json.dumps({"repos": [{"repo": str(self.repo)}], "task": "t"}), encoding="utf-8")
 
@@ -173,7 +175,23 @@ class HomeTest(unittest.TestCase):
         flow.run.side_effect = running
         with mock.patch("cav.cli.Flow", return_value=flow):
             self.assertEqual(cli.cmd_run(types.SimpleNamespace(spec=str(spec), run_dir=str(run_dir))), 0)
-        self.assertEqual(json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["repo"], "r")
+        data = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["pid"], os.getpid())
+        self.assertEqual(data["started"], web.process_start(os.getpid()))
+        self.assertEqual(data["repo"], "r")
+
+    def test_a_cli_run_reads_a_utf8_bom_spec(self):
+        import types
+        from cav import cli
+
+        run_dir = self.home.runs_dir / "bom-run"
+        run_dir.mkdir()
+        spec = self.tmp / "bom-spec.json"
+        spec.write_text(json.dumps({"repos": []}), encoding="utf-8-sig")
+        flow = mock.Mock(run_dir=run_dir, state={"repo": "r"})
+        flow.run.return_value = 0
+        with mock.patch("cav.cli.Flow", return_value=flow):
+            self.assertEqual(cli.cmd_run(types.SimpleNamespace(spec=str(spec), run_dir=str(run_dir))), 0)
 
     def test_stop_leaves_unreadable_state_for_inspection(self):
         run_dir = self.tmp / "runs" / "damaged"

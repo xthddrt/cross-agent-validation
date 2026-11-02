@@ -12,7 +12,7 @@ from .web import Home, meta_alive, process_start
 
 
 def cmd_run(args):
-    spec = json.loads(pathlib.Path(args.spec).read_text(encoding="utf-8"))
+    spec = json.loads(pathlib.Path(args.spec).read_text(encoding="utf-8-sig"))
     run_dir = args.run_dir or pathlib.Path("runs") / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     flow = Flow(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"), checks=spec.get("checks") or (),
                 agents=spec.get("agents"))

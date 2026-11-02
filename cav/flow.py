@@ -55,7 +55,9 @@ def words(text):
 
 def _json(path):
     try:
-        data = json.loads(pathlib.Path(path).read_text(encoding="utf-8", errors="replace"))
+        raw = pathlib.Path(path).read_bytes()
+        text = raw.decode("utf-16") if raw[:2] in (b"\xff\xfe", b"\xfe\xff") else raw.decode("utf-8-sig", "replace")
+        data = json.loads(text)
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None

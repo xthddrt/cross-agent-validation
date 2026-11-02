@@ -343,6 +343,11 @@ class FlowTest(unittest.TestCase):
         self.assertEqual(Flow.vote_problem(path), 'plan 2 is rejected without a "why"', "retried, not a failed run")
         path.write_text(json.dumps({"approve": {"1": True, "2": True}, "why": "both fine"}), encoding="utf-8")
         self.assertIsNone(Flow.vote_problem(path))
+        answer = json.dumps({"approve": {"1": True, "2": True}})
+        for encoding in ("utf-8-sig", "utf-16"):
+            with self.subTest(encoding=encoding):
+                path.write_text(answer, encoding=encoding)
+                self.assertIsNone(Flow.vote_problem(path))
         path.write_text(json.dumps({"blocker": {"1": True}}), encoding="utf-8")
         self.assertIn("each of 1 to 2", Flow.confirm_problem(path, 2))
         path.write_text(json.dumps({"blocker": {"1": False}, "why": ["not real"]}), encoding="utf-8")
