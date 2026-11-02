@@ -87,9 +87,10 @@ def blocker_line(item):
 
 
 class Flow:
-    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), models=None):
+    def __init__(self, repos, run_dir, task=None, plan=None, checks=(), models=None, agents=None):
         """`repos`: [{"repo": a local path or a GitHub URL, "branches": [set 1, set 2]}]; a blank branch is
-        that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`."""
+        that repo's main. Any branch at all means two sets to reconcile against `plan`; none means `task`.
+        `agents`: the two agents by name (see agents.AGENTS); none means the defaults."""
         self.repos = [{"spec": item["repo"], "branches": (list(item.get("branches") or []) + ["", ""])[:2]}
                       for item in repos]
         self.branched = any(ref for item in self.repos for ref in item["branches"])
@@ -102,7 +103,7 @@ class Flow:
         self.run_id = self.run_dir.name
         self.blind = BLIND_ROOT / secrets.token_hex(4)  # a random name: nothing in the path says what it is
         self.events = EventWriter(self.run_dir / "events.jsonl", self.run_id)
-        models = models or agent_mod.DEFAULT_MODELS
+        models = models or agent_mod.models_for(agents)
         self.names = list(models)
         self.state = {"run_id": self.run_id, "repo": ", ".join(str(item["spec"]) for item in self.repos),
                       "names": self.names, "phase": "starting",
@@ -111,11 +112,11 @@ class Flow:
         self.resumed = False
         spec_file = self.run_dir / "spec.json"  # what `cav resume` starts the run from again
         if not spec_file.exists():
-            spec_file.write_text(json.dumps({"repos": repos, "task": task, "plan": plan, "checks": self.checks}, indent=2),
-                            encoding="utf-8")
+            spec_file.write_text(json.dumps({"repos": repos, "task": task, "plan": plan, "checks": self.checks,
+                                             "agents": self.names}, indent=2), encoding="utf-8")
         self.agents = {}
         for name, (kind, model) in models.items():
-            spec = agent_mod.AgentSpec(name, kind, model, "high" if kind == "kimi" else None)
+            spec = agent_mod.AgentSpec(name, kind, model, "high" if kind in ("kimi", "claude") else None)
             agent = agent_mod.build(spec, self.run_dir / "logs" / f"{name}.log", title_prefix=f"cav {self.run_id}")
             agent.emit = lambda type_, agent_name, data: self.events.emit(type_, self.step, agent_name, data)
             self.agents[name] = agent
@@ -130,7 +131,7 @@ class Flow:
         if state.get("phase") == "done" or not point or not spec:
             raise ValueError(f"{run_dir.name} has no point to resume from")
         flow = cls(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"),
-                   checks=spec.get("checks") or (), models=models)
+                   checks=spec.get("checks") or (), models=models, agents=spec.get("agents"))
         for entry in state["history"]:
             entry.setdefault("verdict", "interrupted")
         for key in ("outcome", "detail"):
