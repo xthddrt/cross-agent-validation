@@ -217,7 +217,7 @@ class FlowTest(unittest.TestCase):
         self.assertIn("AGREED BLOCKERS", review, "a later review checks the agreed blockers")
         self.assertEqual([fake.sessions for fake in fakes.values()], [3, 3])
         self.assertIn("with the tests it names", next(p for p in fakes["kimi"].prompts if BUILD.match(p)))
-        self.assertIn("fails without it", fix)
+        self.assertIn("Tests only where the task asks for them.", fix)
         self.assert_blind(fakes, flow, leaks=("feat-a", "feat-b"))
 
     def test_a_run_stopped_in_a_build_resumes_at_that_build_and_finishes(self):
