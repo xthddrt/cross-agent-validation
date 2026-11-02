@@ -1,13 +1,14 @@
-"""Command line: `cav run` for one run, `cav serve` for the dashboard."""
+"""Command line: `cav run` for one run, `cav resume` to continue a stopped one, `cav serve` for the dashboard."""
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import time
 
 from .flow import Flow
-from .web import Home
+from .web import Home, alive
 
 
 def cmd_run(args):
@@ -15,6 +16,18 @@ def cmd_run(args):
     run_dir = args.run_dir or pathlib.Path("runs") / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
     flow = Flow(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"), checks=spec.get("checks") or ())
     print(f"run {flow.run_dir}")
+    return flow.run()
+
+
+def cmd_resume(args):
+    meta = pathlib.Path(args.run_dir) / "run.json"  # the dashboard follows this process from now on
+    data = json.loads(meta.read_text(encoding="utf-8")) if meta.exists() else {}
+    # the dashboard records this process (or the launcher that started it) before it gets here
+    if data.get("pid") not in (os.getpid(), os.getppid()) and alive(data.get("pid")):
+        raise SystemExit("that run is still running")
+    flow = Flow.resume(args.run_dir)
+    meta.write_text(json.dumps(dict(data, pid=os.getpid())), encoding="utf-8")
+    print(f"resume {flow.run_dir}")
     return flow.run()
 
 
@@ -35,6 +48,9 @@ def main(argv=None):
                           '"task": ...} or, with branches, "plan": ..., and optionally "checks": [commands]')
     run.add_argument("--run-dir")
     run.set_defaults(func=cmd_run)
+    resume = sub.add_parser("resume", help="a run that stopped before its result, from the step it was in")
+    resume.add_argument("--run-dir", required=True)
+    resume.set_defaults(func=cmd_resume)
     serve = sub.add_parser("serve", help="the dashboard: every run, and a form to start one")
     serve.add_argument("--port", type=int, default=7700)
     serve.add_argument("--runs", help="the runs folder (default: runs/ in this checkout)")

@@ -27,6 +27,7 @@ import pathlib
 import random
 import re
 import secrets
+import shutil
 import subprocess
 import tarfile
 import threading
@@ -50,6 +51,8 @@ def export_tree(repo, sha, dest):
     """A commit's files as a plain folder: no .git, so no branch name, author or message."""
     data = subprocess.run([GIT, "archive", "--format=tar", sha], cwd=str(repo), capture_output=True,
                           check=True, creationflags=NO_WINDOW).stdout
+    if dest.exists():  # left by an interrupted step of a resumed run: start clean
+        shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     with tarfile.open(fileobj=io.BytesIO(data)) as archive:
         archive.extractall(dest, filter="data")
@@ -105,12 +108,37 @@ class Flow:
                       "names": self.names, "phase": "starting",
                       "round": 0, "agents": {}, "history": [], "authors": {}}
         self.step, self.cycle, self.next_id = 0, 0, 1
+        self.resumed = False
+        spec_file = self.run_dir / "spec.json"  # what `cav resume` starts the run from again
+        if not spec_file.exists():
+            spec_file.write_text(json.dumps({"repos": repos, "task": task, "plan": plan, "checks": self.checks}, indent=2),
+                            encoding="utf-8")
         self.agents = {}
         for name, (kind, model) in models.items():
             spec = agent_mod.AgentSpec(name, kind, model, "high" if kind == "kimi" else None)
             agent = agent_mod.build(spec, self.run_dir / "logs" / f"{name}.log", title_prefix=f"cav {self.run_id}")
             agent.emit = lambda type_, agent_name, data: self.events.emit(type_, self.step, agent_name, data)
             self.agents[name] = agent
+
+    @classmethod
+    def resume(cls, run_dir, models=None):
+        """A run that stopped before its result, picked up from its last resume point: the step it was
+        in starts over, everything before it is kept."""
+        run_dir = pathlib.Path(run_dir).resolve()
+        state, spec = _json(run_dir / "state.json") or {}, _json(run_dir / "spec.json")
+        point = state.get("resume")
+        if state.get("phase") == "done" or not point or not spec:
+            raise ValueError(f"{run_dir.name} has no point to resume from")
+        flow = cls(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"),
+                   checks=spec.get("checks") or (), models=models)
+        for entry in state["history"]:
+            entry.setdefault("verdict", "interrupted")
+        for key in ("outcome", "detail"):
+            state.pop(key, None)
+        flow.state, flow.blind, flow.resumed = state, pathlib.Path(state["blind"]), True
+        flow.repos = [dict(item, path=pathlib.Path(item["path"])) for item in point["repos"]]
+        flow.step, flow.cycle, flow.next_id = state["round"], point["cycle"], point["next_id"]
+        return flow
 
     # ------------------------------------------------------------------ plumbing
 
@@ -138,8 +166,17 @@ class Flow:
         self.save()
         self.log(f"step {entry['round']} {entry['step']}: {verdict}")
 
+    def checkpoint(self, step, candidates=None, plans=(), agreed=None, **data):
+        """Where a stopped run picks up again: everything `step` needs, saved before it starts."""
+        point = {"next": step, "cycle": self.cycle, "next_id": self.next_id, "repos": self.repos,
+                 "candidates": candidates, "plans": list(plans), "agreed": agreed, **data}
+        self.save(resume=json.loads(json.dumps(point, default=str)))
+
     def mine(self, paths):
-        """Record who wrote each numbered file: bookkeeping the agents never see."""
+        """Record who wrote each numbered file: bookkeeping the agents never see. A file of that name
+        left by an interrupted step must not pass for this step's answer."""
+        for path in paths.values():
+            pathlib.Path(path).unlink(missing_ok=True)
         self.state["authors"].update({self.rel(path): name for name, path in paths.items()})
 
     def rel(self, path):
@@ -207,6 +244,46 @@ class Flow:
             return 1
 
     def _run(self):
+        if self.resumed:
+            candidates, plans, agreed = self.pick_up()
+        else:
+            candidates, plans, agreed = self.start()
+        while True:
+            self.checkpoint("review", candidates, plans, agreed)
+            self.new_round()
+            found = self.review(candidates, plans, agreed)
+            clear = [label for label in LABELS if not found[label]]
+            if clear:  # a fresh audit, told the review found nothing, before a candidate is the result
+                self.new_round()
+                audited = self.review(candidates, plans, agreed, audit=clear)
+                found = {label: found[label] + audited[label] for label in LABELS}  # the review's blockers stand
+                clear = [label for label in LABELS if not found[label]]
+                if clear:
+                    return self.finish(candidates, random.choice(clear))
+            both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
+            fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path)), fixes=True)
+            plans.append(fix)
+            label = plan_base(fix.read_text(encoding="utf-8"))
+            agreed = self.agreed_file(label, found[label])
+            self.save(base=label, agreed=[blocker_line(item) for item in found[label]])
+            self.checkpoint("build", candidates, plans, agreed, base=label, fixing=len(found[label]))
+            candidates = self.build(fix, candidates[label]["commits"], label, len(found[label]))
+
+    def pick_up(self):
+        """A resumed run's candidates, plans and agreed blockers, rebuilding first if it stopped in a build."""
+        point = self.state["resume"]
+        self.log(f"resumed: {point['next']} starts over")
+        self.save(phase="resuming")
+        candidates, plans = point["candidates"], [pathlib.Path(path) for path in point["plans"]]
+        agreed = pathlib.Path(point["agreed"]) if point["agreed"] else None
+        if point["next"] == "first-build":
+            candidates = self.build(plans[0], {item["name"]: item["main"] for item in self.repos})
+        elif point["next"] == "build":
+            candidates = self.build(plans[-1], candidates[point["base"]]["commits"], point["base"], point["fixing"])
+        return candidates, plans, agreed
+
+    def start(self):
+        """Resolve the repos, then the first candidates: the two branch sets, or two builds of the agreed plan."""
         for item in self.repos:  # each repo gets a folder name of its own inside every candidate
             item["path"] = resolve_repo(item["spec"])
             taken = {other.get("name") for other in self.repos}
@@ -234,27 +311,10 @@ class Flow:
             code = self.export(mains, self.blind / "code")
             paths = self.write_plans(lambda path: prompts.plan(self.task, code, path), base_needed=False)
             plan_path.write_text(self.agree(paths, fixes=False).read_text(encoding="utf-8"), encoding="utf-8")
+            self.checkpoint("first-build", plans=[plan_path])
             candidates = self.build(plan_path, mains)
-        plans = [plan_path]  # every plan both agents approved, in order: the code follows all of them
-        agreed = None  # the agreed blockers in the base the candidates were built from
-        while True:
-            self.new_round()
-            found = self.review(candidates, plans, agreed)
-            clear = [label for label in LABELS if not found[label]]
-            if clear:  # a fresh audit, told the review found nothing, before a candidate is the result
-                self.new_round()
-                audited = self.review(candidates, plans, agreed, audit=clear)
-                found = {label: found[label] + audited[label] for label in LABELS}  # the review's blockers stand
-                clear = [label for label in LABELS if not found[label]]
-                if clear:
-                    return self.finish(candidates, random.choice(clear))
-            both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
-            fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path)), fixes=True)
-            plans.append(fix)
-            label = plan_base(fix.read_text(encoding="utf-8"))
-            agreed = self.agreed_file(label, found[label])
-            self.save(base=label, agreed=[blocker_line(item) for item in found[label]])
-            candidates = self.build(fix, candidates[label]["commits"], label, len(found[label]))
+        # every plan both agents approved, in order: the code follows all of them; no agreed blockers yet
+        return candidates, [plan_path], None
 
     # ------------------------------------------------------------------- steps
 
@@ -318,6 +378,8 @@ class Flow:
         works = {name: self.export(start, self.blind / "build" / f"c{self.cycle}-{numbers[name]}") for name in self.names}
         notes = {name: self.blind / "notes" / f"c{self.cycle}-{numbers[name]}.md" for name in self.names}
         (self.blind / "notes").mkdir(exist_ok=True)
+        for path in notes.values():  # a note left by an interrupted build is not this build's
+            path.unlink(missing_ok=True)
         entry = self.begin("build", start=start, base=base, plan=self.rel(plan_path), fixing=fixing,
                            notes={name: self.rel(path) for name, path in notes.items()})
         self.ask({name: prompts.build(plan_path, works[name], notes[name], base, self.checks) for name in self.names},
