@@ -14,7 +14,8 @@ from .web import Home, alive
 def cmd_run(args):
     spec = json.loads(pathlib.Path(args.spec).read_text(encoding="utf-8"))
     run_dir = args.run_dir or pathlib.Path("runs") / f"run-{time.strftime('%Y%m%d-%H%M%S')}"
-    flow = Flow(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"), checks=spec.get("checks") or ())
+    flow = Flow(spec["repos"], run_dir, task=spec.get("task"), plan=spec.get("plan"), checks=spec.get("checks") or (),
+                agents=spec.get("agents"))
     print(f"run {flow.run_dir}")
     return flow.run()
 
@@ -45,7 +46,8 @@ def main(argv=None):
     run = sub.add_parser("run", help="a task, or a plan and two sets of branches, to one result both agents agree on")
     run.add_argument("--spec", required=True,
                      help='a JSON file: {"repos": [{"repo": path or GitHub URL, "branches": [set 1, set 2]}], '
-                          '"task": ...} or, with branches, "plan": ..., and optionally "checks": [commands]')
+                          '"task": ...} or, with branches, "plan": ..., and optionally "checks": [commands] and '
+                          '"agents": [two of deepseek, kimi, claude]')
     run.add_argument("--run-dir")
     run.set_defaults(func=cmd_run)
     resume = sub.add_parser("resume", help="a run that stopped before its result, from the step it was in")

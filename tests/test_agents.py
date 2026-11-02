@@ -1,5 +1,6 @@
 """Agent adapters and the event log."""
 
+import json
 import os
 import pathlib
 import shutil
@@ -154,3 +155,60 @@ class KimiBlockingTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudeAgentTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="cav-claude-"))
+        (self.tmp / "claude.exe").write_text("", encoding="utf-8")
+        (self.tmp / "SKILL.md").write_text("---\nname: ponytail\n---\n# Ponytail\nLazy rules.\n", encoding="utf-8")
+        env = {"CAV_CLAUDE_CLI": str(self.tmp / "claude.exe"), "CAV_PONYTAIL_SKILL": str(self.tmp / "SKILL.md")}
+        with mock.patch.dict(os.environ, env):
+            spec = agent_mod.AgentSpec("claude", "claude", "opus", "high")
+            self.agent = agent_mod.build(spec, self.tmp / "claude.log")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_runs_unattended_on_the_model_and_effort_under_ponytail(self):
+        cmd = self.agent._command("TASK do it")
+        self.assertEqual(cmd[-1], "TASK do it")
+        for flag, value in (("--permission-mode", "bypassPermissions"), ("--model", "opus"), ("--effort", "high"),
+                            ("--output-format", "stream-json")):
+            self.assertEqual(cmd[cmd.index(flag) + 1], value)
+        system = cmd[cmd.index("--append-system-prompt") + 1]
+        self.assertIn("never stop to ask", system)
+        self.assertIn("Lazy rules.", system)
+        self.assertIn("level ultra", system)
+        self.assertNotIn("name: ponytail", system, "the skill's front matter is not part of the rules")
+        self.assertNotIn("--resume", cmd)
+        self.agent.session_id = "s-1"
+        self.assertEqual(self.agent._command("next")[-3:], ["--resume", "s-1", "next"], "one session per round")
+
+    def test_stream_is_read_into_progress_and_the_answer(self):
+        seen = []
+        self.agent.emit = lambda type_, name, data: seen.append(type_)
+        for event in ({"type": "system", "subtype": "init", "session_id": "s-9", "model": "claude-opus-5-5"},
+                      {"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "t1", "name": "Write",
+                                                                     "input": {"file_path": "a.txt"}}]}},
+                      {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "t1",
+                                                                "content": "written"}]}},
+                      {"type": "assistant", "message": {"content": [{"type": "text", "text": "DONE"}]}},
+                      {"type": "result", "subtype": "success", "is_error": False, "result": "DONE"}):
+            self.agent._consume(json.dumps(event))
+        self.assertEqual(self.agent.session_id, "s-9")
+        self.assertEqual(self.agent.state.text, "DONE")
+        self.assertIsNone(self.agent.state.error)
+        self.assertEqual(seen, ["agent.model", "agent.tool.start", "agent.tool.end", "agent.text"])
+
+    def test_a_usage_limit_fails_the_answer_with_its_reason(self):
+        self.agent._consume(json.dumps({"type": "result", "subtype": "error_during_execution", "is_error": True,
+                                        "result": "usage limit reached"}))
+        self.assertIn("usage limit reached", self.agent.state.error)
+
+    def test_a_run_picks_two_different_known_agents(self):
+        self.assertEqual(list(agent_mod.models_for(None)), ["deepseek", "kimi"])
+        self.assertEqual(list(agent_mod.models_for(["claude", "kimi"])), ["claude", "kimi"])
+        for bad in (["claude", "claude"], ["claude"], ["gpt", "kimi"]):
+            with self.assertRaises(ValueError):
+                agent_mod.models_for(bad)

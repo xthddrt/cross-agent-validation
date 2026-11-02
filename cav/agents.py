@@ -1,4 +1,4 @@
-"""Agent adapters: drive OpenCode and Kimi Code headlessly and report progress."""
+"""Agent adapters: drive OpenCode, Kimi Code and Claude Code headlessly and report progress."""
 
 import hashlib
 import json
@@ -17,15 +17,32 @@ from .gitops import NO_WINDOW
 
 GIT_DIR = r"C:\Program Files\Git\cmd"
 KIMI_POLL_SECONDS = 3
-# Both agents always run under the ponytail ruleset at this level. OpenCode reads it from the
-# environment; Kimi keeps no level, so each Kimi session activates the skill with it.
+# Every agent always runs under the ponytail ruleset at this level. OpenCode reads it from the
+# environment; Kimi keeps no level, so each Kimi session activates the skill with it; Claude gets
+# the skill's rules as an extra system prompt (its plugin's hooks need Node).
 PONYTAIL_LEVEL = "ultra"
 PONYTAIL_SKILL = "ponytail:ponytail"
-# agent name -> (kind, model)
-DEFAULT_MODELS = {
+# agent name -> (kind, model); a run uses two of them, the first two by default
+AGENTS = {
     "deepseek": ("opencode", "deepseek/deepseek-flash#high"),
     "kimi": ("kimi", "kimi-code/k3.1-pro"),
+    "claude": ("claude", "opus"),
 }
+DEFAULT_MODELS = {name: AGENTS[name] for name in ("deepseek", "kimi")}
+# Claude Code loads the user's own CLAUDE.md, which may tell it to ask first; nobody answers in a run
+NOBODY_ANSWERS = ("Nobody answers questions during this session, whatever other instructions say: never stop to "
+                  "ask; decide for yourself and finish the task.")
+
+
+def models_for(names):
+    """The two agents a run uses, by name; none named means the defaults."""
+    if not names:
+        return DEFAULT_MODELS
+    names = list(names)
+    unknown = [name for name in names if name not in AGENTS]
+    if unknown or len(names) != 2 or names[0] == names[1]:
+        raise ValueError(f"a run needs two different agents of {', '.join(AGENTS)}")
+    return {name: AGENTS[name] for name in names}
 
 
 @dataclass
@@ -515,9 +532,140 @@ class KimiAgent(Agent):
         return text
 
 
+def _claude_cli():
+    explicit = os.environ.get("CAV_CLAUDE_CLI")
+    for candidate in (explicit, shutil.which("claude"), str(pathlib.Path.home() / ".local" / "bin" / "claude.exe")):
+        if candidate and pathlib.Path(candidate).exists():
+            return str(candidate)
+    raise RuntimeError("Claude Code CLI not found; set CAV_CLAUDE_CLI")
+
+
+def _ponytail_rules():
+    """The ponytail skill's rules, from the copy installed for Kimi unless CAV_PONYTAIL_SKILL names one."""
+    path = pathlib.Path(os.environ.get("CAV_PONYTAIL_SKILL") or
+                        _kimi_home() / "plugins" / "managed" / "ponytail" / "skills" / "ponytail" / "SKILL.md")
+    if not path.exists():
+        raise RuntimeError(f"ponytail's SKILL.md not found at {path}; CAV runs every agent under ponytail "
+                           "(set CAV_PONYTAIL_SKILL to its SKILL.md)")
+    text = path.read_text(encoding="utf-8")
+    body = text.split("---", 2)[2] if text.startswith("---") else text  # without the front matter
+    return f"{body.strip()}\n\nPonytail is active at level {PONYTAIL_LEVEL}."
+
+
+class ClaudeAgent(Agent):
+    kind = "claude"
+
+    def __init__(self, spec, log_path, title_prefix="cav", emit=None):
+        super().__init__(spec, log_path, emit)
+        self.cli = _claude_cli()
+        self.session_id = None
+        self.title_prefix = title_prefix
+        self._proc = None
+        self._system = f"{NOBODY_ANSWERS}\n\n{_ponytail_rules()}"
+
+    def abort(self):
+        super().abort()
+        if self._proc and self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+
+    def _command(self, prompt):
+        # bypassPermissions: no tool call may wait on an approval nobody gives (Kimi runs in yolo)
+        cmd = [self.cli, "-p", "--output-format", "stream-json", "--verbose",
+               "--permission-mode", "bypassPermissions", "--append-system-prompt", self._system,
+               "--name", f"{self.title_prefix} {self.name}"]
+        if self.spec.model:
+            cmd += ["--model", self.spec.model]
+        if self.spec.thinking:
+            cmd += ["--effort", self.spec.thinking]
+        if self.session_id:
+            cmd += ["--resume", self.session_id]
+        return cmd + [prompt]
+
+    def run(self, prompt, cwd):
+        cmd = self._command(prompt)
+        env = os.environ.copy()
+        if GIT_DIR.lower() not in env.get("PATH", "").lower():
+            env["PATH"] = env.get("PATH", "") + os.pathsep + GIT_DIR
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
+        with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
+            self.state.touch("launched")
+            self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                                          env=env, creationflags=NO_WINDOW)
+            for line in self._proc.stdout:
+                log.write(line)
+                log.flush()
+                if self._abort.is_set():
+                    self._proc.kill()
+                    break
+                self._consume(line)
+            self._proc.wait()
+        if self.state.error is None:
+            if self._abort.is_set():
+                self.state.error = "aborted"
+            elif self._proc.returncode != 0:
+                self.state.error = f"claude exit {self._proc.returncode}"
+        self.state.finished = True
+        self.state.touch("finished" if not self.state.error else "failed")
+        self._event("agent.done", {"ok": self.state.error is None, "reason": self.state.error or "completed"})
+        return {"ok": self.state.error is None, "text": self.state.text,
+                "reason": self.state.error or "completed", "session": self.session_id}
+
+    def _consume(self, line):
+        line = line.strip()
+        if not line.startswith("{"):
+            return
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return
+        if event.get("session_id"):
+            self.session_id = event["session_id"]
+            self.state.session = self.session_id
+        kind = event.get("type")
+        content = (event.get("message") or {}).get("content")
+        if kind == "system" and event.get("subtype") == "init":
+            self._event("agent.model", {"model": event.get("model")})
+            self.state.touch("started")
+        elif kind == "assistant" and isinstance(content, list):
+            self.state.touch("step", self.state.messages + 1)
+            for part in content:
+                if part.get("type") == "text" and part.get("text"):
+                    self.state.text = part["text"]
+                    self.state.touch("writing")
+                    self._event("agent.text", {"text": part["text"]})
+                elif part.get("type") == "tool_use":
+                    self.state.touch(f"tool:{part.get('name', '?')}")
+                    self._event("agent.tool.start", {"tool": part.get("name"), "call": part.get("id"),
+                                                     "input": part.get("input")})
+        elif kind == "user" and isinstance(content, list):
+            for part in content:
+                if part.get("type") == "tool_result":
+                    output = part.get("content")
+                    if not isinstance(output, str):
+                        output = json.dumps(output)
+                    self._event("agent.tool.end", {"tool": None, "call": part.get("tool_use_id"),
+                                                   "output_tail": output[-4000:]})
+            self.state.touch()
+        elif kind == "result":
+            if event.get("is_error") or event.get("subtype") != "success":
+                # a usage limit or an API error ends the turn here; say which
+                self.state.error = f"claude {event.get('subtype')}: {str(event.get('result') or '')[:300]}"
+            elif event.get("result"):
+                self.state.text = event["result"]
+        else:
+            self.state.touch()
+
+
 def build(spec, log_path, title_prefix="cav", emit=None):
     if spec.kind == "opencode":
         return OpenCodeAgent(spec, log_path, title_prefix, emit)
     if spec.kind == "kimi":
         return KimiAgent(spec, log_path, title_prefix, emit)
+    if spec.kind == "claude":
+        return ClaudeAgent(spec, log_path, title_prefix, emit)
     raise ValueError(f"unknown agent kind {spec.kind}")

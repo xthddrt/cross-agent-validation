@@ -14,6 +14,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import events as events_mod
+from .agents import models_for
 from .gitops import NO_WINDOW, resolve_ref, resolve_repo
 
 WEB = pathlib.Path(__file__).resolve().parent / "web"
@@ -138,9 +139,10 @@ class Home:
                         "running": phase not in ENDED, "updated": max(stamps)})
         return sorted(out, key=lambda item: item["updated"], reverse=True)
 
-    def start(self, repos, text, checks=()):
+    def start(self, repos, text, checks=(), agents=None):
         """Start a run as its own process, so it outlives this server. `repos`: [{"repo", "branches":
-        [set 1, set 2]}]; a blank branch is that repo's main."""
+        [set 1, set 2]}]; a blank branch is that repo's main. `agents`: two names; none means the defaults."""
+        agents = list(models_for([name for name in agents or () if name]))
         repos = [{"repo": str(item.get("repo") or "").strip().strip('"'),
                   "branches": [str(ref or "").strip() for ref in (list(item.get("branches") or []) + ["", ""])[:2]]}
                  for item in repos or () if str(item.get("repo") or "").strip()]
@@ -168,7 +170,7 @@ class Home:
         (run_dir / "input.md").write_text(text + "\n", encoding="utf-8")
         checks = [line.strip() for line in checks or () if str(line).strip()]
         (run_dir / "spec.json").write_text(json.dumps({"repos": repos, "plan" if branched else "task": text,
-                                                       "checks": checks}, indent=2),
+                                                       "checks": checks, "agents": agents}, indent=2),
                                            encoding="utf-8")
         self.launch(run_dir, ["run", "--spec", str(run_dir / "spec.json")], ", ".join(item["repo"] for item in repos))
         return run_id
@@ -256,7 +258,7 @@ class Home:
         body = json.loads(raw or b"{}")
         try:
             if parts == ["api", "start"]:
-                run_id = self.start(body.get("repos"), body.get("text"), body.get("checks") or ())
+                run_id = self.start(body.get("repos"), body.get("text"), body.get("checks") or (), body.get("agents"))
                 return handler.send(200, json.dumps({"id": run_id, "url": f"/{self.token}/run/{run_id}/"}))
             if parts == ["api", "stop"]:
                 self.stop(str(body.get("id") or ""))

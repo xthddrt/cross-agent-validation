@@ -57,7 +57,8 @@
 <div class="wrap">
   <header>
     <h1>Cross-agent validation</h1>
-    <p>DeepSeek (OpenCode) and Kimi build to a plan, then review both builds until one has no blocker both agree on.</p>
+    <p>Two agents (DeepSeek and Kimi unless you pick others) build to a plan, then review both builds until one has no
+      blocker both agree on.</p>
   </header>
 
   <section class="card">
@@ -81,6 +82,12 @@
                   placeholder="cd kernel-filter &amp;&amp; build.cmd &amp;&amp; build\Release\tool\kfilterctl.exe self-test"></textarea>
         <div class="hint">CAV runs these on every candidate, in a folder holding one folder per repository. A candidate whose
           checks fail is never the result, and every fix must come with a test.</div>
+      </div>
+      <div class="field">
+        <label>Agents</label>
+        <select id="agent1"><option>deepseek</option><option>kimi</option><option>claude</option></select>
+        <select id="agent2"><option>deepseek</option><option selected>kimi</option><option>claude</option></select>
+        <div class="hint">Two different agents. claude is Claude Code on your subscription: Opus at high effort.</div>
       </div>
       <div class="actions">
         <button id="go" type="submit">Start run</button>
@@ -160,7 +167,8 @@ $('form').addEventListener('submit', async (ev) => {
   try {
     const repos = [...$('repos').children].map(row => ({repo:row.querySelector('.path').value,
       branches:[row.querySelector('.b1').value, row.querySelector('.b2').value]}));
-    const out = await post('start', {repos, text:$('text').value, checks:$('checks').value.split('\n')});
+    const out = await post('start', {repos, text:$('text').value, checks:$('checks').value.split('\n'),
+                                     agents:[$('agent1').value, $('agent2').value]});
     location.href = out.url;
   } catch (e) {
     $('error').textContent = e.message;
