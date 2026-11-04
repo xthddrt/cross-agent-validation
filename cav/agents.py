@@ -267,7 +267,8 @@ class OpenCodeAgent(CliAgent):
                                            "output_tail": (detail.get("output") or "")[-4000:]})
             self.state.touch(f"tool:{tool}")
         elif kind == "step-start":
-            self.state.touch("step", self.state.messages + 1)
+            # OpenCode reports a command only once it ends, so a long one shows here as a quiet step
+            self.state.touch("thinking or running a command (OpenCode shows it when it ends)", self.state.messages + 1)
             self._event("agent.step", {"messages": self.state.messages})
         else:
             self.state.touch()

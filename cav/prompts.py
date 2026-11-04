@@ -14,10 +14,13 @@ CHECKLIST = ("First check each requirement in the agreed plans (numbered items, 
              "departure from the plan.")
 TESTED = " Tests only where the task asks for them."
 READ_ONLY = " Change no code: only write the plan; the build comes later."
+# an agent waiting on a command that never ends looks idle for as long as the command's time limit
+COMMANDS = (" Give every test, VM or program you start a time limit of at most 5 minutes, and run anything that "
+            "waits to be stopped in the background and stop it yourself.")
 
 
 def plan(task, code, path):
-    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.{TESTED}{READ_ONLY}\n"
+    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.{TESTED}{READ_ONLY}{COMMANDS}\n"
 
 
 def review(plans, candidates, reply, agreed=None, audit=()):
@@ -40,7 +43,7 @@ def review(plans, candidates, reply, agreed=None, audit=()):
                         f"blocker in it." if only else ""))
     where = only or "each candidate"
     lines += ["Each candidate has one folder per repository. Read the plans and all the code in "
-              + (only if only else "both") + ". " + BLOCKER + " " + CHECKLIST,
+              + (only if only else "both") + ". " + BLOCKER + " " + CHECKLIST + COMMANDS,
               (f"List every blocker in {where}: each agreed one still there, by its #number, and any new one. "
                if agreed else f"List every blocker in {where}. ")
               + ("" if only else 'One in both is one entry with "candidate": "both". ') + f"Write to {reply}:",
@@ -71,7 +74,7 @@ def fix_plan(blockers, plans, path):
             + "".join(f"- {plan}\n" for plan in plans) +
             f"\nWrite a plan to {path} to fix every agreed blocker in one candidate, keeping to the agreed plans except "
             f"where a blocker needs otherwise {PLAN}.{TESTED} Choose as the base the candidate that needs the least work "
-            f"to be right, and take what the other candidate does better.{BASE}{READ_ONLY}\n")
+            f"to be right, and take what the other candidate does better.{BASE}{READ_ONLY}{COMMANDS}\n")
 
 
 def vote(plans, reply, fixes=False):
@@ -100,7 +103,7 @@ def build(plan_path, work, note, base=None, checks=()):
     """`checks`: commands to run in `work` before finishing."""
     return (f"Implement the agreed plan, {plan_path}, in {work}" + (f", a copy of {base}," if base else ",")
             + " with the tests it names." + (f" Run the checks there: {'; '.join(checks)}." if checks else "")
-            + f"\nWrite a short note of what you changed to {note}.\n")
+            + COMMANDS + f"\nWrite a short note of what you changed to {note}.\n")
 
 
 def retry_note(problem):
