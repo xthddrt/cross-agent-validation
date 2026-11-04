@@ -486,8 +486,14 @@ function details(h) {
     lines.push(done ? 'agreed blockers: ' + Object.entries(h.agreed || {}).map(([l, list]) => `${esc(l)} ${list.length}`).join(' · ') +
         (dropped ? ` · ${plural(dropped, 'blocker')} voted down` : '')
       : `each is voting on the other's blockers: ${plural(raised.length, 'blocker')} raised`);
-    if (done) lines.push(/^no blocker/.test(h.verdict) ? 'a candidate is clear: the run ends here'
-      : 'both candidates are blocked: a fix plan comes next');
+    // after an audit, judge only the candidates it audited (the ones the review before it found clear):
+    // older runs' verdicts also named the skipped, already-blocked candidate as clear
+    const audited = (hist(h.round - 1) || {}).step === 'audit';
+    const auditedLabels = ((hist(h.round - 2) || {}).verdict || '').replace(/^no blocker in /, '').split(' and ');
+    const clear = audited ? auditedLabels.some(l => !((h.agreed || {})[l] || []).length) : /^no blocker/.test(h.verdict);
+    if (done) lines.push(clear
+      ? (audited ? 'the audit found it clear too: the run ends here' : 'a candidate is clear: a fresh audit of it comes next')
+      : (audited ? 'the audit found blockers: a fix plan comes next' : 'both candidates are blocked: a fix plan comes next'));
     if (h.agreed) more.push(fold('Agreed blockers', Object.entries(h.agreed).map(([l, list]) =>
       `<div>in ${esc(l)}: ${agreedList(list)}</div>`).join('')));
     if ((h.disputed || []).length) {
