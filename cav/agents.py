@@ -28,11 +28,18 @@ KIMI_POLL_SECONDS = 3
 # ponytail's plugin for the session, whose hooks read the level from the environment too.
 PONYTAIL_LEVEL = "ultra"
 PONYTAIL_SKILL = "ponytail:ponytail"
-# agent name -> (kind, model); a run uses two of them, the first two by default
+# agent name -> (kind, model); a run uses two of them, the first two by default. DeepSeek's effort is the
+# model's #variant; Kimi and Claude get theirs from the flow (high). Exact ids, not aliases that move.
 AGENTS = {
     "deepseek": ("opencode", "deepseek/deepseek-flash#high"),
     "kimi": ("kimi", "kimi-code/k3.1-pro"),
-    "claude": ("claude", "opus"),
+    "claude": ("claude", "claude-opus-5-5"),
+}
+# what the dashboard shows for each agent: the model and effort a run asks for
+SHOWN = {
+    "deepseek": "DeepSeek V4.1 Flash 1017, high effort",
+    "kimi": "Kimi k3.1-pro, high thinking",
+    "claude": "Claude Opus 5.5, high effort",
 }
 DEFAULT_MODELS = {name: AGENTS[name] for name in ("deepseek", "kimi")}
 # Claude Code loads the user's own CLAUDE.md, which may tell it to ask first; nobody answers in a run
@@ -150,7 +157,7 @@ class CliAgent(Agent):
     def run(self, prompt, cwd):
         cmd = self._command(prompt)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._event("agent.launch", {"model": self.spec.model, "cli": self.cli})
+        self._event("agent.launch", {"model": self.spec.model, "shown": SHOWN.get(self.name), "cli": self.cli})
         with open(self.log_path, "a", encoding="utf-8", errors="replace") as log:
             self.state.touch("launched")
             self._proc = subprocess.Popen(cmd, cwd=str(cwd), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -475,7 +482,7 @@ class KimiAgent(Agent):
             self._activate_ponytail()
             self._part_fingerprints = {}
         self._since = max((message.get("created_at") or "" for message in self._messages()), default="")
-        self._event("agent.launch", {"model": self._model(), "session": self.session_id})
+        self._event("agent.launch", {"model": self._model(), "shown": SHOWN.get(self.name), "session": self.session_id})
         self._call("POST", f"/api/v1/sessions/{self.session_id}/prompts",
                    {"content": [{"type": "text", "text": prompt}]})
         self.state.touch("running")

@@ -85,9 +85,9 @@
       </div>
       <div class="field">
         <label>Agents</label>
-        <select id="agent1"><option>deepseek</option><option>kimi</option><option>claude</option></select>
-        <select id="agent2"><option>deepseek</option><option selected>kimi</option><option>claude</option></select>
-        <div class="hint">Two different agents. claude is Claude Code on your subscription: Opus at high effort.</div>
+        <select id="agent1"><option value="deepseek">deepseek: DeepSeek V4.1 Flash 1017, high effort</option><option value="kimi">kimi: Kimi k3.1-pro, high thinking</option><option value="claude">claude: Claude Opus 5.5, high effort</option></select>
+        <select id="agent2"><option value="deepseek">deepseek: DeepSeek V4.1 Flash 1017, high effort</option><option value="kimi" selected>kimi: Kimi k3.1-pro, high thinking</option><option value="claude">claude: Claude Opus 5.5, high effort</option></select>
+        <div class="hint">Two different agents. claude is Claude Code on your subscription.</div>
       </div>
       <div class="actions">
         <button id="go" type="submit">Start run</button>
