@@ -162,6 +162,25 @@ class FlowTest(unittest.TestCase):
         self.assertIn("misses something", revise)
 
 
+    def test_code_a_planner_changes_is_restored_before_the_vote(self):
+        class Eager(Fake):  # writes its plan, then starts coding anyway
+            def run(self, prompt, cwd):
+                if prompt.startswith("TASK"):
+                    self.code = first_repo(re.search(r"^CODE\n- (\S+)$", prompt, re.M).group(1))
+                    (self.code / "sneaky.txt").write_text("built early", encoding="utf-8")
+                    (self.code / "base.txt").write_text("changed early", encoding="utf-8")
+                elif prompt.startswith("PLANS"):
+                    self.saw = {path.name: path.read_text(encoding="utf-8") for path in self.code.iterdir()}
+                return super().run(prompt, cwd)
+
+        fakes = {"deepseek": Fake("deepseek"), "kimi": Eager("kimi")}
+        original = (self.work / "base.txt").read_text(encoding="utf-8")
+        code, flow = self.run_flow(fakes, task="Add feature.txt.")
+        self.assertEqual(code, 0, flow.state)
+        self.assertIn("Change no code", fakes["kimi"].prompts[0])
+        self.assertNotIn("sneaky.txt", fakes["kimi"].saw, "the vote reads the code as it was")
+        self.assertEqual(fakes["kimi"].saw["base.txt"], original)
+
     def test_a_blocker_voted_down_is_dropped(self):
         self.branches()
         fakes = {"deepseek": Fake("deepseek", blockers=lambda folder: 1), "kimi": Fake("kimi", agree=lambda line: False)}

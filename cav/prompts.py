@@ -13,10 +13,11 @@ CHECKLIST = ("First check each requirement in the agreed plans (numbered items, 
              "items) in each candidate, citing file:line; one that is unmet, or present but never takes effect, is a "
              "departure from the plan.")
 TESTED = " Tests only where the task asks for them."
+READ_ONLY = " Change no code: only write the plan; the build comes later."
 
 
 def plan(task, code, path):
-    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.{TESTED}\n"
+    return f"TASK\n{task}\n\nCODE\n- {code}\n\n{REPOS} Read the code the task touches. Write a plan to {path} {PLAN}.{TESTED}{READ_ONLY}\n"
 
 
 def review(plans, candidates, reply, agreed=None, audit=()):
@@ -70,7 +71,7 @@ def fix_plan(blockers, plans, path):
             + "".join(f"- {plan}\n" for plan in plans) +
             f"\nWrite a plan to {path} to fix every agreed blocker in one candidate, keeping to the agreed plans except "
             f"where a blocker needs otherwise {PLAN}.{TESTED} Choose as the base the candidate that needs the least work "
-            f"to be right, and take what the other candidate does better.{BASE}\n")
+            f"to be right, and take what the other candidate does better.{BASE}{READ_ONLY}\n")
 
 
 def vote(plans, reply, fixes=False):
@@ -91,7 +92,7 @@ def revise(objections, path, fixes=False):
              "a blocker needs otherwise, builds on the candidate that needs the least work to be right, and takes what "
              "the other candidate does better." + TESTED + BASE) if fixes else ""
     lines.append(f"Write one plan from those two that answers these objections and both voters can approve, to {path} "
-                 f"{PLAN}.{rules}")
+                 f"{PLAN}.{rules}{READ_ONLY}")
     return "\n".join(lines) + "\n"
 
 

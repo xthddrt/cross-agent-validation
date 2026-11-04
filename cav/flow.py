@@ -258,7 +258,8 @@ class Flow:
                 if clear:
                     return self.finish(candidates, random.choice(clear))
             both = self.agreed_file("both", [item for label in LABELS for item in found[label]])
-            fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path)), fixes=True)
+            restore = lambda: [self.export(item["commits"], pathlib.Path(item["folder"])) for item in candidates.values()]
+            fix = self.agree(self.write_plans(lambda path: prompts.fix_plan(both, plans, path), restore), restore, fixes=True)
             plans.append(fix)
             label = plan_base(fix.read_text(encoding="utf-8"))
             agreed = self.agreed_file(label, found[label])
@@ -307,8 +308,9 @@ class Flow:
         else:
             self.new_round()
             code = self.export(mains, self.blind / "code")
-            paths = self.write_plans(lambda path: prompts.plan(self.task, code, path), base_needed=False)
-            plan_path.write_text(self.agree(paths, fixes=False).read_text(encoding="utf-8"), encoding="utf-8")
+            restore = lambda: self.export(mains, code)
+            paths = self.write_plans(lambda path: prompts.plan(self.task, code, path), restore, base_needed=False)
+            plan_path.write_text(self.agree(paths, restore, fixes=False).read_text(encoding="utf-8"), encoding="utf-8")
             self.checkpoint("first-build", plans=[plan_path])
             candidates = self.build(plan_path, mains)
         # every plan both agents approved, in order: the code follows all of them; no agreed blockers yet
@@ -316,16 +318,19 @@ class Flow:
 
     # ------------------------------------------------------------------- steps
 
-    def write_plans(self, prompt, base_needed=True):
+    def write_plans(self, prompt, restore, base_needed=True):
+        """`restore` copies the code the planners read afresh: a planner that edits it anyway (planning is
+        no build) must not change what the votes and the build start from."""
         paths = {name: self.blind / f"c{self.cycle}-plan-{n}.md" for name, n in self.numbered().items()}
         self.mine(paths)
         entry = self.begin("plan", files={name: self.rel(path) for name, path in paths.items()})
         self.ask({name: prompt(paths[name]) for name in self.names},
                  lambda name: self.plan_problem(paths[name], base_needed))
+        restore()
         self.end(entry, "planned", words={name: words(paths[name].read_text(encoding="utf-8")) for name in self.names})
         return paths
 
-    def agree(self, paths, fixes):
+    def agree(self, paths, restore, fixes):
         """Vote on the two plans until both approve one, revising from the objections between votes."""
         for number in itertools.count(1):
             if number > 1:
@@ -334,6 +339,7 @@ class Flow:
                 entry = self.begin("revise", vote=number, files={name: self.rel(path) for name, path in revised.items()})
                 self.ask({name: prompts.revise(objections, revised[name], fixes) for name in self.names},
                          lambda name: self.plan_problem(revised[name], fixes))
+                restore()
                 self.end(entry, "revised")
                 paths = revised
             order = random.sample(self.names, 2)  # plan 1 and plan 2, at random
