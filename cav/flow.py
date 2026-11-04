@@ -407,6 +407,9 @@ class Flow:
                  lambda name: self.review_problem(replies[name], candidates))
         answers = {name: _json(replies[name]) for name in self.names}
         claims = {name: answers[name]["blockers"] for name in self.names}
+        if len(audit) == 1:  # the other candidate is blocked already: only the audited one's blockers are voted on
+            claims = {name: [dict(item, candidate=audit[0]) for item in items if hits(item, audit[0])]
+                      for name, items in claims.items()}
         entry["requirements"] = {name: answers[name]["requirements"] for name in self.names}
         for name in self.names:
             for item in claims[name]:
