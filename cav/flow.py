@@ -456,7 +456,7 @@ class Flow:
                 found[label].append({"candidate": label, "file": "(checks)", "problem": candidates[label]["checks"],
                                      "by": "checks", "agreed": True, "id": self.next_id})
                 self.next_id += 1
-        clear = [label for label in LABELS if not found[label]]
+        clear = [label for label in (audit or LABELS) if not found[label]]  # an audit speaks only for what it audited
         disputed = [item for name in self.names for item in claims[name] if item.get("disputed")]
         self.end(entry, f"no blocker in {' and '.join(clear)}" if clear else "blocked",
                  agreed={label: [blocker_line(item) for item in found[label]] for label in LABELS},

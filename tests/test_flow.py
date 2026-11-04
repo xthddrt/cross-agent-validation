@@ -208,6 +208,20 @@ class FlowTest(unittest.TestCase):
                          "votes only on the review's blockers")
         self.assertTrue(git("show", f"{flow.state['final']['branch']}:feat-a.txt", cwd=self.work))
 
+    def test_an_audit_that_blocks_its_candidate_says_blocked_not_clear_for_the_other(self):
+        self.branches()
+        on_b = lambda folder: int((folder / "feat-b.txt").exists())
+        on_a = lambda folders: next(label for label, folder in folders.items() if (folder / "feat-a.txt").exists())
+        unbuilt = lambda folder: int(not (folder / "feature.txt").exists())
+        fakes = {name: Fake(name, blockers=on_b, audit=unbuilt, base=on_a) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, plan="Add feature.txt.", branches=["feat-a", "feat-b"])
+        self.assertEqual(code, 0, flow.state)
+        steps = self.steps(flow)
+        self.assertEqual([step for step, _ in steps][:5], ["review", "confirm", "audit", "confirm", "plan"])
+        self.assertRegex(steps[1][1], r"^no blocker in [XY]$")
+        self.assertEqual(steps[3][1], "blocked", "the audit speaks only for the candidate it audited")
+        self.assertEqual(steps[-1], ("confirm", "no blocker in X and Y"))
+
     def test_agreed_blockers_get_a_fix_plan_then_a_rebuild_from_its_base(self):
         shas = self.branches()
         on_a = lambda folders: next(label for label, folder in folders.items() if (folder / "feat-a.txt").exists())
