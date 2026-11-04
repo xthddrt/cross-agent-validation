@@ -107,7 +107,8 @@ class KimiBlockingTest(unittest.TestCase):
 
     def test_opencode_session_directory_is_the_worktree(self):
         """OpenCode reads the session directory from PWD; an inherited one points elsewhere."""
-        agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")
+        with mock.patch.object(agent_mod, "_opencode_cli", return_value="opencode"):  # installed or not
+            agent = agent_mod.OpenCodeAgent(agent_mod.AgentSpec("deepseek", "opencode"), "log.txt")
         with mock.patch.dict(os.environ, {"PWD": "C:/somewhere/else"}):
             self.assertEqual(agent._env("C:/run/wt/r1/deepseek")["PWD"], "C:/run/wt/r1/deepseek")
 

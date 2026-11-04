@@ -7,6 +7,7 @@ import pathlib
 import sys
 import time
 
+from . import setup as setup_mod
 from .flow import Flow
 from .web import Home, meta_alive, process_start
 
@@ -61,5 +62,9 @@ def main(argv=None):
     serve.add_argument("--port", type=int, default=7700)
     serve.add_argument("--runs", help="the runs folder (default: runs/ in this checkout)")
     serve.set_defaults(func=cmd_serve)
+    setup = sub.add_parser("setup", help="check what a run needs and install ponytail in OpenCode, Kimi Code "
+                                         "and Claude Code, on Windows or Linux")
+    setup.add_argument("only", nargs="*", help="only these steps: git, node, opencode, kimi, claude")
+    setup.set_defaults(func=lambda args: setup_mod.main(args.only))
     args = parser.parse_args(argv)
     return args.func(args)

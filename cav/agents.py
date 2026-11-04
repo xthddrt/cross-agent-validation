@@ -15,8 +15,13 @@ from dataclasses import dataclass, field
 
 from .gitops import NO_WINDOW
 
-GIT_DIR = r"C:\Program Files\Git\cmd"
-NODE_DIR = r"C:\Program Files\nodejs"  # ponytail's Claude hooks run on Node
+WINDOWS = os.name == "nt"
+EXE = ".exe" if WINDOWS else ""
+# Folders an agent gets on PATH even when the app that started CAV did not have them: git, and Node for
+# ponytail's Claude hooks. Windows installers put them in Program Files; on Linux, user installs (Node, the
+# Claude CLI) go to ~/.local/bin, which a desktop session started before that folder existed lacks.
+TOOL_DIRS = ((r"C:\Program Files\Git\cmd", r"C:\Program Files\nodejs") if WINDOWS
+             else (str(pathlib.Path.home() / ".local" / "bin"),))
 KIMI_POLL_SECONDS = 3
 # Every agent always runs under the ponytail ruleset at this level. OpenCode reads it from the
 # environment; Kimi keeps no level, so each Kimi session activates the skill with it; Claude loads
@@ -139,9 +144,7 @@ class CliAgent(Agent):
         env["PONYTAIL_DEFAULT_MODE"] = PONYTAIL_LEVEL
         # OpenCode takes the session directory from PWD, not the process directory.
         env["PWD"] = str(cwd)
-        for folder in (GIT_DIR, NODE_DIR):
-            if folder.lower() not in env.get("PATH", "").lower():
-                env["PATH"] = env.get("PATH", "") + os.pathsep + folder
+        env["PATH"] = with_tool_dirs(env.get("PATH", ""))
         return env
 
     def run(self, prompt, cwd):
@@ -173,21 +176,47 @@ class CliAgent(Agent):
                 "reason": self.state.error or "completed", "session": self.session_id}
 
 
+def with_tool_dirs(path):
+    """PATH with every existing TOOL_DIRS folder it lacks appended."""
+    have = {os.path.normcase(folder) for folder in path.split(os.pathsep) if folder}
+    extra = [folder for folder in TOOL_DIRS if os.path.normcase(folder) not in have and os.path.isdir(folder)]
+    return os.pathsep.join([path, *extra] if path else extra)
+
+
+def config_home():
+    """Where desktop apps keep their own files: %APPDATA% on Windows, ~/.config on Linux."""
+    if WINDOWS:
+        return pathlib.Path(os.environ.get("APPDATA") or pathlib.Path.home() / "AppData" / "Roaming")
+    return pathlib.Path(os.environ.get("XDG_CONFIG_HOME") or pathlib.Path.home() / ".config")
+
+
+def _newest(root, pattern):
+    """Files under root matching pattern, newest first: an app's own downloads, one folder per version."""
+    return [str(path) for path in sorted(pathlib.Path(root).glob(pattern), key=lambda p: p.stat().st_mtime, reverse=True)]
+
+
+def _first(candidates, error):
+    for candidate in candidates:
+        if candidate and pathlib.Path(candidate).is_file():
+            return str(candidate)
+    raise RuntimeError(error)
+
+
 def _opencode_cli():
     # The desktop bundle is preferred over whatever is on PATH: an older opencode CLI
     # sharing the same data directory fails with "Database is not empty and has no session table".
-    explicit = os.environ.get("CAV_OPENCODE_CLI")
-    candidates = [explicit]
-    local = os.environ.get("LOCALAPPDATA")
-    if local:
-        for folder in ("ai.opencode.desktop", "@opencodedesktop"):
-            candidates.append(str(pathlib.Path(local) / "Programs" / folder
-                                  / "resources" / "opencode-cli.exe"))
+    candidates = [os.environ.get("CAV_OPENCODE_CLI")]
+    if WINDOWS:
+        local = os.environ.get("LOCALAPPDATA")
+        if local:
+            candidates += [str(pathlib.Path(local) / "Programs" / folder / "resources" / "opencode-cli.exe")
+                           for folder in ("ai.opencode.desktop", "@opencodedesktop")]
+    else:
+        candidates.append("/opt/OpenCode/resources/opencode-cli")  # the Linux desktop package's bundle
+    # then the newest CLI the desktop app downloaded for itself
+    candidates += _newest(config_home() / "ai.opencode.desktop" / "cli", f"*/opencode-cli{EXE}")
     candidates.append(shutil.which("opencode"))
-    for candidate in candidates:
-        if candidate and pathlib.Path(candidate).exists():
-            return str(candidate)
-    raise RuntimeError("opencode CLI not found; set CAV_OPENCODE_CLI")
+    return _first(candidates, "opencode CLI not found; set CAV_OPENCODE_CLI")
 
 
 class OpenCodeAgent(CliAgent):
@@ -521,11 +550,11 @@ class KimiAgent(Agent):
 
 
 def _claude_cli():
-    explicit = os.environ.get("CAV_CLAUDE_CLI")
-    for candidate in (explicit, shutil.which("claude"), str(pathlib.Path.home() / ".local" / "bin" / "claude.exe")):
-        if candidate and pathlib.Path(candidate).exists():
-            return str(candidate)
-    raise RuntimeError("Claude Code CLI not found; set CAV_CLAUDE_CLI")
+    # the installed CLI, else the newest one the Claude desktop app keeps for its Code tab
+    candidates = [os.environ.get("CAV_CLAUDE_CLI"), shutil.which("claude"),
+                  str(pathlib.Path.home() / ".local" / "bin" / f"claude{EXE}")]
+    candidates += _newest(config_home() / "Claude" / "claude-code", f"*/*/claude{EXE}")
+    return _first(candidates, "Claude Code CLI not found; set CAV_CLAUDE_CLI")
 
 
 def _ponytail_plugin():

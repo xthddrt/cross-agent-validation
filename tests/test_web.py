@@ -68,9 +68,9 @@ class HomeTest(unittest.TestCase):
         with mock.patch("cav.web.alive", return_value=True):
             self.assertEqual([(run["id"], run["phase"]) for run in self.get("api/runs")], [(run_id, "review")])
             self.assertEqual(self.get(f"run/{run_id}/api/state")["input"].strip(), "Do the thing")
-            with mock.patch("cav.web.subprocess.run") as kill:
+            with mock.patch("cav.web.kill_tree") as kill:
                 self.post("stop", {"id": run_id})
-        self.assertIn("4242", kill.call_args[0][0])
+        kill.assert_called_once_with(4242)
         self.assertEqual(json.loads((run_dir / "state.json").read_text(encoding="utf-8"))["phase"], "stopped")
 
 

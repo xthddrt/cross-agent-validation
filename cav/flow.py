@@ -23,7 +23,8 @@ ANSWER_SECONDS = 5400  # one agent answer
 CHECK_SECONDS = 3600  # one check command
 POLL_SECONDS = 2
 BLIND_ROOT = pathlib.Path(os.environ.get("CAV_BLIND_ROOT")
-                          or pathlib.Path(os.environ.get("LOCALAPPDATA") or pathlib.Path.home()) / "cav-blind")
+                          or pathlib.Path(os.environ.get("LOCALAPPDATA") or os.environ.get("XDG_DATA_HOME")
+                                          or pathlib.Path.home() / ".local" / "share") / "cav-blind")
 
 
 def export_tree(repo, sha, dest):
