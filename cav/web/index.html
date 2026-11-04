@@ -682,7 +682,7 @@ function renderAgent(i) {
   const end = a.done ? a.done.ts : (live ? now : a.last);
   const elapsed = a.launch ? (end - a.launch) / 1000 : 0;
   const idle = sa && sa.idle !== undefined && sa.state === 'running' ? sa.idle : null;
-  setHtml(card.row, `<h3>${esc(name)}</h3><span class="model">${esc([a.shown, a.model].filter(Boolean).join(' · '))}</span>` +
+  setHtml(card.row, `<h3>${esc(name)}</h3><span class="model" title="${esc(a.model || '')}">${esc(a.shown || (state.shown || {})[name] || a.model || '')}</span>` +
                     `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`);
   setHtml(card.stats, [
     `<span>elapsed <b>${a.launch ? dur(elapsed) : '–'}</b></span>`,
