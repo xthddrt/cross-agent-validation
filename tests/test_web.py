@@ -1,6 +1,7 @@
 """The dashboard server: one token, starts and stops runs, serves each run's state."""
 
 import json
+import os
 import pathlib
 import shutil
 import subprocess
@@ -12,7 +13,7 @@ import urllib.request
 from unittest import mock
 
 from cav.gitops import git, resolve_ref, resolve_repo
-from cav.web import Home
+from cav.web import Home, alive, process_start
 from tests.test_agents import make_repo
 
 
@@ -92,3 +93,26 @@ class HomeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipIf(os.name == "nt", "zombies are a POSIX thing")
+class AliveTest(unittest.TestCase):
+    def test_a_finished_but_unreaped_run_is_not_live(self):
+        # the dashboard launches runs with Popen and never waits on them, so an ended run is a zombie
+        child = subprocess.Popen(["true"])
+        started = process_start(child.pid)
+        for _ in range(100):  # until it has exited (and is a zombie)
+            if pathlib.Path(f"/proc/{child.pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z":
+                break
+            threading.Event().wait(0.02)
+        self.assertFalse(alive(child.pid, started), "a zombie is not a running run, so it can be resumed")
+        self.assertFalse(pathlib.Path(f"/proc/{child.pid}").exists(), "and checking reaps it")
+        child.returncode = 0  # already reaped; keep Popen's destructor from waiting on it
+
+    def test_a_running_process_is_live(self):
+        child = subprocess.Popen(["sleep", "5"])
+        try:
+            self.assertTrue(alive(child.pid, process_start(child.pid)))
+        finally:
+            child.kill()
+            child.wait()

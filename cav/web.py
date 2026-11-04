@@ -43,7 +43,14 @@ def process_start(pid):
     if os.name != "nt":
         try:
             stat = pathlib.Path(f"/proc/{int(pid)}/stat").read_text(encoding="utf-8")
-            ticks = int(stat.rsplit(")", 1)[1].split()[19])
+            fields = stat.rsplit(")", 1)[1].split()
+            if fields[0] in ("Z", "X"):  # exited; a run this server launched stays a zombie until reaped
+                try:
+                    os.waitpid(int(pid), os.WNOHANG)
+                except ChildProcessError:  # another process's child: its parent reaps it
+                    pass
+                return None
+            ticks = int(fields[19])
             with open("/proc/stat", encoding="utf-8") as handle:
                 boot = next(float(line.split()[1]) for line in handle if line.startswith("btime "))
             return boot + ticks / os.sysconf("SC_CLK_TCK")
