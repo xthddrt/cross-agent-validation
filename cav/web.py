@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import events as events_mod
-from .agents import models_for
+from .agents import SHOWN, models_for
 from .gitops import GITHUB, kill_tree, resolve_ref, resolve_repo
 
 WEB = pathlib.Path(__file__).resolve().parent / "web"
@@ -258,7 +258,7 @@ class Home:
         if rest == ["api", "state"]:
             state = read_json(run_dir / "state.json") or {"phase": "starting"}
             live = meta_alive(run_dir / "run.json")
-            return handler.send(200, json.dumps(dict(state, live=live, input=input_text(run_dir))))
+            return handler.send(200, json.dumps(dict(state, live=live, input=input_text(run_dir), shown=SHOWN)))
         if rest == ["api", "prompt"]:
             record = run_dir / "rounds" / f"r{int(query.get('round', 0))}" / f"{query.get('agent', '')}-context.md"
             ok = RUN_ID.match(query.get("agent", "")) and record.is_file()

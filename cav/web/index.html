@@ -215,7 +215,7 @@ let state = {}, names = [], selected = null, follow = true;
 const rounds = {};
 const R = (n) => rounds[n] ||= {n, agents:{}};
 function A(r, name) {
-  return r.agents[name] ||= {name, model:null, launch:null, last:null, done:null,
+  return r.agents[name] ||= {name, model:null, shown:null, launch:null, last:null, done:null,
                              steps:0, tools:0, texts:0, feed:[], pending:[], early:[], unpaired:0};
 }
 function toolTarget(input) {
@@ -328,7 +328,7 @@ function apply(e) {
     case 'agent.launch':
       if (a.launch) a.feed.push({k:'div', text:'retry'});
       a.pending = []; a.early = []; a.unpaired = 0;
-      a.launch = ts; a.done = null; a.model = d.model || a.model;
+      a.launch = ts; a.done = null; a.model = d.model || a.model; a.shown = d.shown || a.shown;
       break;
     case 'agent.text':
     case 'agent.thinking': {
@@ -682,7 +682,7 @@ function renderAgent(i) {
   const end = a.done ? a.done.ts : (live ? now : a.last);
   const elapsed = a.launch ? (end - a.launch) / 1000 : 0;
   const idle = sa && sa.idle !== undefined && sa.state === 'running' ? sa.idle : null;
-  setHtml(card.row, `<h3>${esc(name)}</h3><span class="model">${esc(a.model || '')}</span>` +
+  setHtml(card.row, `<h3>${esc(name)}</h3><span class="model" title="${esc(a.model || '')}">${esc(a.shown || (state.shown || {})[name] || a.model || '')}</span>` +
                     `<span class="badge ${badge[0]}">${esc(badge[1])}</span>`);
   setHtml(card.stats, [
     `<span>elapsed <b>${a.launch ? dur(elapsed) : '–'}</b></span>`,

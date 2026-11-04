@@ -29,17 +29,23 @@ def review(plans, candidates, reply, agreed=None, audit=()):
     if agreed:
         lines += ["", "AGREED BLOCKERS (last round's, in the base both candidates were built from)", f"- {agreed}"]
     lines += [""]
+    # one clear candidate: the other already has agreed blockers, so the audit reads it only to compare
+    only = audit[0] if len(audit) == 1 else None
     if audit:
-        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}. Review again from scratch: "
-                     "every file in every repository, not only what the plans changed.")
-    lines += ["Each candidate has one folder per repository. Read the plans and all the code in both. "
-              + BLOCKER + " " + CHECKLIST,
-              ("List every blocker in each candidate: each agreed one still there, by its #number, and any new one. "
-               if agreed else "List every blocker in each candidate. ")
-              + f'One in both is one entry with "candidate": "both". Write to {reply}:',
+        lines.append(f"AUDIT. The last review found no blocker in {' and '.join(audit)}. Review "
+                     + (f"{only} " if only else "") + "again from scratch: every file in every repository, not only "
+                     "what the plans changed."
+                     + (f" The other candidate already has agreed blockers: read it only to compare, and list no "
+                        f"blocker in it." if only else ""))
+    where = only or "each candidate"
+    lines += ["Each candidate has one folder per repository. Read the plans and all the code in "
+              + (only if only else "both") + ". " + BLOCKER + " " + CHECKLIST,
+              (f"List every blocker in {where}: each agreed one still there, by its #number, and any new one. "
+               if agreed else f"List every blocker in {where}. ")
+              + ("" if only else 'One in both is one entry with "candidate": "both". ') + f"Write to {reply}:",
               '{"requirements": [{"requirement": "...", "met": {"X": true|false, "Y": true|false}, "evidence": "file:line ..."}], '
-              '"blockers": [{"candidate": "X|Y|both", "id": "#n or none", "file": "<path in the candidate>", "line": 1, '
-              '"problem": "...", "fix": "..."}]}']
+              f'"blockers": [{{"candidate": "{only or "X|Y|both"}", "id": "#n or none", "file": "<path in the candidate>", '
+              '"line": 1, "problem": "...", "fix": "..."}]}']
     return "\n".join(lines) + "\n"
 
 

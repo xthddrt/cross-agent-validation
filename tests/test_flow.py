@@ -173,6 +173,22 @@ class FlowTest(unittest.TestCase):
         self.assertNotIn("disputed", flow.state, "withdrawn, it is gone")
 
 
+    def test_an_audit_of_one_clear_candidate_votes_only_on_that_one(self):
+        self.branches()
+        on_b = lambda folder: int((folder / "feat-b.txt").exists())
+        fakes = {name: Fake(name, blockers=on_b, audit=on_b) for name in ("deepseek", "kimi")}
+        code, flow = self.run_flow(fakes, plan="Add a note.", branches=["feat-a", "feat-b"])
+        self.assertEqual(code, 0, flow.state)
+        self.assertEqual([step for step, _ in self.steps(flow)], ["review", "confirm", "audit", "confirm"])
+        clear = flow.state["history"][1]["verdict"][-1]
+        audit = [p for p in fakes["kimi"].prompts if "\nAUDIT." in p][0]
+        self.assertIn(f"Review {clear} again from scratch", audit)
+        self.assertIn("read it only to compare", audit)
+        self.assertEqual(flow.state["history"][2]["blockers"], [], "the blocked candidate's audit blockers are dropped")
+        self.assertEqual(sum(p.startswith("BLOCKERS") for fake in fakes.values() for p in fake.prompts), 2,
+                         "votes only on the review's blockers")
+        self.assertTrue(git("show", f"{flow.state['final']['branch']}:feat-a.txt", cwd=self.work))
+
     def test_agreed_blockers_get_a_fix_plan_then_a_rebuild_from_its_base(self):
         shas = self.branches()
         on_a = lambda folders: next(label for label, folder in folders.items() if (folder / "feat-a.txt").exists())
