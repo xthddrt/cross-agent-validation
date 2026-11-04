@@ -21,7 +21,10 @@ def kill_tree(pid):
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, creationflags=NO_WINDOW)
     else:
-        os.killpg(os.getpgid(pid), signal.SIGTERM)
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
+        except ProcessLookupError:  # already gone, as taskkill would report
+            pass
 
 
 def git(*args, cwd=None, check=True, env=None):
